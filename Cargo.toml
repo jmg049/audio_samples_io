@@ -1,0 +1,53 @@
+[package]
+name = "audio_samples_io"
+version = "0.1.0"
+edition = "2024"
+authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+description = "A Rust library for audio input and output operations."
+repository = "https://github.com/jmg049/audio_io"
+homepage = "https://jmg049.github.io/audio_io"
+documentation = "https://docs.rs/audio_samples_io"
+keywords = ["audio", "io"]
+categories = ["encoding", "multimedia", "science"]
+
+[dependencies]
+audio_samples = { version = "0.10.1" }
+colored = { version = "3.0.0", optional = true }
+memmap2 = "0.9.9"
+thiserror = "2.0.17"
+bytemuck = "1.24.0"
+ndarray = "0.17.1"
+chrono = { version = "0.4.42", features = ["serde"], optional = true }
+sysinfo = { version = "0.37.2", optional = true }
+serde = { version = "1.0.228", features = ["derive"], optional = true }
+serde_json = { version = "1.0.145", optional = true }
+walkdir = { version = "2.5.0", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.8.1", features = ["html_reports"] }
+hound = "3.5.0"
+
+[features]
+default = ["wav"]
+colored = ["dep:colored"]
+simd = ["audio_samples/simd"]
+benchmark_reporting = [
+    "dep:chrono",
+    "dep:sysinfo",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:walkdir",
+]
+
+wav = []
+flac = []
+
+[[bench]]
+name = "wav_rw"
+harness = false
+
+[[bin]]
+name = "benchmark_reporter"
+path = "src/bin/benchmark_reporter.rs"
