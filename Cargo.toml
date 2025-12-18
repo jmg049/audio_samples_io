@@ -11,7 +11,7 @@ homepage = "https://jmg049.github.io/audio_io"
 documentation = "https://docs.rs/audio_samples_io"
 keywords = ["audio", "io"]
 categories = ["encoding", "multimedia", "science"]
-exclude = ["/examples/*", "/tests/*", "/target/*", "/benches/*"]
+exclude = ["/examples/*", "/tests/*", "/target/*", "/benches/*", "*.wav", "*.flac"]
 
 [dependencies]
 audio_samples = { version = "0.10.1" }
