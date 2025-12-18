@@ -11,7 +11,7 @@
 
 Rust crate providing audio file I/O utilities and helpers.
 
-`audio_samples_io` is the IO extension of the [audio_samples](https://github.com/crates.io/crates/audio_samples) crate.
+`audio_samples_io` is the IO extension of the [audio_samples](https://crates.io/crates/audio_samples) crate.
 `audio_samples_io` builds on top of the representations provided by `audio_samples` to provide the functionality necessary for reading, writing and investigating audio files.
 
 ## NOTE: Still under development
