@@ -1,6 +1,6 @@
 [package]
 name = "audio_samples_io"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
 license = "MIT"
@@ -14,7 +14,7 @@ categories = ["encoding", "multimedia", "science"]
 exclude = ["/examples/*", "/tests/*", "/target/*", "/benches/*", "*.wav", "*.flac"]
 
 [dependencies]
-audio_samples = { version = "0.10.1" }
+audio_samples = { version = "0.10.5" }
 colored = { version = "3.0.0", optional = true }
 memmap2 = "0.9.9"
 thiserror = "2.0.17"
