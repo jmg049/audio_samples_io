@@ -3,8 +3,7 @@ use std::{
     time::Duration,
 };
 
-use audio_io::{
-    self,
+use audio_samples_io::{
     traits::{AudioFile, AudioFileRead},
     types::OpenOptions,
     wav::wav_file::WavFile,
@@ -77,7 +76,7 @@ fn bench_read_case_with_hound<T>(
     let scenario = prepare_read_scenario::<T>(sample_rate, channels);
     let label = case_label(sample_rate, channels);
 
-    bench_audio_io_read::<T>(group, &scenario, &label);
+    bench_audio_samples_io_read::<T>(group, &scenario, &label);
     if channels <= 2 {
         bench_hound_read_impl::<T>(group, &scenario, &label);
     }
@@ -97,7 +96,7 @@ fn bench_read_case_audio_only<T>(
 {
     let scenario = prepare_read_scenario::<T>(sample_rate, channels);
     let label = case_label(sample_rate, channels);
-    bench_audio_io_read::<T>(group, &scenario, &label);
+    bench_audio_samples_io_read::<T>(group, &scenario, &label);
 }
 
 fn bench_write_case_with_hound<T>(
@@ -116,7 +115,7 @@ fn bench_write_case_with_hound<T>(
     let payload_bytes = data_payload_bytes(audio.as_ref());
     let label = case_label(sample_rate, channels);
 
-    bench_audio_io_write(group, Arc::clone(&audio), payload_bytes, &label);
+    bench_audio_samples_io_write(group, Arc::clone(&audio), payload_bytes, &label);
     if channels <= 2 {
         let interleaved = Arc::new(audio.to_interleaved_vec());
         bench_hound_write_impl::<T>(
@@ -145,7 +144,7 @@ fn bench_write_case_audio_only<T>(
     let audio = Arc::new(generate_audio::<T>(sample_rate, channels));
     let payload_bytes = data_payload_bytes(audio.as_ref());
     let label = case_label(sample_rate, channels);
-    bench_audio_io_write(group, audio, payload_bytes, &label);
+    bench_audio_samples_io_write(group, audio, payload_bytes, &label);
 }
 
 fn configure_group(group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>) {
@@ -165,12 +164,12 @@ where
 {
     let audio = generate_audio::<T>(sample_rate, channels);
     let path = asset_path::<T>(sample_rate, channels);
-    audio_io::write(&path, &audio).expect("failed to create wav asset");
+    audio_samples_io::write(&path, &audio).expect("failed to create wav asset");
     let bytes = fs::metadata(&path).expect("asset metadata").len();
     ReadScenario { path, bytes }
 }
 
-fn bench_audio_io_read<T>(
+fn bench_audio_samples_io_read<T>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     scenario: &ReadScenario,
     case_label: &str,
@@ -224,7 +223,7 @@ fn bench_hound_read_impl<T>(
     });
 }
 
-fn bench_audio_io_write<T>(
+fn bench_audio_samples_io_write<T>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     audio: Arc<AudioSamples<'static, T>>,
     payload_bytes: u64,
@@ -246,7 +245,7 @@ fn bench_audio_io_write<T>(
         b.iter_batched(
             || Cursor::new(Vec::with_capacity(capacity)),
             move |writer| {
-                audio_io::write_with(writer, samples.as_ref(), audio_io::types::FileType::WAV)
+                audio_samples_io::write_with(writer, samples.as_ref(), audio_samples_io::types::FileType::WAV)
                     .expect("write wav");
             },
             BatchSize::SmallInput,
