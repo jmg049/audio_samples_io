@@ -24,7 +24,7 @@ if [ -f "benchmark_report.md" ]; then
     echo "Report saved to: benchmark_report.md"
     echo ""
     echo "Quick Summary:"
-    grep -A 5 "audio_io wins" benchmark_report.md || echo "No summary found"
+    grep -A 5 "audio_samples_io wins" benchmark_report.md || echo "No summary found"
     echo ""
     echo "To view the full report:"
     echo "   b/cat benchmark_report.md"

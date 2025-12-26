@@ -24,12 +24,12 @@
 //! # Example
 //!
 //! ```no_run
-//! use audio_io::flac::FlacFile;
-//! use audio_io::traits::{AudioFile, AudioFileRead};
+//! use audio_samples_io::flac::FlacFile;
+//! use audio_samples_io::traits::{AudioFile, AudioFileRead};
 //!
 //! let flac = FlacFile::open("audio.flac")?;
 //! let samples = flac.read::<f32>()?;
-//! # Ok::<(), audio_io::error::AudioIOError>(())
+//! # Ok::<(), audio_samples_io::error::AudioIOError>(())
 //! ```
 
 pub mod crc;

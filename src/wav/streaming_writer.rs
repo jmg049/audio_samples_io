@@ -41,8 +41,8 @@ use crate::{
 /// [`finalize()`](AudioStreamWriter::finalize) when done writing:
 ///
 /// ```no_run
-/// use audio_io::wav::StreamedWavWriter;
-/// use audio_io::traits::AudioStreamWriter;
+/// use audio_samples_io::wav::StreamedWavWriter;
+/// use audio_samples_io::traits::AudioStreamWriter;
 /// use std::fs::File;
 /// use std::io::BufWriter;
 ///
@@ -52,7 +52,7 @@ use crate::{
 /// // Write audio frames...
 ///
 /// writer.finalize()?; // Updates headers with final sizes
-/// # Ok::<(), audio_io::error::AudioIOError>(())
+/// # Ok::<(), audio_samples_io::error::AudioIOError>(())
 /// ```
 #[derive(Debug)]
 pub struct StreamedWavWriter<W: Write + Seek> {

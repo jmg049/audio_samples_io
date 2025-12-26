@@ -133,9 +133,9 @@ mod benchmark_report {
     }
 
     fn parse_benchmark_name(group_id: &str) -> (String, String, String) {
-        // Handle audio_io vs hound parsing differently
+        // Handle audio_samples_io vs hound parsing differently
         if let Some(rest) = group_id.strip_prefix("audio-") {
-            // Remove "audio_io_"
+            // Remove "audio_samples_io_"
             let parts: Vec<&str> = rest.split('_').collect();
 
             if parts.len() >= 2 {
@@ -147,7 +147,7 @@ mod benchmark_report {
                     format = "i24".to_string();
                 }
 
-                ("audio_io".to_string(), operation, format)
+                ("audio_samples_io".to_string(), operation, format)
             } else {
                 (
                     group_id.to_string(),
@@ -207,7 +207,7 @@ mod benchmark_report {
                 .get(1)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            ("audio_io".to_string(), fmt)
+            ("audio_samples_io".to_string(), fmt)
         } else if fid_lc.starts_with("hound-") || fid_lc.starts_with("hound_") {
             let parts: Vec<&str> = fid.split(|c| c == '-' || c == '_').collect();
             let fmt = parts
@@ -437,8 +437,8 @@ mod benchmark_report {
         }
     }
 
-    fn calculate_performance_ratio(audio_io_time: f64, hound_time: f64) -> f64 {
-        hound_time / audio_io_time
+    fn calculate_performance_ratio(audio_samples_io_time: f64, hound_time: f64) -> f64 {
+        hound_time / audio_samples_io_time
     }
 
     fn format_bytes(bytes: u64) -> String {
@@ -620,24 +620,24 @@ mod benchmark_report {
 
         // Summary table
         report.push_str("## Executive Summary\n\n");
-        report.push_str("| Operation | Format | Duration | audio_io | hound | Ratio* |\n");
+        report.push_str("| Operation | Format | Duration | audio_samples_io | hound | Ratio* |\n");
         report.push_str("|-----------|--------|----------|----------|-------|--------|\n");
 
         for (operation, formats) in &grouped {
             for (format, durations) in formats {
                 for (duration, results_for_duration) in durations {
-                    let audio_io = results_for_duration
+                    let audio_samples_io = results_for_duration
                         .iter()
-                        .find(|r| r.library == "audio_io");
+                        .find(|r| r.library == "audio_samples_io");
                     let hound = results_for_duration.iter().find(|r| r.library == "hound");
 
-                    if let Some(audio_io_result) = audio_io {
-                        let audio_io_time = format_time(audio_io_result.mean_time_ns);
+                    if let Some(audio_samples_io_result) = audio_samples_io {
+                        let audio_samples_io_time = format_time(audio_samples_io_result.mean_time_ns);
 
                         if let Some(hound_result) = hound {
                             let hound_time = format_time(hound_result.mean_time_ns);
                             let ratio = calculate_performance_ratio(
-                                audio_io_result.mean_time_ns,
+                                audio_samples_io_result.mean_time_ns,
                                 hound_result.mean_time_ns,
                             );
                             let ratio_str = if ratio > 1.0 {
@@ -647,12 +647,12 @@ mod benchmark_report {
                             };
                             report.push_str(&format!(
                                 "| {} | {} | {} | {} | {} | {} |\n",
-                                operation, format, duration, audio_io_time, hound_time, ratio_str
+                                operation, format, duration, audio_samples_io_time, hound_time, ratio_str
                             ));
                         } else {
                             report.push_str(&format!(
-                                "| {} | {} | {} | {} | N/A | audio_io only |\n",
-                                operation, format, duration, audio_io_time
+                                "| {} | {} | {} | {} | N/A | audio_samples_io only |\n",
+                                operation, format, duration, audio_samples_io_time
                             ));
                         }
                     }
@@ -660,7 +660,7 @@ mod benchmark_report {
             }
         }
 
-        report.push_str("\n*Ratio > 1.0 means audio_io is faster\n\n");
+        report.push_str("\n*Ratio > 1.0 means audio_samples_io is faster\n\n");
 
         // Detailed results by operation
         for (operation, formats) in &grouped {
@@ -710,7 +710,7 @@ mod benchmark_report {
         report.push_str("## Performance Analysis\n\n");
 
         // Calculate averages and best/worst cases
-        let mut audio_io_faster_count = 0;
+        let mut audio_samples_io_faster_count = 0;
         let mut total_comparisons = 0;
         let mut best_ratio = 1.0;
         let mut worst_ratio = 1.0;
@@ -718,20 +718,20 @@ mod benchmark_report {
         for formats in grouped.values() {
             for durations in formats.values() {
                 for results_for_duration in durations.values() {
-                    let audio_io = results_for_duration
+                    let audio_samples_io = results_for_duration
                         .iter()
-                        .find(|r| r.library == "audio_io");
+                        .find(|r| r.library == "audio_samples_io");
                     let hound = results_for_duration.iter().find(|r| r.library == "hound");
 
-                    if let (Some(audio_io_result), Some(hound_result)) = (audio_io, hound) {
+                    if let (Some(audio_samples_io_result), Some(hound_result)) = (audio_samples_io, hound) {
                         total_comparisons += 1;
                         let ratio = calculate_performance_ratio(
-                            audio_io_result.mean_time_ns,
+                            audio_samples_io_result.mean_time_ns,
                             hound_result.mean_time_ns,
                         );
 
                         if ratio > 1.0 {
-                            audio_io_faster_count += 1;
+                            audio_samples_io_faster_count += 1;
                         }
 
                         if ratio > best_ratio {
@@ -748,10 +748,10 @@ mod benchmark_report {
 
         if total_comparisons > 0 {
             let faster_percentage =
-                (audio_io_faster_count as f64 / total_comparisons as f64) * 100.0;
+                (audio_samples_io_faster_count as f64 / total_comparisons as f64) * 100.0;
             report.push_str(&format!(
-                "- **audio_io wins**: {:.1}% of comparable tests ({}/{})\n",
-                faster_percentage, audio_io_faster_count, total_comparisons
+                "- **audio_samples_io wins**: {:.1}% of comparable tests ({}/{})\n",
+                faster_percentage, audio_samples_io_faster_count, total_comparisons
             ));
             report.push_str(&format!(
                 "- **Best performance**: {:.2}x faster than hound\n",
@@ -764,7 +764,7 @@ mod benchmark_report {
         }
 
         report.push_str("\n### Key Observations\n\n");
-        report.push_str("- **I24 and F64 formats**: Only supported by audio_io\n");
+        report.push_str("- **I24 and F64 formats**: Only supported by audio_samples_io\n");
         report.push_str(
             "- **Duration scaling**: Performance characteristics across different file sizes\n",
         );
@@ -790,7 +790,7 @@ mod benchmark_report {
 
         if results.is_empty() {
             eprintln!("No benchmark results found. Please run the benchmarks first with:");
-            eprintln!("cargo bench --bench audio_io_vs_hound");
+            eprintln!("cargo bench --bench audio_samples_io_vs_hound");
             return Ok(());
         }
 
@@ -834,10 +834,10 @@ mod benchmark_report {
         fs::write("benchmark_results.csv", csv_rows)?;
         println!("CSV written to benchmark_results.csv");
 
-        // Executive summary CSV (operation,format,duration,audio_io_mean_ns,hound_mean_ns,ratio_str)
+        // Executive summary CSV (operation,format,duration,audio_samples_io_mean_ns,hound_mean_ns,ratio_str)
         let mut summary_rows = String::new();
         // Executive summary CSV (times in microseconds)
-        summary_rows.push_str("operation,format,duration,audio_io_mean_us,hound_mean_us,ratio\n");
+        summary_rows.push_str("operation,format,duration,audio_samples_io_mean_us,hound_mean_us,ratio\n");
 
         // Group results by operation/format/duration like generate_report
         use std::collections::BTreeMap as Map;
@@ -856,14 +856,14 @@ mod benchmark_report {
         for (operation, formats) in &grouped {
             for (format, durations) in formats {
                 for (duration, results_for_duration) in durations {
-                    let audio_io = results_for_duration
+                    let audio_samples_io = results_for_duration
                         .iter()
-                        .find(|r| r.library == "audio_io");
+                        .find(|r| r.library == "audio_samples_io");
                     let hound = results_for_duration.iter().find(|r| r.library == "hound");
 
-                    if let Some(audio_io_result) = audio_io {
+                    if let Some(audio_samples_io_result) = audio_samples_io {
                         // convert ns -> us for CSV summary
-                        let audio_us = audio_io_result.mean_time_ns / 1_000.0;
+                        let audio_us = audio_samples_io_result.mean_time_ns / 1_000.0;
                         if let Some(hound_result) = hound {
                             let hound_us = hound_result.mean_time_ns / 1_000.0;
                             let ratio = if audio_us > 0.0 {

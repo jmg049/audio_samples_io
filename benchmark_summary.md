@@ -1,6 +1,6 @@
-# `audio_io` Read and Write Benchmarks
+# `audio_samples_io` Read and Write Benchmarks
 
-This document reports a set of comparative benchmarks evaluating audio read and write performance across three audio libraries: `audio_io`, `hound`, and `libsndfile`.
+This document reports a set of comparative benchmarks evaluating audio read and write performance across three audio libraries: `audio_samples_io`, `hound`, and `libsndfile`.
 
 All benchmarks were executed on the same machine under identical conditions (as close as possible for libsndfile). Each benchmark processes **0.25 seconds of audio**, and all timings are reported in **microseconds (μs)**. For each configuration, the fastest implementation is highlighted in **bold**. Lower values indicate better performance.
 
@@ -8,7 +8,7 @@ All benchmarks were executed on the same machine under identical conditions (as 
 
 ### i16
 
-| **Sample Rate** | **Num Channels** | **audio_io** | **hound** | **libsndfile** |
+| **Sample Rate** | **Num Channels** | **audio_samples_io** | **hound** | **libsndfile** |
 | :-------------- | :--------------- | -----------: | --------: | -------------: |
 | 44100           | 1                |     **1.82** |     55.50 |           5.22 |
 | 44100           | 2                |         8.13 |    111.44 |       **5.67** |
@@ -19,7 +19,7 @@ All benchmarks were executed on the same machine under identical conditions (as 
 
 ### i24
 
-| **Sample Rate** | **Num Channels** | **audio_io** | **hound** | **libsndfile** |
+| **Sample Rate** | **Num Channels** | **audio_samples_io** | **hound** | **libsndfile** |
 | :-------------- | :--------------- | -----------: | --------: | -------------: |
 | 44100           | 1                |     **3.57** |         - |          10.28 |
 | 44100           | 2                |    **12.91** |         - |          15.99 |
@@ -30,7 +30,7 @@ All benchmarks were executed on the same machine under identical conditions (as 
 
 ### i32
 
-| **Sample Rate** | **Num Channels** | **audio_io** | **hound** | **libsndfile** |
+| **Sample Rate** | **Num Channels** | **audio_samples_io** | **hound** | **libsndfile** |
 | :-------------- | :--------------- | -----------: | --------: | -------------: |
 | 44100           | 1                |     **2.72** |     45.43 |           5.80 |
 | 44100           | 2                |        12.17 |     90.64 |       **6.50** |
@@ -41,7 +41,7 @@ All benchmarks were executed on the same machine under identical conditions (as 
 
 ### f32
 
-| **Sample Rate** | **Num Channels** | **audio_io** | **hound** | **libsndfile** |
+| **Sample Rate** | **Num Channels** | **audio_samples_io** | **hound** | **libsndfile** |
 | :-------------- | :--------------- | -----------: | --------: | -------------: |
 | 44100           | 1                |     **2.79** |     35.30 |           7.89 |
 | 44100           | 2                |        10.29 |     70.14 |       **9.27** |
@@ -52,7 +52,7 @@ All benchmarks were executed on the same machine under identical conditions (as 
 
 ### f64
 
-| **Sample Rate** | **Num Channels** | **audio_io** | **hound** | **libsndfile** |
+| **Sample Rate** | **Num Channels** | **audio_samples_io** | **hound** | **libsndfile** |
 | :-------------- | :--------------- | -----------: | --------: | -------------: |
 | 44100           | 1                |     **5.40** |         - |           8.71 |
 | 44100           | 2                |        17.29 |         - |      **11.29** |
@@ -65,7 +65,7 @@ All benchmarks were executed on the same machine under identical conditions (as 
 
 ### i16
 
-| **Sample Rate** | **Num Channels** | **audio_io** | **hound** | **libsndfile** |
+| **Sample Rate** | **Num Channels** | **audio_samples_io** | **hound** | **libsndfile** |
 | :-------------- | :--------------- | -----------: | --------: | -------------: |
 | 44100           | 1                |         4.82 |     17.61 |       **0.67** |
 | 44100           | 2                |        18.08 |     35.42 |       **1.05** |
@@ -76,7 +76,7 @@ All benchmarks were executed on the same machine under identical conditions (as 
 
 ### i24
 
-| **Sample Rate** | **Num Channels** | **audio_io** | **hound** | **libsndfile** |
+| **Sample Rate** | **Num Channels** | **audio_samples_io** | **hound** | **libsndfile** |
 | :-------------- | :--------------- | -----------: | --------: | -------------: |
 | 44100           | 1                |        12.36 |         - |       **4.57** |
 | 44100           | 2                |        28.87 |         - |       **8.97** |
@@ -87,7 +87,7 @@ All benchmarks were executed on the same machine under identical conditions (as 
 
 ### i32
 
-| **Sample Rate** | **Num Channels** | **audio_io** | **hound** | **libsndfile** |
+| **Sample Rate** | **Num Channels** | **audio_samples_io** | **hound** | **libsndfile** |
 | :-------------- | :--------------- | -----------: | --------: | -------------: |
 | 44100           | 1                |         9.78 |     22.84 |       **1.05** |
 | 44100           | 2                |        30.19 |     46.18 |       **1.68** |
@@ -98,7 +98,7 @@ All benchmarks were executed on the same machine under identical conditions (as 
 
 ### f32
 
-| **Sample Rate** | **Num Channels** | **audio_io** | **hound** | **libsndfile** |
+| **Sample Rate** | **Num Channels** | **audio_samples_io** | **hound** | **libsndfile** |
 | :-------------- | :--------------- | -----------: | --------: | -------------: |
 | 44100           | 1                |         9.84 |     20.59 |       **9.34** |
 | 44100           | 2                |        30.28 |     41.99 |      **18.54** |
@@ -109,7 +109,7 @@ All benchmarks were executed on the same machine under identical conditions (as 
 
 ### f64
 
-| **Sample Rate** | **Num Channels** | **audio_io** | **hound** | **libsndfile** |
+| **Sample Rate** | **Num Channels** | **audio_samples_io** | **hound** | **libsndfile** |
 | :-------------- | :--------------- | -----------: | --------: | -------------: |
 | 44100           | 1                |        20.05 |         - |       **5.15** |
 | 44100           | 2                |        54.38 |         - |       **9.58** |

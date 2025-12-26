@@ -91,7 +91,7 @@ pub trait AudioFile {
 ///
 /// ## Why not just implement std::io::Read?
 ///
-/// The standard library's `Read` trait is designed for reading raw bytes, which while close to the use case of audio_io,
+/// The standard library's `Read` trait is designed for reading raw bytes, which while close to the use case of audio_samples_io,
 /// does not directly map to reading audio samples of various types and formats, hence the need for a more specific implementation
 ///
 /// ## Generic Constraints
@@ -153,7 +153,7 @@ pub trait SupportsSampleTypes<const N: usize>: AudioFile {
 /// # Example
 ///
 /// ```no_run
-/// use audio_io::traits::AudioStreamReader;
+/// use audio_samples_io::traits::AudioStreamReader;
 ///
 /// fn process_stream(stream: &mut dyn AudioStreamReader) {
 ///     println!("Position: {}/{}", stream.current_frame(), stream.total_frames());
@@ -204,7 +204,7 @@ pub trait AudioStreamReader {
 /// # Example
 ///
 /// ```no_run
-/// use audio_io::traits::{AudioStreamRead, AudioStreamReader, AudioFileMetadata};
+/// use audio_samples_io::traits::{AudioStreamRead, AudioStreamReader, AudioFileMetadata};
 /// use audio_samples::AudioSamples;
 /// use std::num::NonZeroU32;
 ///
@@ -272,9 +272,9 @@ pub trait AudioStreamRead: AudioStreamReader + AudioFileMetadata {
 /// # Example
 ///
 /// ```no_run
-/// use audio_io::traits::AudioStreamWriter;
+/// use audio_samples_io::traits::AudioStreamWriter;
 ///
-/// fn finish_stream(writer: &mut dyn AudioStreamWriter) -> Result<(), audio_io::error::AudioIOError> {
+/// fn finish_stream(writer: &mut dyn AudioStreamWriter) -> Result<(), audio_samples_io::error::AudioIOError> {
 ///     writer.flush()?;
 ///     writer.finalize()?;
 ///     Ok(())
@@ -332,13 +332,13 @@ pub trait AudioStreamWriter {
 /// # Example
 ///
 /// ```no_run
-/// use audio_io::traits::{AudioStreamWrite, AudioStreamWriter};
+/// use audio_samples_io::traits::{AudioStreamWrite, AudioStreamWriter};
 /// use audio_samples::AudioSamples;
 ///
 /// fn write_audio<W: AudioStreamWrite>(
 ///     writer: &mut W,
 ///     audio: &AudioSamples<f32>,
-/// ) -> Result<(), audio_io::error::AudioIOError> {
+/// ) -> Result<(), audio_samples_io::error::AudioIOError> {
 ///     writer.write_frames(audio)?;
 ///     writer.finalize()?;
 ///     Ok(())

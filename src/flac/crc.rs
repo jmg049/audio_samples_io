@@ -53,7 +53,7 @@ const CRC16_TABLE: [u16; 256] = {
 /// # Example
 ///
 /// ```
-/// use audio_io::flac::crc::Crc8;
+/// use audio_samples_io::flac::crc::Crc8;
 ///
 /// let mut crc = Crc8::new();
 /// crc.update(&[0xFF, 0xF8, 0x69, 0x02]);
@@ -117,7 +117,7 @@ impl Default for Crc8 {
 /// # Example
 ///
 /// ```
-/// use audio_io::flac::crc::Crc16;
+/// use audio_samples_io::flac::crc::Crc16;
 ///
 /// let mut crc = Crc16::new();
 /// crc.update(&frame_bytes);

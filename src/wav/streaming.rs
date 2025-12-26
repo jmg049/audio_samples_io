@@ -38,8 +38,8 @@ use crate::{
 /// # Example
 ///
 /// ```no_run
-/// use audio_io::wav::StreamedWavFile;
-/// use audio_io::traits::AudioFileMetadata;
+/// use audio_samples_io::wav::StreamedWavFile;
+/// use audio_samples_io::traits::AudioFileMetadata;
 /// use audio_samples::AudioSamples;
 /// use std::fs::File;
 /// use std::io::BufReader;
@@ -56,7 +56,7 @@ use crate::{
 ///     let frames_read = streamed.read_frames_into(&mut buffer, 1024)?;
 ///     // Process buffer...
 /// }
-/// # Ok::<(), audio_io::error::AudioIOError>(())
+/// # Ok::<(), audio_samples_io::error::AudioIOError>(())
 /// ```
 #[derive(Debug)]
 pub struct StreamedWavFile<R: ReadSeek> {

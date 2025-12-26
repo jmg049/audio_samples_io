@@ -180,8 +180,8 @@ pub fn read_with<'a, R: ReadSeek, T: AudioSample>(
 /// # Example
 ///
 /// ```no_run
-/// use audio_io::open_streamed;
-/// use audio_io::traits::AudioFileMetadata;
+/// use audio_samples_io::open_streamed;
+/// use audio_samples_io::traits::AudioFileMetadata;
 /// use audio_samples::AudioSamples;
 /// use std::num::NonZeroU32;
 ///
@@ -194,7 +194,7 @@ pub fn read_with<'a, R: ReadSeek, T: AudioSample>(
 ///     let frames = streamed.read_frames_into(&mut buffer, 1024)?;
 ///     // Process frames...
 /// }
-/// # Ok::<(), audio_io::error::AudioIOError>(())
+/// # Ok::<(), audio_samples_io::error::AudioIOError>(())
 /// ```
 #[cfg(feature = "wav")]
 pub fn open_streamed<P: AsRef<Path>>(fp: P) -> AudioIOResult<StreamedWavFile<BufReader<File>>> {
@@ -230,14 +230,14 @@ pub fn open_streamed<P: AsRef<Path>>(fp: P) -> AudioIOResult<StreamedWavFile<Buf
 /// # Example
 ///
 /// ```no_run
-/// use audio_io::open_streamed_reader;
+/// use audio_samples_io::open_streamed_reader;
 /// use std::io::Cursor;
 ///
 /// let wav_bytes: Vec<u8> = load_from_network();
 /// let cursor = Cursor::new(wav_bytes);
 /// let mut streamed = open_streamed_reader(cursor)?;
 /// # fn load_from_network() -> Vec<u8> { vec![] }
-/// # Ok::<(), audio_io::error::AudioIOError>(())
+/// # Ok::<(), audio_samples_io::error::AudioIOError>(())
 /// ```
 #[cfg(feature = "wav")]
 pub fn open_streamed_reader<R: ReadSeek>(reader: R) -> AudioIOResult<wav::StreamedWavFile<R>> {
@@ -257,8 +257,8 @@ pub fn open_streamed_reader<R: ReadSeek>(reader: R) -> AudioIOResult<wav::Stream
 /// # Example
 ///
 /// ```no_run
-/// use audio_io::open_streamed_dyn;
-/// use audio_io::traits::AudioStreamReader;
+/// use audio_samples_io::open_streamed_dyn;
+/// use audio_samples_io::traits::AudioStreamReader;
 ///
 /// fn process_any_stream(mut stream: Box<dyn AudioStreamReader>) {
 ///     println!("Total frames: {}", stream.total_frames());
@@ -267,7 +267,7 @@ pub fn open_streamed_reader<R: ReadSeek>(reader: R) -> AudioIOResult<wav::Stream
 ///
 /// let stream = open_streamed_dyn("audio.wav")?;
 /// process_any_stream(stream);
-/// # Ok::<(), audio_io::error::AudioIOError>(())
+/// # Ok::<(), audio_samples_io::error::AudioIOError>(())
 /// ```
 pub fn open_streamed_dyn<P: AsRef<Path>>(fp: P) -> AudioIOResult<Box<dyn AudioStreamReader>> {
     let path = fp.as_ref();
@@ -309,8 +309,8 @@ pub fn open_streamed_dyn<P: AsRef<Path>>(fp: P) -> AudioIOResult<Box<dyn AudioSt
 /// # Example
 ///
 /// ```no_run
-/// use audio_io::{create_streamed, types::ValidatedSampleType};
-/// use audio_io::traits::{AudioStreamWrite, AudioStreamWriter};
+/// use audio_samples_io::{create_streamed, types::ValidatedSampleType};
+/// use audio_samples_io::traits::{AudioStreamWrite, AudioStreamWriter};
 /// use audio_samples::AudioSamples;
 /// use std::num::NonZeroU32;
 ///
@@ -328,7 +328,7 @@ pub fn open_streamed_dyn<P: AsRef<Path>>(fp: P) -> AudioIOResult<Box<dyn AudioSt
 ///
 /// // Always finalize to update headers
 /// writer.finalize()?;
-/// # Ok::<(), audio_io::error::AudioIOError>(())
+/// # Ok::<(), audio_samples_io::error::AudioIOError>(())
 /// ```
 #[cfg(feature = "wav")]
 pub fn create_streamed<P: AsRef<Path>>(
@@ -384,8 +384,8 @@ pub fn create_streamed<P: AsRef<Path>>(
 /// # Example
 ///
 /// ```no_run
-/// use audio_io::{create_streamed_writer, types::ValidatedSampleType};
-/// use audio_io::traits::{AudioStreamWrite, AudioStreamWriter};
+/// use audio_samples_io::{create_streamed_writer, types::ValidatedSampleType};
+/// use audio_samples_io::traits::{AudioStreamWrite, AudioStreamWriter};
 /// use audio_samples::AudioSamples;
 /// use std::io::Cursor;
 /// use std::num::NonZeroU32;
@@ -404,7 +404,7 @@ pub fn create_streamed<P: AsRef<Path>>(
 /// let audio = AudioSamples::<f32>::zeros_mono(1024, sample_rate);
 /// writer.write_frames(&audio)?;
 /// writer.finalize()?;
-/// # Ok::<(), audio_io::error::AudioIOError>(())
+/// # Ok::<(), audio_samples_io::error::AudioIOError>(())
 /// ```
 #[cfg(feature = "wav")]
 pub fn create_streamed_writer<W: Write + Seek>(
@@ -525,7 +525,7 @@ where
 /// # Example
 ///
 /// ```no_run
-/// use audio_io::{write_with, types::FileType};
+/// use audio_samples_io::{write_with, types::FileType};
 /// use audio_samples::{AudioSamples, sine_wave};
 /// use std::io::Cursor;
 /// use std::time::Duration;
@@ -535,7 +535,7 @@ where
 /// let cursor = Cursor::new(&mut buffer);
 ///
 /// write_with(cursor, &audio, FileType::WAV)?;
-/// # Ok::<(), audio_io::error::AudioIOError>(())
+/// # Ok::<(), audio_samples_io::error::AudioIOError>(())
 /// ```
 pub fn write_with<T: AudioSample, W: Write>(
     writer: W,

@@ -5,8 +5,8 @@
 //! # Example
 //!
 //! ```no_run
-//! use audio_io::format_conversion::convert_to_format;
-//! use audio_io::wav::WavFile;
+//! use audio_samples_io::format_conversion::convert_to_format;
+//! use audio_samples_io::wav::WavFile;
 //!
 //! let wav = WavFile::open("input.wav")?;
 //! let flac = convert_to_format(&wav)?;

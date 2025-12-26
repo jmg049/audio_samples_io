@@ -7,11 +7,11 @@ use core::fmt::{Display, Formatter, Result as FmtResult};
 use std::io;
 use thiserror::Error;
 
-/// Result type for audio_io operations
+/// Result type for audio_samples_io operations
 #[allow(clippy::result_large_err)]
 pub type AudioIOResult<T> = Result<T, AudioIOError>;
 
-/// Comprehensive error type for audio_io operations
+/// Comprehensive error type for audio_samples_io operations
 #[derive(Debug, Error)]
 pub enum AudioIOError {
     /// File I/O errors (file not found, permission denied, etc.)

@@ -992,7 +992,7 @@ mod tests {
     #[test]
     fn test_vorbis_comment_roundtrip() {
         let mut comment = VorbisComment {
-            vendor: "audio_io/0.1.0".to_string(),
+            vendor: "audio_samples_io/0.1.0".to_string(),
             comments: HashMap::new(),
         };
         comment.set("TITLE", "Test Song");
