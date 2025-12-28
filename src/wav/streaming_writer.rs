@@ -502,7 +502,7 @@ mod tests {
                 StreamedWavWriter::new_f32(cursor, 2, 44100).expect("Failed to create writer");
 
             // Create test audio
-            let sample_rate = NonZeroU32::new(44100).unwrap();
+            let sample_rate = NonZeroU32::new(44100).expect("Invalid sample rate");
             let samples = AudioSamples::<f32>::zeros_multi(2, 1024, sample_rate);
 
             let frames = writer.write_frames(&samples).expect("Write failed");
@@ -528,7 +528,7 @@ mod tests {
             StreamedWavWriter::new_i16(cursor, 1, 22050).expect("Failed to create writer");
 
         // Write multiple chunks
-        let sample_rate = NonZeroU32::new(22050).unwrap();
+        let sample_rate = NonZeroU32::new(22050).expect("Invalid sample rate");
         let chunk1 = AudioSamples::<f32>::zeros_mono(512, sample_rate);
         let chunk2 = AudioSamples::<f32>::zeros_mono(512, sample_rate);
 
@@ -563,7 +563,7 @@ mod tests {
             StreamedWavWriter::new_f32(cursor, 2, 44100).expect("Failed to create writer");
 
         // Try to write mono audio to stereo writer
-        let sample_rate = NonZeroU32::new(44100).unwrap();
+        let sample_rate = NonZeroU32::new(44100).expect("Invalid sample rate");
         let mono_samples = AudioSamples::<f32>::zeros_mono(1024, sample_rate);
         let result = writer.write_frames(&mono_samples);
 
@@ -580,7 +580,7 @@ mod tests {
 
         writer.finalize().expect("Finalize failed");
 
-        let sample_rate = NonZeroU32::new(44100).unwrap();
+        let sample_rate = NonZeroU32::new(44100).expect("Invalid sample rate");
         let samples = AudioSamples::<f32>::zeros_mono(1024, sample_rate);
         let result = writer.write_frames(&samples);
 

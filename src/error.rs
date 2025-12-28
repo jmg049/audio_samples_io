@@ -64,7 +64,7 @@ impl ErrorPosition {
     pub fn new(offset: usize) -> Self {
         Self {
             offset,
-            description: format!("byte offset {}", offset),
+            description: format!("byte offset {offset}"),
         }
     }
 

@@ -142,7 +142,7 @@ impl Display for FormatCode {
             }
         } else {
             match self {
-                FormatCode::Unknown(code) => write!(f, "UNKNOWN(0x{:04X})", code),
+                FormatCode::Unknown(code) => write!(f, "UNKNOWN(0x{code:04X})"),
                 other => write!(f, "{}", other.as_str()),
             }
         }

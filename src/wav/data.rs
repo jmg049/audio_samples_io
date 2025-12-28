@@ -185,7 +185,9 @@ mod tests {
     fn test_data_chunk_rejects_unaligned_i16() {
         let data = [0u8; 1];
         let chunk = DataChunk::from_bytes(&data);
-        let err = chunk.read_samples::<i16, i16>().unwrap_err();
+        let err = chunk
+            .read_samples::<i16, i16>()
+            .expect_err("Expected unaligned read to fail");
         let msg = err.to_string();
         assert!(msg.contains("Data size not aligned to sample boundaries"));
     }
@@ -194,7 +196,9 @@ mod tests {
     fn test_data_chunk_rejects_unaligned_i24() {
         let data = [0u8; 4]; // not a multiple of 3
         let chunk = DataChunk::from_bytes(&data);
-        let err = chunk.read_samples::<I24, I24>().unwrap_err();
+        let err = chunk
+            .read_samples::<I24, I24>()
+            .expect_err("Expected unaligned read to fail");
         let msg = err.to_string();
         assert!(msg.contains("Data size not aligned to 24-bit samples"));
     }
@@ -203,7 +207,9 @@ mod tests {
     fn test_data_chunk_rejects_unaligned_f64() {
         let data = [0u8; 10]; // not a multiple of 8
         let chunk = DataChunk::from_bytes(&data);
-        let err = chunk.read_samples::<f64, f64>().unwrap_err();
+        let err = chunk
+            .read_samples::<f64, f64>()
+            .expect_err("Expected unaligned read to fail");
         let msg = err.to_string();
         assert!(msg.contains("Data size not aligned to 64-bit samples"));
     }

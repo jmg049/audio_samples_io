@@ -138,10 +138,6 @@ pub trait SupportsSampleTypes<const N: usize>: AudioFile {
     }
 }
 
-// ============================================================================
-// STREAMING TRAITS
-// ============================================================================
-
 /// Base trait for streaming audio readers (object-safe).
 ///
 /// This trait provides non-generic methods for position tracking and seeking,
@@ -155,10 +151,11 @@ pub trait SupportsSampleTypes<const N: usize>: AudioFile {
 /// ```no_run
 /// use audio_samples_io::traits::AudioStreamReader;
 ///
-/// fn process_stream(stream: &mut dyn AudioStreamReader) {
+/// fn process_stream(stream: &mut dyn AudioStreamReader) -> Result<(), Box<dyn std::error::Error>> {
 ///     println!("Position: {}/{}", stream.current_frame(), stream.total_frames());
-///     stream.seek_to_frame(1000).unwrap();
-///     stream.reset().unwrap();
+///     stream.seek_to_frame(1000)?;
+///     stream.reset()?;
+///     Ok(())
 /// }
 /// ```
 pub trait AudioStreamReader {
@@ -208,15 +205,16 @@ pub trait AudioStreamReader {
 /// use audio_samples::AudioSamples;
 /// use std::num::NonZeroU32;
 ///
-/// fn read_all<S: AudioStreamRead + AudioFileMetadata>(stream: &mut S) {
+/// fn read_all<S: AudioStreamRead + AudioFileMetadata>(stream: &mut S) -> Result<(), Box<dyn std::error::Error>> {
 ///     let channels = stream.num_channels() as usize;
-///     let sample_rate = NonZeroU32::new(stream.sample_rate()).unwrap();
+///     let sample_rate = NonZeroU32::new(stream.sample_rate()).ok_or("sample_rate must be non-zero")?;
 ///     let mut buffer = AudioSamples::<f32>::zeros_multi(channels, 1024, sample_rate);
 ///     
 ///     while stream.remaining_frames() > 0 {
-///         let frames = stream.read_frames_into(&mut buffer, 1024).unwrap();
+///         let frames = stream.read_frames_into(&mut buffer, 1024)?;
 ///         // Process frames...
 ///     }
+///     Ok(())
 /// }
 /// ```
 pub trait AudioStreamRead: AudioStreamReader + AudioFileMetadata {

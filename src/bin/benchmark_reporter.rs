@@ -632,7 +632,8 @@ mod benchmark_report {
                     let hound = results_for_duration.iter().find(|r| r.library == "hound");
 
                     if let Some(audio_samples_io_result) = audio_samples_io {
-                        let audio_samples_io_time = format_time(audio_samples_io_result.mean_time_ns);
+                        let audio_samples_io_time =
+                            format_time(audio_samples_io_result.mean_time_ns);
 
                         if let Some(hound_result) = hound {
                             let hound_time = format_time(hound_result.mean_time_ns);
@@ -647,7 +648,12 @@ mod benchmark_report {
                             };
                             report.push_str(&format!(
                                 "| {} | {} | {} | {} | {} | {} |\n",
-                                operation, format, duration, audio_samples_io_time, hound_time, ratio_str
+                                operation,
+                                format,
+                                duration,
+                                audio_samples_io_time,
+                                hound_time,
+                                ratio_str
                             ));
                         } else {
                             report.push_str(&format!(
@@ -723,7 +729,9 @@ mod benchmark_report {
                         .find(|r| r.library == "audio_samples_io");
                     let hound = results_for_duration.iter().find(|r| r.library == "hound");
 
-                    if let (Some(audio_samples_io_result), Some(hound_result)) = (audio_samples_io, hound) {
+                    if let (Some(audio_samples_io_result), Some(hound_result)) =
+                        (audio_samples_io, hound)
+                    {
                         total_comparisons += 1;
                         let ratio = calculate_performance_ratio(
                             audio_samples_io_result.mean_time_ns,
@@ -837,7 +845,8 @@ mod benchmark_report {
         // Executive summary CSV (operation,format,duration,audio_samples_io_mean_ns,hound_mean_ns,ratio_str)
         let mut summary_rows = String::new();
         // Executive summary CSV (times in microseconds)
-        summary_rows.push_str("operation,format,duration,audio_samples_io_mean_us,hound_mean_us,ratio\n");
+        summary_rows
+            .push_str("operation,format,duration,audio_samples_io_mean_us,hound_mean_us,ratio\n");
 
         // Group results by operation/format/duration like generate_report
         use std::collections::BTreeMap as Map;

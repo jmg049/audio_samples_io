@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use audio_samples_io::error::AudioIOResult;
 use audio_samples::{AudioSamples, sine_wave};
+use audio_samples_io::error::AudioIOResult;
 
 pub fn main() -> AudioIOResult<()> {
     // create and write a basic signal and read it back
@@ -13,7 +13,7 @@ pub fn main() -> AudioIOResult<()> {
         sine_wave, read_sine_wave,
         "Written and read sine waves are not equal!"
     );
-    println!("{:#}", read_sine_wave);
+    println!("{read_sine_wave:#}");
     println!("Duration: {:.1}s", read_sine_wave.duration_seconds::<f32>());
     Ok(())
 }

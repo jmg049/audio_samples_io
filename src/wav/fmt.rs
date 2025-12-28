@@ -298,8 +298,7 @@ impl<'a> FmtChunk<'a> {
         // Check bits per sample is byte-aligned
         if !bits_per_sample.is_multiple_of(8) {
             return Err(WavError::invalid_format(&format!(
-                "Bits per sample {} is not byte-aligned",
-                bits_per_sample
+                "Bits per sample {bits_per_sample} is not byte-aligned"
             )));
         }
 
@@ -309,8 +308,7 @@ impl<'a> FmtChunk<'a> {
         let expected_block_align = channels * bytes_per_sample;
         if block_align != expected_block_align {
             return Err(WavError::invalid_format(&format!(
-                "Block align {} does not match expected {} (channels {} * bytes_per_sample {})",
-                block_align, expected_block_align, channels, bytes_per_sample
+                "Block align {block_align} does not match expected {expected_block_align} (channels {channels} * bytes_per_sample {bytes_per_sample})"
             )));
         }
 
@@ -318,28 +316,24 @@ impl<'a> FmtChunk<'a> {
         let expected_byte_rate = sample_rate * block_align as u32;
         if byte_rate != expected_byte_rate {
             return Err(WavError::invalid_format(&format!(
-                "Byte rate {} does not match expected {} (sample_rate {} * block_align {})",
-                byte_rate, expected_byte_rate, sample_rate, block_align
+                "Byte rate {byte_rate} does not match expected {expected_byte_rate} (sample_rate {sample_rate} * block_align {block_align})"
             )));
         }
 
         // Check reasonable ranges
         if channels > 256 {
             return Err(WavError::invalid_format(&format!(
-                "Too many channels: {} (maximum 256)",
-                channels
+                "Too many channels: {channels} (maximum 256)"
             )));
         }
         if sample_rate > 384000 {
             return Err(WavError::invalid_format(&format!(
-                "Sample rate too high: {} Hz (maximum 384000)",
-                sample_rate
+                "Sample rate too high: {sample_rate} Hz (maximum 384000)"
             )));
         }
         if bits_per_sample > 64 {
             return Err(WavError::invalid_format(&format!(
-                "Bits per sample too high: {} (maximum 64)",
-                bits_per_sample
+                "Bits per sample too high: {bits_per_sample} (maximum 64)"
             )));
         }
 
@@ -359,8 +353,7 @@ impl Display for FmtChunk<'_> {
             self.fmt_chunk();
         write!(
             f,
-            "FmtChunk {{ format: {:?}, channels: {}, sample_rate: {}, byte_rate: {}, block_align: {}, bits_per_sample: {} }}",
-            format, channels, sample_rate, byte_rate, block_align, bits_per_sample
+            "FmtChunk {{ format: {format:?}, channels: {channels}, sample_rate: {sample_rate}, byte_rate: {byte_rate}, block_align: {block_align}, bits_per_sample: {bits_per_sample} }}"
         )
     }
 }
@@ -390,8 +383,10 @@ mod tests {
     #[test]
     fn test_fmt_validate_rejects_zero_channels() {
         let bytes = make_base_fmt_bytes(1, 0, 44_100, 176_400, 4, 16);
-        let fmt = FmtChunk::from_bytes(&bytes).unwrap();
-        let err = fmt.validate_format_consistency().unwrap_err();
+        let fmt = FmtChunk::from_bytes(&bytes).expect("Failed to create FmtChunk");
+        let err = fmt
+            .validate_format_consistency()
+            .expect_err("Expected validation to fail");
         assert!(err.to_string().contains("Channels cannot be zero"));
     }
 
@@ -399,8 +394,10 @@ mod tests {
     fn test_fmt_validate_rejects_block_align_mismatch() {
         // For 2ch, 16-bit, expected block_align = 4, but we set 2
         let bytes = make_base_fmt_bytes(1, 2, 44_100, 176_400, 2, 16);
-        let fmt = FmtChunk::from_bytes(&bytes).unwrap();
-        let err = fmt.validate_format_consistency().unwrap_err();
+        let fmt = FmtChunk::from_bytes(&bytes).expect("Failed to create FmtChunk");
+        let err = fmt
+            .validate_format_consistency()
+            .expect_err("Expected validation to fail");
         assert!(
             err.to_string()
                 .contains("Block align 2 does not match expected 4")
@@ -411,8 +408,10 @@ mod tests {
     fn test_fmt_validate_rejects_byte_rate_mismatch() {
         // Expected byte_rate = sample_rate * block_align = 48_000 * 4 = 192_000
         let bytes = make_base_fmt_bytes(1, 2, 48_000, 1_000, 4, 16);
-        let fmt = FmtChunk::from_bytes(&bytes).unwrap();
-        let err = fmt.validate_format_consistency().unwrap_err();
+        let fmt = FmtChunk::from_bytes(&bytes).expect("Failed to create FmtChunk");
+        let err = fmt
+            .validate_format_consistency()
+            .expect_err("Expected validation to fail");
         assert!(
             err.to_string()
                 .contains("Byte rate 1000 does not match expected 192000")
@@ -422,8 +421,10 @@ mod tests {
     #[test]
     fn test_fmt_validate_rejects_non_byte_aligned_bits() {
         let bytes = make_base_fmt_bytes(1, 1, 44_100, 132_300, 3, 12);
-        let fmt = FmtChunk::from_bytes(&bytes).unwrap();
-        let err = fmt.validate_format_consistency().unwrap_err();
+        let fmt = FmtChunk::from_bytes(&bytes).expect("Failed to create FmtChunk");
+        let err = fmt
+            .validate_format_consistency()
+            .expect_err("Expected validation to fail");
         assert!(
             err.to_string()
                 .contains("Bits per sample 12 is not byte-aligned")
@@ -447,8 +448,10 @@ mod tests {
             block_align,
             bits_per_sample,
         );
-        let fmt = FmtChunk::from_bytes(&bytes).unwrap();
-        let err = fmt.validate_format_consistency().unwrap_err();
+        let fmt = FmtChunk::from_bytes(&bytes).expect("Failed to create FmtChunk");
+        let err = fmt
+            .validate_format_consistency()
+            .expect_err("Expected validation to fail");
         assert!(err.to_string().contains("Too many channels"));
     }
 }

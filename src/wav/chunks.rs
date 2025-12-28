@@ -16,9 +16,9 @@ impl AsRef<[u8]> for ChunkID {
 impl Display for ChunkID {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match core::str::from_utf8(&self.id) {
-            Ok(s) => write!(f, "{}", s),
+            Ok(s) => write!(f, "{s}"),
             Err(e) => {
-                writeln!(f, "ChunkID Display error: {}", e)?;
+                writeln!(f, "ChunkID Display error: {e}")?;
                 write!(
                     f,
                     "0x{:02X}{:02X}{:02X}{:02X}",

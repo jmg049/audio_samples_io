@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
-use audio_samples_io::error::AudioIOResult;
 use audio_samples::{AudioEditing, AudioSamples, AudioStatistics, cosine_wave, sine_wave};
+use audio_samples_io::error::AudioIOResult;
 
 pub fn main() -> AudioIOResult<()> {
     let test_signal =

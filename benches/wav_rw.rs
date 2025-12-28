@@ -3,14 +3,14 @@ use std::{
     time::Duration,
 };
 
+use audio_samples::{
+    AudioSample, AudioSamples, ConvertTo, I24, chirp, cosine_wave, sawtooth_wave, sine_wave,
+    square_wave,
+};
 use audio_samples_io::{
     traits::{AudioFile, AudioFileRead},
     types::OpenOptions,
     wav::wav_file::WavFile,
-};
-use audio_samples::{
-    AudioSample, AudioSamples, ConvertTo, I24, chirp, cosine_wave, sawtooth_wave, sine_wave,
-    square_wave,
 };
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use hound::{Sample, SampleFormat, WavReader, WavSpec};
@@ -245,8 +245,12 @@ fn bench_audio_samples_io_write<T>(
         b.iter_batched(
             || Cursor::new(Vec::with_capacity(capacity)),
             move |writer| {
-                audio_samples_io::write_with(writer, samples.as_ref(), audio_samples_io::types::FileType::WAV)
-                    .expect("write wav");
+                audio_samples_io::write_with(
+                    writer,
+                    samples.as_ref(),
+                    audio_samples_io::types::FileType::WAV,
+                )
+                .expect("write wav");
             },
             BatchSize::SmallInput,
         );
@@ -375,7 +379,7 @@ fn assets_dir() -> PathBuf {
 }
 
 fn case_label(sample_rate: u32, channels: usize) -> String {
-    format!("{}hz_{}ch", sample_rate, channels)
+    format!("{sample_rate}hz_{channels}ch")
 }
 
 fn data_payload_bytes<T: AudioSample>(audio: &AudioSamples<T>) -> u64 {

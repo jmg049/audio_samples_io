@@ -50,7 +50,7 @@ impl TryFrom<SampleType> for ValidatedSampleType {
             SampleType::F64 => Ok(ValidatedSampleType::F64),
             _ => Err(AudioIOError::corrupted_data_simple(
                 "Unsupported sample type for audio file",
-                format!("{:?}", value),
+                format!("{value:?}"),
             )),
         }
     }

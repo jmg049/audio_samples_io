@@ -75,7 +75,6 @@ impl<'a> WavFile<'a> {
     /// This function will panic if the FMT chunk is not valid.
     /// However, this should never happen as it will have been validated during file opening.
     pub fn fmt_chunk(&self) -> FmtChunk<'_> {
-        // Safe to unwrap: validated once during open
         FmtChunk::from_bytes(self.fmt_bytes()).expect("fmt chunk validated during open")
     }
 
@@ -219,10 +218,7 @@ impl<'a> AudioFile for WavFile<'a> {
         if file_size > MAX_WAV_SIZE {
             return Err(AudioIOError::corrupted_data_simple(
                 "File too large",
-                format!(
-                    "File size {} exceeds maximum {} bytes",
-                    file_size, MAX_WAV_SIZE
-                ),
+                format!("File size {file_size} exceeds maximum {MAX_WAV_SIZE} bytes"),
             ));
         }
 
@@ -258,7 +254,7 @@ impl<'a> AudioFile for WavFile<'a> {
         if riff != RIFF_CHUNK {
             return Err(AudioIOError::corrupted_data(
                 "Data does not start with RIFF header",
-                format!("Found: {:?}", riff),
+                format!("Found: {riff:?}"),
                 ErrorPosition::new(0).with_description("RIFF header at file start"),
             ));
         }
@@ -290,7 +286,7 @@ impl<'a> AudioFile for WavFile<'a> {
         if wave != WAVE_CHUNK {
             return Err(AudioIOError::corrupted_data(
                 "Data does not contain WAVE identifier after RIFF header",
-                format!("Found: {:?}", wave),
+                format!("Found: {wave:?}"),
                 ErrorPosition::new(8).with_description("WAVE identifier after RIFF header"),
             ));
         }
@@ -331,21 +327,21 @@ impl<'a> AudioFile for WavFile<'a> {
             let padded = size.checked_add(size & 1).ok_or_else(|| {
                 AudioIOError::corrupted_data(
                     "Integer overflow in chunk size calculation",
-                    format!("Chunk size: {}", size),
+                    format!("Chunk size: {size}"),
                     ErrorPosition::new(offset + 4).with_description("chunk size field"),
                 )
             })?;
             let header_and_data_size = 8_usize.checked_add(padded).ok_or_else(|| {
                 AudioIOError::corrupted_data(
                     "Integer overflow in chunk total size calculation",
-                    format!("Header size: 8, Data size: {}", padded),
+                    format!("Header size: 8, Data size: {padded}"),
                     ErrorPosition::new(offset).with_description("chunk header"),
                 )
             })?;
             let end = offset.checked_add(header_and_data_size).ok_or_else(|| {
                 AudioIOError::corrupted_data(
                     "Integer overflow in chunk end position calculation",
-                    format!("Offset: {}, Size: {}", offset, header_and_data_size),
+                    format!("Offset: {offset}, Size: {header_and_data_size}"),
                     ErrorPosition::new(offset).with_description("chunk position"),
                 )
             })?;
@@ -353,8 +349,8 @@ impl<'a> AudioFile for WavFile<'a> {
             if end > bytes.len() {
                 return Err(AudioIOError::corrupted_data(
                     "Chunk extends beyond end of file",
-                    format!("Chunk {:?} at offset {}", id, offset),
-                    ErrorPosition::new(offset).with_description(format!("chunk {:?}", id)),
+                    format!("Chunk {id:?} at offset {offset}"),
+                    ErrorPosition::new(offset).with_description(format!("chunk {id:?}")),
                 ));
             }
 
@@ -520,7 +516,7 @@ fn build_samples_from_interleaved_vec<'a, T: AudioSample>(
         if frames == 0 {
             return Err(AudioIOError::corrupted_data_simple(
                 "No frames in audio data",
-                format!("total_samples={}, channels={}", total_samples, num_channels),
+                format!("total_samples={total_samples}, channels={num_channels}"),
             ));
         }
 
@@ -798,7 +794,10 @@ fn write_audio_data_interleaved<W: Write, T: AudioSample>(
     const TARGET_CHUNK_BYTES: usize = 256 * 1024; // 256 KiB target buffer
     let chunk_samples = TARGET_CHUNK_BYTES
         .checked_div(bytes_per_sample)
-        .unwrap_or(0)
+        .ok_or(AudioIOError::corrupted_data_simple(
+            "Chunk size calculation overflow",
+            "TARGET_CHUNK_BYTES / bytes_per_sample",
+        ))?
         .max(num_channels); // At least one frame
 
     let mut buf = vec![0u8; chunk_samples * bytes_per_sample];
@@ -1001,18 +1000,20 @@ mod wav_tests {
             .expect("Failed to open test WAV file");
         let data_chunk = wav_file.data();
         assert!(
-            data_chunk.len() > 0,
+            !data_chunk.is_empty(),
             "DATA chunk length should be greater than zero"
         );
-        println!("{:#}", wav_file);
+        println!("{wav_file:#}");
         println!("DATA chunk length: {}", data_chunk.len());
 
-        let audio = wav_file.read::<i16>().unwrap();
+        let audio = wav_file
+            .read::<i16>()
+            .expect("Failed to read audio samples");
         assert!(
-            audio.len() > 0,
+            !audio.is_empty(),
             "Read audio samples should be greater than zero"
         );
-        println!("{:#}", audio);
+        println!("{audio:#}");
     }
 
     #[test]
@@ -1037,7 +1038,7 @@ mod wav_tests {
             "DATA chunk should be available"
         );
 
-        println!("Base Info: {:#}", base_info);
+        println!("Base Info: {base_info:#}");
     }
 
     #[test]
@@ -1046,16 +1047,21 @@ mod wav_tests {
         let wav_audio = WavFile::open_with_options("resources/test.wav", OpenOptions::default())
             .expect("Failed to open test WAV file");
 
-        let wav_info = wav_audio.base_info().unwrap();
-        println!("WAV Info: {:#}", wav_info);
+        let wav_info = wav_audio.base_info().expect("Failed to get WAV base info");
+        println!("WAV Info: {wav_info:#}");
         let num_channels = wav_info.channels;
         let num_samples = wav_info.total_samples as usize;
 
         let mut zeros = AudioSamples::<i16>::zeros_multi(
             num_channels as usize,
             (num_samples as f64 / num_channels as f64).floor() as usize,
-            NonZeroU32::new(wav_audio.base_info().unwrap().sample_rate)
-                .expect("sample rate is non-zero"),
+            NonZeroU32::new(
+                wav_audio
+                    .base_info()
+                    .expect("Failed to get WAV base info")
+                    .sample_rate,
+            )
+            .expect("sample rate is non-zero"),
         );
 
         println!("Zeros: {}", zeros.total_samples());
@@ -1072,7 +1078,7 @@ mod wav_tests {
             "Channel count mismatch"
         );
 
-        println!("{:#}", zeros);
+        println!("{zeros:#}");
     }
 
     #[test]
@@ -1091,9 +1097,11 @@ mod wav_tests {
 
         // Write to file
         let output_path = std::env::temp_dir().join("test_write_i16.wav");
-        println!("Writing WAV to {:?}", output_path);
+        println!("Writing WAV to {output_path:?}");
         write_wav(
-            std::io::BufWriter::new(std::fs::File::create(&output_path).unwrap()),
+            std::io::BufWriter::new(
+                std::fs::File::create(&output_path).expect("Failed to create output file"),
+            ),
             &sine_i16,
         )
         .expect("Failed to write WAV file");
@@ -1134,7 +1142,9 @@ mod wav_tests {
         // Write to file
         let output_path = std::env::temp_dir().join("test_write_f32.wav");
         write_wav(
-            std::io::BufWriter::new(std::fs::File::create(&output_path).unwrap()),
+            std::io::BufWriter::new(
+                std::fs::File::create(&output_path).expect("Failed to create output file"),
+            ),
             &sine_samples,
         )
         .expect("Failed to write WAV file");
@@ -1173,7 +1183,9 @@ mod wav_tests {
             std::process::id()
         ));
         write_wav(
-            std::io::BufWriter::new(std::fs::File::create(&output_path).unwrap()),
+            std::io::BufWriter::new(
+                std::fs::File::create(&output_path).expect("Failed to create output file"),
+            ),
             &audio,
         )
         .expect("Failed to write I24 WAV file");
@@ -1215,7 +1227,9 @@ mod wav_tests {
         // Write to file
         let output_path = std::env::temp_dir().join("test_write_stereo.wav");
         write_wav(
-            std::io::BufWriter::new(std::fs::File::create(&output_path).unwrap()),
+            std::io::BufWriter::new(
+                std::fs::File::create(&output_path).expect("Failed to create output file"),
+            ),
             &stereo,
         )
         .expect("Failed to write stereo WAV file");
@@ -1250,7 +1264,9 @@ mod wav_tests {
         let output_path = std::env::temp_dir().join("test_conversion.wav");
         let sine_i16 = sine_f32.to_format::<i16>();
         write_wav(
-            std::io::BufWriter::new(std::fs::File::create(&output_path).unwrap()),
+            std::io::BufWriter::new(
+                std::fs::File::create(&output_path).expect("Failed to create output file"),
+            ),
             &sine_i16,
         )
         .expect("Failed to write converted WAV file");
@@ -1280,7 +1296,9 @@ mod wav_tests {
             sine_wave::<i16, f32>(330.0, Duration::from_secs_f64(0.2), sample_rate, 0.5);
         let input_path = std::env::temp_dir().join("test_input.wav");
         write_wav(
-            std::io::BufWriter::new(std::fs::File::create(&input_path).unwrap()),
+            std::io::BufWriter::new(
+                std::fs::File::create(&input_path).expect("Failed to create input file"),
+            ),
             &sine_samples,
         )
         .expect("Failed to write input WAV file");
@@ -1328,22 +1346,24 @@ mod wav_tests {
         ];
 
         for (type_name, expected_bits, expected_format) in test_cases.iter() {
-            let output_path =
-                std::env::temp_dir().join(format!("test_roundtrip_{}.wav", type_name));
+            let output_path = std::env::temp_dir().join(format!("test_roundtrip_{type_name}.wav"));
 
             match *type_name {
                 "i16" => {
                     let samples = base_sine.to_format::<i16>();
                     write_wav(
-                        std::io::BufWriter::new(std::fs::File::create(&output_path).unwrap()),
+                        std::io::BufWriter::new(
+                            std::fs::File::create(&output_path)
+                                .expect("Failed to create output file"),
+                        ),
                         &samples,
                     )
-                    .unwrap();
+                    .expect("Failed to write WAV file");
 
                     // Validate WAV structure
-                    let wav_file =
-                        WavFile::open_with_options(&output_path, OpenOptions::default()).unwrap();
-                    let base_info = wav_file.base_info().unwrap();
+                    let wav_file = WavFile::open_with_options(&output_path, OpenOptions::default())
+                        .expect("Failed to open WAV file");
+                    let base_info = wav_file.base_info().expect("Failed to get WAV base info");
                     let fmt_chunk = wav_file.fmt_chunk();
 
                     assert_eq!(base_info.sample_rate, sample_rate);
@@ -1351,23 +1371,30 @@ mod wav_tests {
                     assert_eq!(fmt_chunk.format_code(), *expected_format);
 
                     // Read back and verify data integrity
-                    let read_samples = wav_file.read::<i16>().unwrap();
-                    let read_bytes = read_samples.bytes().unwrap();
-                    let written_bytes = samples.bytes().unwrap();
+                    let read_samples = wav_file.read::<i16>().expect("Failed to read WAV samples");
+                    let read_bytes = read_samples
+                        .bytes()
+                        .expect("Failed to get bytes from read samples");
+                    let written_bytes = samples
+                        .bytes()
+                        .expect("Failed to get bytes from written samples");
                     assert_eq!(read_bytes.as_slice(), written_bytes.as_slice());
                 }
                 "i32" => {
                     let samples = base_sine.to_format::<i32>();
                     write_wav(
-                        std::io::BufWriter::new(std::fs::File::create(&output_path).unwrap()),
+                        std::io::BufWriter::new(
+                            std::fs::File::create(&output_path)
+                                .expect("Failed to create output file"),
+                        ),
                         &samples,
                     )
-                    .unwrap();
+                    .expect("Failed to write WAV file");
 
                     // Validate WAV structure
-                    let wav_file =
-                        WavFile::open_with_options(&output_path, OpenOptions::default()).unwrap();
-                    let base_info = wav_file.base_info().unwrap();
+                    let wav_file = WavFile::open_with_options(&output_path, OpenOptions::default())
+                        .expect("Failed to open WAV file");
+                    let base_info = wav_file.base_info().expect("Failed to get WAV base info");
                     let fmt_chunk = wav_file.fmt_chunk();
 
                     assert_eq!(base_info.sample_rate, sample_rate);
@@ -1375,22 +1402,29 @@ mod wav_tests {
                     assert_eq!(fmt_chunk.format_code(), *expected_format);
 
                     // Read back and verify data integrity
-                    let read_samples = wav_file.read::<i32>().unwrap();
-                    let read_bytes = read_samples.bytes().unwrap();
-                    let written_bytes = samples.bytes().unwrap();
+                    let read_samples = wav_file.read::<i32>().expect("Failed to read WAV samples");
+                    let read_bytes = read_samples
+                        .bytes()
+                        .expect("Failed to get bytes from read samples");
+                    let written_bytes = samples
+                        .bytes()
+                        .expect("Failed to get bytes from written samples");
                     assert_eq!(read_bytes.as_slice(), written_bytes.as_slice());
                 }
                 "f32" => {
                     write_wav(
-                        std::io::BufWriter::new(std::fs::File::create(&output_path).unwrap()),
+                        std::io::BufWriter::new(
+                            std::fs::File::create(&output_path)
+                                .expect("Failed to create output file"),
+                        ),
                         &base_sine,
                     )
-                    .unwrap();
+                    .expect("Failed to write WAV file");
 
                     // Validate WAV structure
-                    let wav_file =
-                        WavFile::open_with_options(&output_path, OpenOptions::default()).unwrap();
-                    let base_info = wav_file.base_info().unwrap();
+                    let wav_file = WavFile::open_with_options(&output_path, OpenOptions::default())
+                        .expect("Failed to open WAV file");
+                    let base_info = wav_file.base_info().expect("Failed to get WAV base info");
                     let fmt_chunk = wav_file.fmt_chunk();
 
                     assert_eq!(base_info.sample_rate, sample_rate);
@@ -1398,9 +1432,13 @@ mod wav_tests {
                     assert_eq!(fmt_chunk.format_code(), *expected_format);
 
                     // Read back and verify data integrity (with small tolerance for f32)
-                    let read_samples = wav_file.read::<f32>().unwrap();
-                    let orig_bytes = base_sine.bytes().unwrap();
-                    let read_bytes = read_samples.bytes().unwrap();
+                    let read_samples = wav_file.read::<f32>().expect("Failed to read WAV samples");
+                    let orig_bytes = base_sine
+                        .bytes()
+                        .expect("Failed to get bytes from original samples");
+                    let read_bytes = read_samples
+                        .bytes()
+                        .expect("Failed to get bytes from read samples");
 
                     let orig_f32: &[f32] = bytemuck::cast_slice(orig_bytes.as_slice());
                     let read_f32: &[f32] = bytemuck::cast_slice(read_bytes.as_slice());
@@ -1416,7 +1454,7 @@ mod wav_tests {
             }
 
             // Verify file is readable by external tools (basic structure check)
-            let file_bytes = std::fs::read(&output_path).unwrap();
+            let file_bytes = std::fs::read(&output_path).expect("Failed to read output file");
             assert!(
                 file_bytes.len() > 44,
                 "WAV file should have proper header + data"

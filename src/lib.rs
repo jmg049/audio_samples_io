@@ -50,6 +50,12 @@ pub mod flac;
 #[cfg(feature = "flac")]
 pub use crate::flac::CompressionLevel;
 
+#[cfg(feature = "numpy")]
+pub mod python;
+
+#[cfg(feature = "numpy")]
+pub use crate::python::read_pyarray;
+
 use std::{
     fs::File,
     io::{BufReader, BufWriter, Read, Seek, Write},
@@ -63,7 +69,6 @@ pub use crate::{
     traits::{AudioFile, AudioFileMetadata, AudioFileRead, AudioStreamReader},
     types::{BaseAudioInfo, FileType, OpenOptions, ValidatedSampleType},
 };
-
 
 pub(crate) const MAX_WAV_SIZE: u64 = 2 * 1024 * 1024 * 1024; // 2GB limit
 pub(crate) const MAX_MMAP_SIZE: u64 = 512 * 1024 * 1024; // 512MB for memory mapping
@@ -110,8 +115,7 @@ pub fn info<P: AsRef<Path>>(fp: P) -> AudioIOResult<BaseAudioInfo> {
             }
         }
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
-            "Unsupported file format: {:?}",
-            other
+            "Unsupported file format: {other:?}"
         ))),
     }
 }
@@ -160,8 +164,7 @@ where
             }
         }
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
-            "Unsupported file format: {:?}",
-            other
+            "Unsupported file format: {other:?}"
         ))),
     }
 }
@@ -187,7 +190,7 @@ pub fn read_with<'a, R: ReadSeek, T: AudioSample>(
 ///
 /// let mut streamed = open_streamed("large_file.wav")?;
 /// let channels = streamed.num_channels() as usize;
-/// let sample_rate = NonZeroU32::new(streamed.sample_rate()).unwrap();
+/// let sample_rate = NonZeroU32::new(streamed.sample_rate()).ok_or_else(|| audio_samples_io::error::AudioIOError::UnsupportedFormat("sample_rate must be non-zero".to_string()))?;
 /// let mut buffer = AudioSamples::<f32>::zeros_multi(channels, 1024, sample_rate);
 ///
 /// while streamed.remaining_frames() > 0 {
@@ -215,8 +218,7 @@ pub fn open_streamed<P: AsRef<Path>>(fp: P) -> AudioIOResult<StreamedWavFile<Buf
             }
         }
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
-            "Unsupported file format for streaming: {:?}",
-            other
+            "Unsupported file format for streaming: {other:?}"
         ))),
     }
 }
@@ -260,9 +262,10 @@ pub fn open_streamed_reader<R: ReadSeek>(reader: R) -> AudioIOResult<wav::Stream
 /// use audio_samples_io::open_streamed_dyn;
 /// use audio_samples_io::traits::AudioStreamReader;
 ///
-/// fn process_any_stream(mut stream: Box<dyn AudioStreamReader>) {
+/// fn process_any_stream(mut stream: Box<dyn AudioStreamReader>) -> Result<(), Box<dyn std::error::Error>> {
 ///     println!("Total frames: {}", stream.total_frames());
-///     stream.seek_to_frame(1000).unwrap();
+///     stream.seek_to_frame(1000)?;
+///     Ok(())
 /// }
 ///
 /// let stream = open_streamed_dyn("audio.wav")?;
@@ -288,8 +291,7 @@ pub fn open_streamed_dyn<P: AsRef<Path>>(fp: P) -> AudioIOResult<Box<dyn AudioSt
             }
         }
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
-            "Unsupported file format for streaming: {:?}",
-            other
+            "Unsupported file format for streaming: {other:?}"
         ))),
     }
 }
@@ -322,7 +324,7 @@ pub fn open_streamed_dyn<P: AsRef<Path>>(fp: P) -> AudioIOResult<Box<dyn AudioSt
 /// )?;
 ///
 /// // Write audio in chunks
-/// let sample_rate = NonZeroU32::new(44100).unwrap();
+/// let sample_rate = NonZeroU32::new(44100).ok_or_else(|| audio_samples_io::error::AudioIOError::UnsupportedFormat("sample_rate must be non-zero".to_string()))?;
 /// let chunk = AudioSamples::<f32>::zeros_multi(2, 1024, sample_rate);
 /// writer.write_frames(&chunk)?;
 ///
@@ -370,8 +372,7 @@ pub fn create_streamed<P: AsRef<Path>>(
             }
         }
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
-            "Unsupported output format for streaming write: {:?}",
-            other
+            "Unsupported output format for streaming write: {other:?}"
         ))),
     }
 }
@@ -400,7 +401,7 @@ pub fn create_streamed<P: AsRef<Path>>(
 ///     ValidatedSampleType::I16,
 /// )?;
 ///
-/// let sample_rate = NonZeroU32::new(22050).unwrap();
+/// let sample_rate = NonZeroU32::new(22050).ok_or_else(|| audio_samples_io::error::AudioIOError::UnsupportedFormat("sample_rate must be non-zero".to_string()))?;
 /// let audio = AudioSamples::<f32>::zeros_mono(1024, sample_rate);
 /// writer.write_frames(&audio)?;
 /// writer.finalize()?;
@@ -458,8 +459,7 @@ pub fn open<P: AsRef<Path>>(fp: P) -> AudioIOResult<Box<dyn AudioFile>> {
             }
         }
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
-            "Unsupported file format: {:?}",
-            other
+            "Unsupported file format: {other:?}"
         ))),
     }
 }
@@ -503,8 +503,7 @@ where
             }
         }
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
-            "Unsupported  format: {:?}",
-            other
+            "Unsupported  format: {other:?}"
         ))),
     }
 }
@@ -573,8 +572,7 @@ where
             }
         }
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
-            "Unsupported format for write_with: {:?}",
-            other
+            "Unsupported format for write_with: {other:?}"
         ))),
     }
 }
@@ -590,11 +588,11 @@ mod lib_tests {
         let info_result = info("resources/test.wav");
         assert!(info_result.is_ok(), "Failed to get info from test WAV file");
 
-        let audio_info = info_result.unwrap();
+        let audio_info = info_result.expect("Expected successful info retrieval");
         assert_eq!(audio_info.file_type, FileType::WAV);
         assert!(audio_info.sample_rate > 0, "Sample rate should be positive");
         assert!(audio_info.channels > 0, "Channel count should be positive");
-        println!("Audio info: {:#}", audio_info);
+        println!("Audio info: {audio_info:#}");
     }
 
     #[test]
@@ -602,8 +600,11 @@ mod lib_tests {
         let audio_result = read::<_, f32>("resources/test.wav");
         assert!(audio_result.is_ok(), "Failed to read test WAV file");
 
-        let audio_samples = audio_result.unwrap();
-        assert!(audio_samples.len() > 0, "Audio samples should not be empty");
+        let audio_samples = audio_result.expect("Expected successful audio read");
+        assert!(
+            !audio_samples.is_empty(),
+            "Audio samples should not be empty"
+        );
         assert!(
             audio_samples.sample_rate().get() > 0,
             "Sample rate should be positive"
@@ -620,8 +621,8 @@ mod lib_tests {
         let file_result = open("resources/test.wav");
         assert!(file_result.is_ok(), "Failed to open test WAV file");
 
-        let audio_file = file_result.unwrap();
-        assert!(audio_file.len() > 0, "File should not be empty");
+        let audio_file = file_result.expect("Expected successful file open");
+        assert!(!audio_file.is_empty(), "File should not be empty");
     }
 
     #[test]
@@ -666,11 +667,7 @@ mod lib_tests {
             let diff = (orig - read).abs();
             assert!(
                 diff < 1e-6,
-                "Sample {} differs too much: {} vs {} (diff: {})",
-                i,
-                orig,
-                read,
-                diff
+                "Sample {i} differs too much: {orig} vs {read} (diff: {diff})"
             );
         }
 
@@ -759,7 +756,7 @@ mod lib_tests {
             "Should return error for unsupported format"
         );
 
-        let error_msg = format!("{}", result.unwrap_err());
+        let error_msg = format!("{}", result.expect_err("Expected error"));
         assert!(
             error_msg.contains("Unsupported format"),
             "Error should mention unsupported format"
@@ -842,14 +839,13 @@ mod lib_tests {
                         "Sample type should be F32"
                     );
                 }
-                _ => panic!("Unknown format"),
+                _ => unreachable!("Unknown format"),
             }
 
             // Verify file was created and is a valid WAV
             assert!(
                 fs::metadata(&output_path).is_ok(),
-                "File should exist for {}",
-                format_name
+                "File should exist for {format_name}"
             );
 
             // Clean up
@@ -869,7 +865,7 @@ mod lib_tests {
         let result = write(std::env::temp_dir().join("test.mp3"), &sine_samples);
         assert!(result.is_err(), "Should fail for unsupported format");
 
-        let error_msg = format!("{}", result.unwrap_err());
+        let error_msg = format!("{}", result.expect_err("Expected error"));
         assert!(
             error_msg.contains("Unsupported"),
             "Error should mention unsupported format"

@@ -50,7 +50,7 @@ use crate::{
 ///
 /// // Read 1024 frames at a time
 /// let channels = streamed.num_channels() as usize;
-/// let sample_rate = NonZeroU32::new(streamed.sample_rate()).unwrap();
+/// let sample_rate = NonZeroU32::new(streamed.sample_rate()).ok_or_else(|| audio_samples_io::error::AudioIOError::UnsupportedFormat("sample_rate must be non-zero".to_string()))?;
 /// let mut buffer = AudioSamples::<f32>::zeros_multi(channels, 1024, sample_rate);
 /// while streamed.remaining_frames() > 0 {
 ///     let frames_read = streamed.read_frames_into(&mut buffer, 1024)?;
@@ -149,7 +149,7 @@ impl<R: ReadSeek> StreamedWavFile<R> {
         if riff != RIFF_CHUNK {
             return Err(AudioIOError::corrupted_data(
                 "Data does not start with RIFF header",
-                format!("Found: {:?}", riff),
+                format!("Found: {riff:?}"),
                 ErrorPosition::new(0).with_description("RIFF header at file start"),
             ));
         }
@@ -181,7 +181,7 @@ impl<R: ReadSeek> StreamedWavFile<R> {
         if wave != WAVE_CHUNK {
             return Err(AudioIOError::corrupted_data(
                 "Data does not contain WAVE identifier",
-                format!("Found: {:?}", wave),
+                format!("Found: {wave:?}"),
                 ErrorPosition::new(8).with_description("WAVE identifier"),
             ));
         }
@@ -525,6 +525,10 @@ impl<R: ReadSeek> StreamedWavFile<R> {
     /// Create a frame iterator over this streamed file.
     ///
     /// Returns frames one at a time, reusing an internal buffer.
+    ///
+    /// # Panics
+    ///
+    /// Does not panic since the sample rate is guaranteed to be non-zero during parsing.
     pub fn frames<T>(&mut self) -> StreamedFrameIter<'_, R, T>
     where
         T: AudioSample + Default + 'static,
@@ -554,6 +558,10 @@ impl<R: ReadSeek> StreamedWavFile<R> {
     ///
     /// * `window_size` - Number of frames per window
     /// * `hop_size` - Number of frames to advance between windows
+    ///
+    /// # Panics
+    ///
+    /// Does not panic since the sample rate is guaranteed to be non-zero during parsing.
     pub fn windows<T>(
         &mut self,
         window_size: usize,
@@ -813,7 +821,7 @@ mod tests {
         let streamed = StreamedWavFile::new(file);
         assert!(streamed.is_ok(), "Failed to open streamed WAV file");
 
-        let streamed = streamed.unwrap();
+        let streamed = streamed.expect("Failed to open streamed WAV file");
         assert!(streamed.total_frames() > 0);
         assert_eq!(streamed.current_frame(), 0);
     }
