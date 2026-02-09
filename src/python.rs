@@ -3,6 +3,7 @@
 //! directly from WAV data using Fortran (column-major) layout to eliminate
 //! deinterleaving overhead.
 
+use audio_samples::traits::StandardSample;
 use numpy::{Element, PyArray1, PyArray2, PyArrayMethods};
 use pyo3::prelude::*;
 use std::path::Path;
@@ -11,7 +12,7 @@ use crate::traits::{AudioFile, AudioFileMetadata};
 use crate::types::{OpenOptions, ValidatedSampleType};
 use crate::wav::WavFile;
 use crate::{AudioIOError, AudioIOResult, BaseAudioInfo, FileType};
-use audio_samples::{AudioSample, ConvertTo, I24};
+use audio_samples::I24;
 
 /// Read audio file directly into NumPy array.
 ///
@@ -29,17 +30,10 @@ use audio_samples::{AudioSample, ConvertTo, I24};
 /// - Shape: `(channels, frames)` for multi-channel, `(1, frames)` for mono
 /// - Layout: Fortran (column-major) for multi-channel
 /// - Data: Samples converted to type `T`
-pub fn read_pyarray<P: AsRef<Path>, T>(
-    py: Python<'_>,
-    fp: P,
-) -> PyResult<(Py<PyArray2<T>>, BaseAudioInfo)>
+pub fn read_pyarray<P, T>(py: Python<'_>, fp: P) -> PyResult<(Py<PyArray2<T>>, BaseAudioInfo)>
 where
-    T: AudioSample + Element + 'static,
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
+    P: AsRef<Path>,
+    T: StandardSample + Element + 'static,
 {
     let path = fp.as_ref();
 
@@ -61,14 +55,10 @@ where
 }
 
 /// Read audio file into interleaved Vec with metadata,
-fn read_interleaved_with_info<P: AsRef<Path>, T>(fp: P) -> AudioIOResult<(Vec<T>, BaseAudioInfo)>
+fn read_interleaved_with_info<P, T>(fp: P) -> AudioIOResult<(Vec<T>, BaseAudioInfo)>
 where
-    T: AudioSample + 'static,
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
+    P: AsRef<Path>,
+    T: StandardSample + 'static,
 {
     let path = fp.as_ref();
 
@@ -107,12 +97,15 @@ where
 }
 
 /// Create PyArray from interleaved Vec with Fortran layout.
-fn create_pyarray_fortran<T: Element>(
+fn create_pyarray_fortran<T>(
     py: Python<'_>,
     interleaved_vec: Vec<T>,
     channels: usize,
     total_samples: usize,
-) -> PyResult<Py<PyArray2<T>>> {
+) -> PyResult<Py<PyArray2<T>>>
+where
+    T: Element,
+{
     if channels == 0 {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "channels must be non-zero",

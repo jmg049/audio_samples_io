@@ -1,7 +1,11 @@
-use audio_samples::{AudioSample, AudioSamples, ConvertTo, I24, SampleType};
+use audio_samples::{
+    AudioSamples, I24, SampleType,
+    traits::{ConvertFrom, StandardSample},
+};
 use core::fmt::{Display, Formatter, Result as FmtResult};
 use memmap2::MmapOptions;
 use ndarray::{Array1, Array2};
+use non_empty_slice::NonEmptyVec;
 use std::{
     any::TypeId,
     fs::File,
@@ -146,11 +150,23 @@ impl<'a> AudioFileMetadata for WavFile<'a> {
         let fmt_chunk = self.fmt_chunk();
         let (_, channels, sample_rate, byte_rate, block_align, bits_per_sample) =
             fmt_chunk.fmt_chunk();
+        let sample_rate = match NonZeroU32::new(sample_rate) {
+            Some(sr) => sr,
+            None => {
+                return Err(AudioIOError::corrupted_data_simple(
+                    "Invalid sample rate in FMT chunk",
+                    "Sample rate cannot be zero",
+                ));
+            }
+        };
         let (total_samples, duration) = {
             let data_chunk = self.data();
-            let total_frames = data_chunk.total_frames(self.sample_type, channels as usize);
+            // safety: channels is non-zero as per WAV spec
+            let total_frames = data_chunk.total_frames(self.sample_type, unsafe {
+                NonZeroU32::new_unchecked(channels as u32)
+            });
             // Duration is based on frames, not total samples
-            let duration = Duration::from_secs_f64(total_frames as f64 / sample_rate as f64);
+            let duration = Duration::from_secs_f64(total_frames as f64 / sample_rate.get() as f64);
             (self.total_samples(), duration)
         };
         let file_type = FileType::WAV;
@@ -434,21 +450,25 @@ impl<'a> AudioFileRead<'a> for WavFile<'a> {
     /// Reads all samples from the audio file
     fn read<T>(&'a self) -> AudioIOResult<AudioSamples<'a, T>>
     where
-        T: AudioSample + 'static,
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>,
+        T: StandardSample + 'static,
     {
         let data_chunk = self.data();
         let fmt_chunk = self.fmt_chunk();
 
         let sample_type = self.sample_type;
         let sample_rate = fmt_chunk.sample_rate();
-        let num_channels = fmt_chunk.channels() as usize;
+        // safety: sample_rate is guaranteed to be non-zero due to WAV spec validation during fmt chunk parsing
+        let sample_rate = unsafe { NonZeroU32::new_unchecked(sample_rate) };
+        let num_channels = fmt_chunk.channels() as u32;
+        // safety: num_channels == 0 would have been rejected during fmt chunk parsing.
+        let num_channels = unsafe {
+            NonZeroU32::new_unchecked(num_channels) // WAV spec requires channels > 0
+        };
 
         match sample_type {
+            ValidatedSampleType::U8 => {
+                read_typed_internal::<u8, T>(&data_chunk, num_channels, sample_rate)
+            }
             ValidatedSampleType::I16 => {
                 read_typed_internal::<i16, T>(&data_chunk, num_channels, sample_rate)
             }
@@ -469,16 +489,12 @@ impl<'a> AudioFileRead<'a> for WavFile<'a> {
 
     fn read_into<T>(&'a self, audio: &mut AudioSamples<'a, T>) -> AudioIOResult<()>
     where
-        T: AudioSample + 'static,
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>,
+        T: StandardSample + 'static,
     {
         let data_chunk = self.data();
 
         match self.sample_type {
+            ValidatedSampleType::U8 => read_into_typed_internal::<u8, T>(&data_chunk, audio), // technicaly not part of the wav spec, but it does not disallow it either, so we support it
             ValidatedSampleType::I16 => read_into_typed_internal::<i16, T>(&data_chunk, audio),
             ValidatedSampleType::I24 => read_into_typed_internal::<I24, T>(&data_chunk, audio),
             ValidatedSampleType::I32 => read_into_typed_internal::<i32, T>(&data_chunk, audio),
@@ -494,24 +510,21 @@ impl<'a> AudioFileRead<'a> for WavFile<'a> {
 /// AudioSamples expects planar format: [[L0, L1, ...], [R0, R1, ...]]
 ///
 /// Uses optimized SIMD deinterleave when the simd feature is enabled.
-fn build_samples_from_interleaved_vec<'a, T: AudioSample>(
-    interleaved_data: Vec<T>,
-    num_channels: usize,
-    sample_rate: u32,
-) -> AudioIOResult<AudioSamples<'a, T>> {
+fn build_samples_from_interleaved_vec<'a, T>(
+    interleaved_data: NonEmptyVec<T>,
+    num_channels: NonZeroU32,
+    sample_rate: NonZeroU32,
+) -> AudioIOResult<AudioSamples<'a, T>>
+where
+    T: StandardSample + 'static,
+{
     // SAFETY: sample_rate comes from validated WAV header which requires non-zero sample rate
-    let sample_rate = NonZeroU32::new(sample_rate).ok_or_else(|| {
-        AudioIOError::corrupted_data_simple("Invalid sample rate", "sample rate cannot be zero")
-    })?;
-    if num_channels == 1 {
+    if num_channels.get() == 1 {
         // Mono: data is already in correct format
-        Ok(AudioSamples::new_mono(
-            Array1::from(interleaved_data),
-            sample_rate,
-        ))
+        AudioSamples::new_mono(Array1::from_vec(interleaved_data.to_vec()), sample_rate).map_err(Into::into)
     } else {
         let total_samples = interleaved_data.len();
-        let frames = total_samples / num_channels;
+        let frames = total_samples.get() / num_channels.get() as usize;
 
         if frames == 0 {
             return Err(AudioIOError::corrupted_data_simple(
@@ -521,17 +534,18 @@ fn build_samples_from_interleaved_vec<'a, T: AudioSample>(
         }
 
         // Use optimized deinterleave from audio_samples
-        let planar_data =
-            audio_samples::simd_conversions::deinterleave_multi_vec(interleaved_data, num_channels)
-                .map_err(|e| {
-                    AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string())
-                })?;
+        let planar_data = audio_samples::simd_conversions::deinterleave_multi_vec(
+            &interleaved_data,
+            num_channels,
+        )
+        .map_err(|e| AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string()))?;
 
         // Create the planar array with shape (num_channels, frames)
-        let arr = Array2::from_shape_vec((num_channels, frames), planar_data)
+        
+        let arr = Array2::from_shape_vec((num_channels.get() as usize, frames), planar_data.to_vec())
             .map_err(|e| AudioIOError::corrupted_data_simple("Array shape error", e.to_string()))?;
 
-        Ok(AudioSamples::new_multi_channel(arr, sample_rate))
+        AudioSamples::new_multi_channel(arr, sample_rate).map_err(Into::into)
     }
 }
 
@@ -540,13 +554,8 @@ fn read_into_typed_internal<'a, S, T>(
     audio: &mut AudioSamples<'a, T>,
 ) -> AudioIOResult<()>
 where
-    S: AudioSample + ConvertTo<T> + 'static,
-    T: AudioSample + 'static,
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
+    S: StandardSample + 'static,
+    T: StandardSample + ConvertFrom<S> + 'static,
 {
     let bytes_per_sample = S::BITS as usize / 8;
     if !data_chunk.len().is_multiple_of(bytes_per_sample) {
@@ -563,7 +572,11 @@ where
     let converted = data_chunk.read_samples::<S, T>()?;
     let num_channels = audio.num_channels();
 
-    if !converted.len().is_multiple_of(num_channels) {
+    if !converted
+        .len()
+        .get()
+        .is_multiple_of(num_channels.get() as usize)
+    {
         return Err(AudioIOError::corrupted_data_simple(
             "Channel alignment error",
             format!(
@@ -586,36 +599,30 @@ where
     }
 
     // For mono audio, data is already in correct format
-    if num_channels == 1 {
+    if audio.is_mono() {
         audio.replace_with_vec(converted).map_err(|e| e.into())
     } else {
         // Multi-channel: deinterleave the converted data before replacing
         // Use optimized deinterleave from audio_samples
         let planar_data =
-            audio_samples::simd_conversions::deinterleave_multi_vec(converted, num_channels)
+            audio_samples::simd_conversions::deinterleave_multi_vec(&converted, num_channels)
                 .map_err(|e| {
                     AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string())
                 })?;
-
         audio.replace_with_vec(planar_data).map_err(|e| e.into())
     }
 }
 
 fn read_typed_internal<'a, S, T>(
     data_chunk: &DataChunk<'a>,
-    num_channels: usize,
-    sample_rate: u32,
+    num_channels: NonZeroU32,
+    sample_rate: NonZeroU32,
 ) -> AudioIOResult<AudioSamples<'a, T>>
 where
-    S: AudioSample + ConvertTo<T> + 'static,
-    T: AudioSample + 'static,
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
+    S: StandardSample + 'static,
+    T: StandardSample + ConvertFrom<S> + 'static,
 {
-    let bytes_per_sample = S::BITS as usize / 8;
+    let bytes_per_sample = S::BYTES as usize;
     if !data_chunk.len().is_multiple_of(bytes_per_sample) {
         return Err(AudioIOError::corrupted_data_simple(
             "Data chunk size not aligned to sample size",
@@ -629,7 +636,11 @@ where
 
     let converted = data_chunk.read_samples::<S, T>()?;
 
-    if !converted.len().is_multiple_of(num_channels) {
+    if !converted
+        .len()
+        .get()
+        .is_multiple_of(num_channels.get() as usize)
+    {
         return Err(AudioIOError::corrupted_data_simple(
             "Channel alignment error",
             format!(
@@ -651,23 +662,27 @@ where
 /// This function validates that the sample type is valid before conversion.
 const fn sample_type_to_format(sample_type: SampleType) -> Option<FormatCode> {
     match sample_type {
-        SampleType::I16 | SampleType::I24 | SampleType::I32 => Some(FormatCode::Pcm),
+        SampleType::U8 | SampleType::I16 | SampleType::I24 | SampleType::I32 => {
+            Some(FormatCode::Pcm)
+        }
         SampleType::F32 | SampleType::F64 => Some(FormatCode::IeeeFloat),
-        _ => None, // Return None for unknown or unsupported types
     }
 }
 
 /// Get SampleType from AudioSample type parameter
-const fn get_sample_type<T: AudioSample>() -> SampleType {
+const fn get_sample_type<T>() -> SampleType
+where
+    T: StandardSample,
+{
     T::SAMPLE_TYPE
 }
 
 /// Write 16-byte base FMT chunk
-fn write_base_fmt<W: Write, T: AudioSample>(
-    writer: &mut W,
-    channels: u16,
-    sample_rate: u32,
-) -> AudioIOResult<()> {
+fn write_base_fmt<T, W>(writer: &mut W, channels: u16, sample_rate: u32) -> AudioIOResult<()>
+where
+    T: StandardSample + 'static,
+    W: Write,
+{
     let sample_type = get_sample_type::<T>();
     let format_code = sample_type_to_format(sample_type)
         .ok_or(AudioIOError::WavError(WavError::UnsupportedSampleType))?;
@@ -692,17 +707,20 @@ fn write_base_fmt<W: Write, T: AudioSample>(
 }
 
 /// Determine if extensible format is needed
-const fn needs_extensible_format<T: AudioSample>(channels: u16) -> bool {
+const fn needs_extensible_format<T>(channels: u16) -> bool
+where
+    T: StandardSample,
+{
     // Use extensible format for more than 2 channels or non-standard bit depths
     channels > 2 || (T::BITS != 16 && T::BITS != 32)
 }
 
 /// Write 40-byte extensible FMT chunk
-fn write_extensible_fmt<W: Write, T: AudioSample>(
-    writer: &mut W,
-    channels: u16,
-    sample_rate: u32,
-) -> AudioIOResult<()> {
+fn write_extensible_fmt<T, W>(writer: &mut W, channels: u16, sample_rate: u32) -> AudioIOResult<()>
+where
+    T: StandardSample + 'static,
+    W: Write,
+{
     let sample_type = get_sample_type::<T>();
     let format_code = sample_type_to_format(sample_type)
         .ok_or(AudioIOError::WavError(WavError::UnsupportedSampleType))?;
@@ -766,14 +784,15 @@ fn write_extensible_fmt<W: Write, T: AudioSample>(
 /// Build an interleaved byte buffer for WAV output and write it in one go.
 /// Mono fast-path uses the underlying contiguous bytes view; multi-channel
 /// uses optimized interleave functions for better cache locality.
-fn write_audio_data_interleaved<W: Write, T: AudioSample>(
-    writer: &mut W,
-    audio: &AudioSamples<T>,
-) -> AudioIOResult<()> {
+fn write_audio_data_interleaved<T, W>(writer: &mut W, audio: &AudioSamples<T>) -> AudioIOResult<()>
+where
+    T: StandardSample + 'static,
+    W: Write,
+{
     let num_channels = audio.num_channels();
 
     // Mono data is already laid out correctly; respect I24 packing via AudioSamples::bytes
-    if num_channels == 1 {
+    if audio.is_mono() {
         let bytes = audio.bytes()?;
         writer.write_all(bytes.as_slice())?;
         return Ok(());
@@ -798,13 +817,13 @@ fn write_audio_data_interleaved<W: Write, T: AudioSample>(
             "Chunk size calculation overflow",
             "TARGET_CHUNK_BYTES / bytes_per_sample",
         ))?
-        .max(num_channels); // At least one frame
+        .max(num_channels.get() as usize); // At least one frame
 
     let mut buf = vec![0u8; chunk_samples * bytes_per_sample];
 
     let mut sample_start = 0;
-    while sample_start < total_samples {
-        let remaining = total_samples - sample_start;
+    while sample_start < total_samples.get() {
+        let remaining = total_samples.get() - sample_start;
         let samples_this_chunk = remaining.min(chunk_samples);
         let bytes_this_chunk = samples_this_chunk * bytes_per_sample;
 
@@ -830,12 +849,13 @@ fn write_audio_data_interleaved<W: Write, T: AudioSample>(
 }
 
 // Write complete WAV file to a writer
-pub(crate) fn write_wav<W: Write, T: AudioSample>(
-    writer: W,
-    audio: &AudioSamples<T>,
-) -> AudioIOResult<()> {
-    let sample_rate = audio.sample_rate();
-    let channels = audio.num_channels() as u16;
+pub(crate) fn write_wav<T, W>(writer: W, audio: &AudioSamples<T>) -> AudioIOResult<()>
+where
+    T: StandardSample + 'static,
+    W: Write,
+{
+    let sample_rate = audio.sample_rate().get();
+    let channels = audio.num_channels().get() as u16;
     let bytes_per_sample_disk = if TypeId::of::<T>() == TypeId::of::<I24>() {
         3usize
     } else {
@@ -843,7 +863,8 @@ pub(crate) fn write_wav<W: Write, T: AudioSample>(
     };
     let data_size = audio
         .samples_per_channel()
-        .checked_mul(audio.num_channels())
+        .get()
+        .checked_mul(audio.num_channels().get() as usize)
         .and_then(|v| v.checked_mul(bytes_per_sample_disk))
         .ok_or_else(|| {
             AudioIOError::corrupted_data_simple(
@@ -851,7 +872,7 @@ pub(crate) fn write_wav<W: Write, T: AudioSample>(
                 format!(
                     "channels={}, samples_per_channel={}, bytes_per_sample={}",
                     channels,
-                    audio.samples_per_channel(),
+                    audio.samples_per_channel().get(),
                     bytes_per_sample_disk
                 ),
             )
@@ -884,11 +905,10 @@ pub(crate) fn write_wav<W: Write, T: AudioSample>(
     writer.write_all(b"WAVE")?;
 
     // Write FMT chunk
-    let sample_rate_u32 = sample_rate.get();
     if needs_extensible_format::<T>(channels) {
-        write_extensible_fmt::<_, T>(&mut writer, channels, sample_rate_u32)?;
+        write_extensible_fmt::<T, _>(&mut writer, channels, sample_rate)?;
     } else {
-        write_base_fmt::<_, T>(&mut writer, channels, sample_rate_u32)?;
+        write_base_fmt::<T, _>(&mut writer, channels, sample_rate)?;
     }
 
     // Write DATA chunk header
@@ -908,13 +928,10 @@ pub(crate) fn write_wav<W: Write, T: AudioSample>(
 }
 
 impl<'a> AudioFileWrite for WavFile<'a> {
-    fn write<P: AsRef<Path>, T: AudioSample>(&mut self, out_fp: P) -> AudioIOResult<()>
+    fn write<P, T>(&mut self, out_fp: P) -> AudioIOResult<()>
     where
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>,
+        P: AsRef<Path>,
+        T: StandardSample + 'static,
     {
         // Read audio data as the target type T
         let audio = self.read::<T>()?;
@@ -948,6 +965,9 @@ impl Display for WavFile<'_> {
 
 #[cfg(test)]
 mod wav_tests {
+    use audio_samples::sample_rate;
+    use non_empty_slice::NonEmptySlice;
+
     use crate::wav::FormatCode;
 
     use super::*;
@@ -998,22 +1018,12 @@ mod wav_tests {
         let wav_path = Path::new("resources/test.wav");
         let wav_file = WavFile::open_with_options(wav_path, OpenOptions::default())
             .expect("Failed to open test WAV file");
-        let data_chunk = wav_file.data();
-        assert!(
-            !data_chunk.is_empty(),
-            "DATA chunk length should be greater than zero"
-        );
-        println!("{wav_file:#}");
-        println!("DATA chunk length: {}", data_chunk.len());
 
-        let audio = wav_file
-            .read::<i16>()
-            .expect("Failed to read audio samples");
+        let audio = wav_file.read::<i16>();
         assert!(
-            !audio.is_empty(),
-            "Read audio samples should be greater than zero"
+            audio.is_ok(),
+            "Failed to read audio samples from DATA chunk"
         );
-        println!("{audio:#}");
     }
 
     #[test]
@@ -1023,7 +1033,11 @@ mod wav_tests {
             .expect("Failed to open test WAV file");
 
         let base_info = wav_file.base_info().expect("Failed to get base info");
-        assert_eq!(base_info.sample_rate, 44100, "Sample rate mismatch");
+        assert_eq!(
+            base_info.sample_rate,
+            sample_rate!(44100),
+            "Sample rate mismatch"
+        );
         assert_eq!(base_info.channels, 2, "Channel count mismatch");
         assert_eq!(base_info.bits_per_sample, 16, "Bits per sample mismatch");
 
@@ -1042,62 +1056,20 @@ mod wav_tests {
     }
 
     #[test]
-    fn test_wav_read_into() {
-        // Get the wav file, depends on test_wav_open to work.
-        let wav_audio = WavFile::open_with_options("resources/test.wav", OpenOptions::default())
-            .expect("Failed to open test WAV file");
-
-        let wav_info = wav_audio.base_info().expect("Failed to get WAV base info");
-        println!("WAV Info: {wav_info:#}");
-        let num_channels = wav_info.channels;
-        let num_samples = wav_info.total_samples as usize;
-
-        let mut zeros = AudioSamples::<i16>::zeros_multi(
-            num_channels as usize,
-            (num_samples as f64 / num_channels as f64).floor() as usize,
-            NonZeroU32::new(
-                wav_audio
-                    .base_info()
-                    .expect("Failed to get WAV base info")
-                    .sample_rate,
-            )
-            .expect("sample rate is non-zero"),
-        );
-
-        println!("Zeros: {}", zeros.total_samples());
-        println!("Zeros channels: {}", zeros.num_channels());
-
-        wav_audio
-            .read_into(&mut zeros)
-            .expect("Failed to read samples into AudioSamples");
-
-        assert_eq!(zeros.total_samples(), num_samples, "Sample count mismatch");
-        assert_eq!(
-            zeros.num_channels(),
-            num_channels as usize,
-            "Channel count mismatch"
-        );
-
-        println!("{zeros:#}");
-    }
-
-    #[test]
     fn test_wav_write_i16() {
         use audio_samples::{AudioTypeConversion, sine_wave};
         use std::fs;
 
         // Generate a sine wave
-        let sample_rate = 44100;
+        let sample_rate = sample_rate!(44100);
         let frequency = 440.0;
         let duration = Duration::from_secs_f64(1.0); // 1 second
         let amplitude = 0.5;
-        let sine_samples =
-            sine_wave::<f32, f32>(frequency as f32, duration, sample_rate, amplitude as f32);
+        let sine_samples = sine_wave::<f32>(frequency, duration, sample_rate, amplitude);
         let sine_i16 = sine_samples.to_format::<i16>();
 
         // Write to file
         let output_path = std::env::temp_dir().join("test_write_i16.wav");
-        println!("Writing WAV to {output_path:?}");
         write_wav(
             std::io::BufWriter::new(
                 std::fs::File::create(&output_path).expect("Failed to create output file"),
@@ -1115,7 +1087,7 @@ mod wav_tests {
             .expect("Failed to open written WAV file");
 
         let base_info = wav_file.base_info().expect("Failed to get base info");
-        assert_eq!(base_info.sample_rate, sample_rate);
+        assert_eq!(base_info.sample_rate, sample_rate!(44100));
         assert_eq!(base_info.channels, 1);
         assert_eq!(base_info.bits_per_sample, 16);
 
@@ -1132,12 +1104,11 @@ mod wav_tests {
         use std::fs;
 
         // Generate a sine wave
-        let sample_rate = 48000;
+        let sample_rate = sample_rate!(48000);
         let frequency = 1000.0;
         let duration = Duration::from_secs_f64(0.5); // 0.5 seconds
         let amplitude = 0.8;
-        let sine_samples =
-            sine_wave::<f32, f32>(frequency as f32, duration, sample_rate, amplitude as f32);
+        let sine_samples = sine_wave::<f32>(frequency, duration, sample_rate, amplitude);
 
         // Write to file
         let output_path = std::env::temp_dir().join("test_write_f32.wav");
@@ -1154,7 +1125,7 @@ mod wav_tests {
             .expect("Failed to open written WAV file");
 
         let base_info = wav_file.base_info().expect("Failed to get base info");
-        assert_eq!(base_info.sample_rate, sample_rate);
+        assert_eq!(base_info.sample_rate, sample_rate!(48000));
         assert_eq!(base_info.channels, 1);
         assert_eq!(base_info.bits_per_sample, 32);
 
@@ -1174,9 +1145,9 @@ mod wav_tests {
         use audio_samples::sine_wave;
         use std::fs;
 
-        let sample_rate = 48_000;
+        let sample_rate = sample_rate!(48_000);
         let duration = Duration::from_millis(20);
-        let audio = sine_wave::<I24, f32>(440.0, duration, sample_rate, 0.5);
+        let audio = sine_wave::<I24>(440.0, duration, sample_rate, 0.5);
 
         let output_path = std::env::temp_dir().join(format!(
             "test_read_i24_roundtrip_{}.wav",
@@ -1215,14 +1186,15 @@ mod wav_tests {
         use std::fs;
 
         // Generate stereo sine waves (left: 440Hz, right: 880Hz)
-        let sample_rate = 44100;
+        let sample_rate = sample_rate!(44100);
         let duration = Duration::from_secs_f64(0.25);
-        let left = sine_wave::<f32, f32>(440.0, duration, sample_rate, 0.6);
-        let right = sine_wave::<f32, f32>(880.0, duration, sample_rate, 0.4);
+        let left = sine_wave::<f32>(440.0, duration, sample_rate, 0.6);
+        let right = sine_wave::<f32>(880.0, duration, sample_rate, 0.4);
 
         // Combine into stereo
         let stereo =
-            audio_samples::AudioEditing::stack(&[left, right]).expect("Failed to create stereo");
+            audio_samples::AudioEditing::stack(NonEmptySlice::new(&[left, right]).unwrap())
+                .expect("Failed to create stereo");
 
         // Write to file
         let output_path = std::env::temp_dir().join("test_write_stereo.wav");
@@ -1239,13 +1211,13 @@ mod wav_tests {
             .expect("Failed to open written WAV file");
 
         let base_info = wav_file.base_info().expect("Failed to get base info");
-        assert_eq!(base_info.sample_rate, sample_rate);
+        assert_eq!(base_info.sample_rate, sample_rate!(44100));
         assert_eq!(base_info.channels, 2);
         assert_eq!(base_info.bits_per_sample, 32);
 
         let read_samples = wav_file.read::<f32>().expect("Failed to read samples");
         assert_eq!(read_samples.total_samples(), stereo.total_samples());
-        assert_eq!(read_samples.num_channels(), 2);
+        assert_eq!(read_samples.num_channels().get(), 2);
 
         // Clean up
         fs::remove_file(&output_path).ok();
@@ -1257,8 +1229,8 @@ mod wav_tests {
         use std::fs;
 
         // Generate f32 sine wave
-        let sample_rate = 44100;
-        let sine_f32 = sine_wave::<f32, f32>(440.0, Duration::from_secs_f64(0.1), sample_rate, 0.7);
+        let sample_rate = sample_rate!(44100);
+        let sine_f32 = sine_wave::<f32>(440.0, Duration::from_secs_f64(0.1), sample_rate, 0.7);
 
         // Write as i16 (should convert)
         let output_path = std::env::temp_dir().join("test_conversion.wav");
@@ -1291,9 +1263,8 @@ mod wav_tests {
         use std::fs;
 
         // Create a test WAV file first
-        let sample_rate = 22050;
-        let sine_samples =
-            sine_wave::<i16, f32>(330.0, Duration::from_secs_f64(0.2), sample_rate, 0.5);
+        let sample_rate = sample_rate!(22050);
+        let sine_samples = sine_wave::<i16>(330.0, Duration::from_secs_f64(0.2), sample_rate, 0.5);
         let input_path = std::env::temp_dir().join("test_input.wav");
         write_wav(
             std::io::BufWriter::new(
@@ -1318,7 +1289,7 @@ mod wav_tests {
 
         let base_info = output_wav.base_info().expect("Failed to get base info");
         assert_eq!(base_info.bits_per_sample, 32);
-        assert_eq!(base_info.sample_rate, sample_rate);
+        assert_eq!(base_info.sample_rate, sample_rate!(22050));
 
         let fmt_chunk = output_wav.fmt_chunk();
         assert_eq!(fmt_chunk.format_code(), FormatCode::IeeeFloat);
@@ -1334,9 +1305,9 @@ mod wav_tests {
         use std::fs;
 
         // Test multiple sample types with comprehensive validation
-        let sample_rate = 44100;
+        let sample_rate = sample_rate!(44100);
         let duration = Duration::from_secs_f64(0.5);
-        let base_sine = sine_wave::<f32, f32>(440.0, duration, sample_rate, 0.5);
+        let base_sine = sine_wave::<f32>(440.0, duration, sample_rate, 0.5);
 
         // Test cases: (type_name, bits_per_sample, format_code)
         let test_cases = [
@@ -1366,7 +1337,7 @@ mod wav_tests {
                     let base_info = wav_file.base_info().expect("Failed to get WAV base info");
                     let fmt_chunk = wav_file.fmt_chunk();
 
-                    assert_eq!(base_info.sample_rate, sample_rate);
+                    assert_eq!(base_info.sample_rate, sample_rate!(44100));
                     assert_eq!(base_info.bits_per_sample, *expected_bits);
                     assert_eq!(fmt_chunk.format_code(), *expected_format);
 
@@ -1397,7 +1368,7 @@ mod wav_tests {
                     let base_info = wav_file.base_info().expect("Failed to get WAV base info");
                     let fmt_chunk = wav_file.fmt_chunk();
 
-                    assert_eq!(base_info.sample_rate, sample_rate);
+                    assert_eq!(base_info.sample_rate, sample_rate!(44100));
                     assert_eq!(base_info.bits_per_sample, *expected_bits);
                     assert_eq!(fmt_chunk.format_code(), *expected_format);
 
@@ -1427,7 +1398,7 @@ mod wav_tests {
                     let base_info = wav_file.base_info().expect("Failed to get WAV base info");
                     let fmt_chunk = wav_file.fmt_chunk();
 
-                    assert_eq!(base_info.sample_rate, sample_rate);
+                    assert_eq!(base_info.sample_rate, sample_rate!(44100));
                     assert_eq!(base_info.bits_per_sample, *expected_bits);
                     assert_eq!(fmt_chunk.format_code(), *expected_format);
 

@@ -6,12 +6,15 @@
 
 use std::{
     io::SeekFrom,
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroUsize},
     path::{Path, PathBuf},
     time::Duration,
 };
 
-use audio_samples::{AudioSample, AudioSamples, ConvertTo, I24};
+use audio_samples::{
+    AudioSamples, CastFrom, CastInto, ConvertFrom, ConvertTo, I24, nzu, traits::StandardSample,
+};
+use non_empty_slice::NonEmptyVec;
 
 use crate::{
     ReadSeek,
@@ -59,7 +62,10 @@ use crate::{
 /// # Ok::<(), audio_samples_io::error::AudioIOError>(())
 /// ```
 #[derive(Debug)]
-pub struct StreamedWavFile<R: ReadSeek> {
+pub struct StreamedWavFile<R>
+where
+    R: ReadSeek,
+{
     /// The underlying reader
     reader: R,
     /// File path (if opened from path, otherwise synthetic)
@@ -69,7 +75,7 @@ pub struct StreamedWavFile<R: ReadSeek> {
     /// Cached format code
     format_code: FormatCode,
     /// Sample rate in Hz
-    sample_rate: u32,
+    sample_rate: NonZeroU32,
     /// Number of channels
     channels: u16,
     /// Bits per sample
@@ -94,7 +100,10 @@ pub struct StreamedWavFile<R: ReadSeek> {
     byte_buffer: Vec<u8>,
 }
 
-impl<R: ReadSeek> StreamedWavFile<R> {
+impl<R> StreamedWavFile<R>
+where
+    R: ReadSeek,
+{
     /// Create a new streaming WAV reader from any `Read + Seek` source.
     ///
     /// Parses the WAV header to extract format information and locates the
@@ -319,6 +328,12 @@ impl<R: ReadSeek> StreamedWavFile<R> {
 
         let (format_code, channels, sample_rate, byte_rate, block_align, bits_per_sample) =
             fmt_chunk.fmt_chunk();
+        let sample_rate = NonZeroU32::new(sample_rate).ok_or_else(|| {
+            AudioIOError::corrupted_data_simple(
+                "Invalid sample rate in FMT chunk",
+                "Sample rate cannot be zero",
+            )
+        })?;
         let bytes_per_sample = bits_per_sample / 8;
 
         // Calculate frame info
@@ -371,7 +386,7 @@ impl<R: ReadSeek> StreamedWavFile<R> {
     /// Get the sample rate.
     #[inline]
     pub const fn sample_rate(&self) -> u32 {
-        self.sample_rate
+        self.sample_rate.get()
     }
 
     /// Get the bytes per frame (block_align).
@@ -429,18 +444,13 @@ impl<R: ReadSeek> StreamedWavFile<R> {
     pub fn read_frames_into<T>(
         &mut self,
         buffer: &mut AudioSamples<'_, T>,
-        frame_count: usize,
+        frame_count: NonZeroUsize,
     ) -> AudioIOResult<usize>
     where
-        T: AudioSample + 'static,
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>,
+        T: StandardSample + 'static,
     {
         let frames_available = self.remaining_frames();
-        let frames_to_read = frame_count.min(frames_available);
+        let frames_to_read = frame_count.get().min(frames_available);
 
         if frames_to_read == 0 {
             return Ok(0);
@@ -466,16 +476,22 @@ impl<R: ReadSeek> StreamedWavFile<R> {
         // Convert bytes to samples based on file's sample type
         let converted = self.convert_bytes_to_samples::<T>(&self.byte_buffer[..actual_bytes])?;
 
+        // safety: We have already verified that converted.len() == total samples to read
+        let converted = unsafe { NonEmptyVec::new_unchecked(converted) };
         // Deinterleave and replace buffer contents
-        let num_channels = self.channels as usize;
-        if num_channels == 1 {
+        // safety: channels is guaranteed > 0 from parsing, and converted length matches frames read
+        let num_channels = unsafe { NonZeroU32::new_unchecked(self.channels as u32) };
+
+        if buffer.is_mono() {
             buffer.replace_with_vec(converted)?;
         } else {
-            let planar =
-                audio_samples::simd_conversions::deinterleave_multi_vec(converted, num_channels)
-                    .map_err(|e| {
-                        AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string())
-                    })?;
+            let planar = audio_samples::simd_conversions::deinterleave_multi_vec(
+                &converted,
+                num_channels,
+            )
+            .map_err(|e| {
+                AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string())
+            })?;
             buffer.replace_with_vec(planar)?;
         }
 
@@ -486,14 +502,10 @@ impl<R: ReadSeek> StreamedWavFile<R> {
     /// Convert raw bytes to samples of type T based on file's sample type.
     fn convert_bytes_to_samples<T>(&self, bytes: &[u8]) -> AudioIOResult<Vec<T>>
     where
-        T: AudioSample + 'static,
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>,
+        T: StandardSample + 'static,
     {
         match self.sample_type {
+            ValidatedSampleType::U8 => Ok(bytes.iter().map(|&b| T::convert_from(b)).collect()),
             ValidatedSampleType::I16 => Ok(bytes
                 .chunks_exact(2)
                 .map(|c| i16::from_le_bytes([c[0], c[1]]))
@@ -531,20 +543,19 @@ impl<R: ReadSeek> StreamedWavFile<R> {
     /// Does not panic since the sample rate is guaranteed to be non-zero during parsing.
     pub fn frames<T>(&mut self) -> StreamedFrameIter<'_, R, T>
     where
-        T: AudioSample + Default + 'static,
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>,
+        T: StandardSample + ConvertTo<T> + ConvertFrom<T> + 'static,
+        f64: CastInto<T> + CastFrom<T> + ConvertTo<T> + ConvertFrom<T>,
     {
-        // SAFETY: sample_rate was validated during WAV parsing to be non-zero
-        let sample_rate =
-            NonZeroU32::new(self.sample_rate).expect("sample rate validated during parsing");
+        let sample_rate = self.sample_rate;
         let frame_buffer = if self.channels == 1 {
-            AudioSamples::zeros_mono(1, sample_rate)
+            AudioSamples::zeros_mono(audio_samples::nzu!(1), sample_rate)
         } else {
-            AudioSamples::zeros_multi(self.channels as usize, 1, sample_rate)
+            // safe: channels is guaranteed > 0
+            AudioSamples::zeros_multi(
+                unsafe { NonZeroU32::new_unchecked(self.channels as u32) },
+                audio_samples::nzu!(1),
+                sample_rate,
+            )
         };
         StreamedFrameIter {
             source: self,
@@ -564,24 +575,22 @@ impl<R: ReadSeek> StreamedWavFile<R> {
     /// Does not panic since the sample rate is guaranteed to be non-zero during parsing.
     pub fn windows<T>(
         &mut self,
-        window_size: usize,
-        hop_size: usize,
+        window_size: NonZeroUsize,
+        hop_size: NonZeroUsize,
     ) -> StreamedWindowIter<'_, R, T>
     where
-        T: AudioSample + Default + 'static,
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>,
+        T: StandardSample + ConvertTo<T> + ConvertFrom<T> + 'static,
+        f64: CastInto<T> + CastFrom<T> + ConvertTo<T> + ConvertFrom<T>,
     {
-        // SAFETY: sample_rate was validated during WAV parsing to be non-zero
-        let sample_rate =
-            NonZeroU32::new(self.sample_rate).expect("sample rate validated during parsing");
+        let sample_rate = self.sample_rate;
         let window_buffer = if self.channels == 1 {
             AudioSamples::zeros_mono(window_size, sample_rate)
         } else {
-            AudioSamples::zeros_multi(self.channels as usize, window_size, sample_rate)
+            AudioSamples::zeros_multi(
+                unsafe { NonZeroU32::new_unchecked(self.channels as u32) },
+                window_size,
+                sample_rate,
+            )
         };
         StreamedWindowIter {
             source: self,
@@ -594,7 +603,10 @@ impl<R: ReadSeek> StreamedWavFile<R> {
 }
 
 // Implement AudioFileMetadata for StreamedWavFile
-impl<R: ReadSeek> AudioFileMetadata for StreamedWavFile<R> {
+impl<R> AudioFileMetadata for StreamedWavFile<R>
+where
+    R: ReadSeek,
+{
     fn open_metadata<P: AsRef<Path>>(_path: P) -> AudioIOResult<Self>
     where
         Self: Sized,
@@ -607,8 +619,8 @@ impl<R: ReadSeek> AudioFileMetadata for StreamedWavFile<R> {
     }
 
     fn base_info(&self) -> AudioIOResult<BaseAudioInfo> {
-        let duration = Duration::from_secs_f64(self.total_frames as f64 / self.sample_rate as f64);
-
+        let duration =
+            Duration::from_secs_f64(self.total_frames as f64 / self.sample_rate.get() as f64);
         Ok(BaseAudioInfo::new(
             self.sample_rate,
             self.channels,
@@ -644,7 +656,7 @@ impl<R: ReadSeek> AudioFileMetadata for StreamedWavFile<R> {
 
     fn duration(&self) -> AudioIOResult<Duration> {
         Ok(Duration::from_secs_f64(
-            self.total_frames as f64 / self.sample_rate as f64,
+            self.total_frames as f64 / self.sample_rate.get() as f64,
         ))
     }
 
@@ -658,7 +670,10 @@ impl<R: ReadSeek> AudioFileMetadata for StreamedWavFile<R> {
 }
 
 // Implement AudioStreamReader for StreamedWavFile (object-safe streaming trait)
-impl<R: ReadSeek> AudioStreamReader for StreamedWavFile<R> {
+impl<R> AudioStreamReader for StreamedWavFile<R>
+where
+    R: ReadSeek,
+{
     #[inline]
     fn current_frame(&self) -> usize {
         self.current_frame
@@ -676,7 +691,7 @@ impl<R: ReadSeek> AudioStreamReader for StreamedWavFile<R> {
 
     #[inline]
     fn sample_rate(&self) -> u32 {
-        self.sample_rate
+        self.sample_rate.get()
     }
 
     #[inline]
@@ -694,19 +709,17 @@ impl<R: ReadSeek> AudioStreamReader for StreamedWavFile<R> {
 }
 
 // Implement AudioStreamRead for StreamedWavFile (generic streaming read trait)
-impl<R: ReadSeek> AudioStreamRead for StreamedWavFile<R> {
+impl<R> AudioStreamRead for StreamedWavFile<R>
+where
+    R: ReadSeek,
+{
     fn read_frames_into<T>(
         &mut self,
         buffer: &mut AudioSamples<'_, T>,
-        frame_count: usize,
+        frame_count: NonZeroUsize,
     ) -> AudioIOResult<usize>
     where
-        T: AudioSample + 'static,
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>,
+        T: StandardSample + 'static,
     {
         StreamedWavFile::read_frames_into(self, buffer, frame_count)
     }
@@ -716,28 +729,32 @@ impl<R: ReadSeek> AudioStreamRead for StreamedWavFile<R> {
 ///
 /// Each call to `next()` reads one frame from the source and returns
 /// a reference to the internal buffer containing that frame's samples.
-pub struct StreamedFrameIter<'a, R: ReadSeek, T: AudioSample> {
+pub struct StreamedFrameIter<'a, R, T>
+where
+    R: ReadSeek,
+    T: StandardSample + 'static,
+{
     source: &'a mut StreamedWavFile<R>,
     frame_buffer: AudioSamples<'static, T>,
 }
 
-impl<'a, R: ReadSeek, T> Iterator for StreamedFrameIter<'a, R, T>
+impl<'a, R, T> Iterator for StreamedFrameIter<'a, R, T>
 where
-    T: AudioSample + Default + 'static,
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
+    R: ReadSeek,
+    T: StandardSample + 'static,
 {
     type Item = AudioIOResult<AudioSamples<'static, T>>;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.source.remaining_frames() == 0 {
             return None;
         }
 
-        match self.source.read_frames_into(&mut self.frame_buffer, 1) {
+        match self
+            .source
+            .read_frames_into(&mut self.frame_buffer, nzu!(1))
+        {
             Ok(0) => None,
             Ok(_) => Some(Ok(self.frame_buffer.clone())),
             Err(e) => Some(Err(e)),
@@ -750,39 +767,36 @@ where
     }
 }
 
-impl<'a, R: ReadSeek, T> ExactSizeIterator for StreamedFrameIter<'a, R, T>
+impl<'a, R, T> ExactSizeIterator for StreamedFrameIter<'a, R, T>
 where
-    T: AudioSample + Default + 'static,
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
+    R: ReadSeek,
+    T: StandardSample + 'static,
 {
 }
 
 /// Iterator over windows of frames from a streamed WAV file.
 ///
 /// Supports overlapping windows via configurable hop size.
-pub struct StreamedWindowIter<'a, R: ReadSeek, T: AudioSample> {
+pub struct StreamedWindowIter<'a, R, T>
+where
+    R: ReadSeek,
+    T: StandardSample + 'static,
+{
     source: &'a mut StreamedWavFile<R>,
     window_buffer: AudioSamples<'static, T>,
-    window_size: usize,
-    hop_size: usize,
+    window_size: NonZeroUsize,
+    hop_size: NonZeroUsize,
     first_window: bool,
 }
 
-impl<'a, R: ReadSeek, T> Iterator for StreamedWindowIter<'a, R, T>
+impl<'a, R, T> Iterator for StreamedWindowIter<'a, R, T>
 where
-    T: AudioSample + Default + 'static,
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
+    R: ReadSeek,
+    T: StandardSample + 'static,
 {
     type Item = AudioIOResult<AudioSamples<'static, T>>;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.source.remaining_frames() == 0 {
             return None;
@@ -790,7 +804,7 @@ where
 
         // For overlapping windows after the first, we need to seek back
         if !self.first_window && self.hop_size < self.window_size {
-            let overlap = self.window_size - self.hop_size;
+            let overlap = self.window_size.get() - self.hop_size.get();
             let new_frame = self.source.current_frame.saturating_sub(overlap);
             if let Err(e) = self.source.seek_to_frame(new_frame) {
                 return Some(Err(e));
@@ -811,6 +825,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use audio_samples::{nzu, sample_rate};
+
     use super::*;
     use std::fs::File;
     use std::io::BufReader;
@@ -832,7 +848,7 @@ mod tests {
         let streamed = StreamedWavFile::new(file).expect("Failed to open");
 
         let base_info = streamed.base_info().expect("Failed to get base info");
-        assert_eq!(base_info.sample_rate, 44100);
+        assert_eq!(base_info.sample_rate, sample_rate!(44100));
         assert_eq!(base_info.channels, 2);
     }
 
@@ -845,12 +861,14 @@ mod tests {
         let sample_rate = NonZeroU32::new(streamed.sample_rate()).expect("sample rate is non-zero");
 
         let mut buffer = if channels == 1 {
-            AudioSamples::<f32>::zeros_mono(1024, sample_rate)
+            AudioSamples::<f32>::zeros_mono(nzu!(1024), sample_rate)
         } else {
-            AudioSamples::<f32>::zeros_multi(channels, 1024, sample_rate)
+            // safety: channels is guaranteed > 0
+            let channels = unsafe { NonZeroU32::new_unchecked(channels as u32) };
+            AudioSamples::<f32>::zeros_multi(channels, nzu!(1024), sample_rate)
         };
         let frames_read = streamed
-            .read_frames_into(&mut buffer, 1024)
+            .read_frames_into(&mut buffer, nzu!(1024))
             .expect("Read failed");
 
         assert!(frames_read > 0);

@@ -4,11 +4,16 @@
 //! on construction and encodes audio data incrementally, enabling writing of large files
 //! without buffering all audio in memory.
 
-use std::io::{Seek, SeekFrom, Write};
+use std::{io::SeekFrom, num::NonZeroUsize};
 
-use audio_samples::{AudioSample, AudioSamples, ConvertTo, I24};
+use audio_samples::{
+    AudioSamples, ConvertTo, I24,
+    StandardSample,
+};
+use non_empty_slice::non_empty_vec;
 
 use crate::{
+    WriteSeek,
     error::{AudioIOError, AudioIOResult},
     traits::{AudioStreamWrite, AudioStreamWriter},
     types::ValidatedSampleType,
@@ -22,7 +27,7 @@ use crate::{
 /// This is ideal for:
 /// - Writing files larger than available memory
 /// - Real-time recording applications
-/// - Streaming to network destinations implementing `Write + Seek`
+/// - Streaming to network destinations implementing `WriteSeek`
 ///
 /// # Sample Type
 ///
@@ -55,7 +60,10 @@ use crate::{
 /// # Ok::<(), audio_samples_io::error::AudioIOError>(())
 /// ```
 #[derive(Debug)]
-pub struct StreamedWavWriter<W: Write + Seek> {
+pub struct StreamedWavWriter<W>
+where
+    W: WriteSeek,
+{
     /// The underlying writer
     writer: W,
     /// Number of channels
@@ -81,7 +89,10 @@ pub struct StreamedWavWriter<W: Write + Seek> {
     finalized: bool,
 }
 
-impl<W: Write + Seek> StreamedWavWriter<W> {
+impl<W> StreamedWavWriter<W>
+where
+    W: WriteSeek,
+{
     /// Create a new streaming WAV writer for 16-bit PCM output.
     pub fn new_i16(writer: W, channels: u16, sample_rate: u32) -> AudioIOResult<Self> {
         Self::new_with_sample_type(writer, channels, sample_rate, ValidatedSampleType::I16)
@@ -121,7 +132,7 @@ impl<W: Write + Seek> StreamedWavWriter<W> {
             ));
         }
 
-        let bytes_per_sample = sample_type.bytes_per_sample() as u16;
+        let bytes_per_sample = sample_type.bytes_per_sample().get() as u16;
         let block_align = channels * bytes_per_sample;
 
         // Determine format parameters
@@ -183,7 +194,7 @@ impl<W: Write + Seek> StreamedWavWriter<W> {
     ) -> AudioIOResult<()> {
         let format_code = Self::sample_type_to_format(sample_type);
         let bits_per_sample = sample_type.bits_per_sample();
-        let bytes_per_sample = sample_type.bytes_per_sample() as u16;
+        let bytes_per_sample = sample_type.bytes_per_sample().get() as u16;
         let block_align = channels * bytes_per_sample;
         let byte_rate = sample_rate * block_align as u32;
 
@@ -194,7 +205,7 @@ impl<W: Write + Seek> StreamedWavWriter<W> {
         writer.write_all(&sample_rate.to_le_bytes())?;
         writer.write_all(&byte_rate.to_le_bytes())?;
         writer.write_all(&block_align.to_le_bytes())?;
-        writer.write_all(&bits_per_sample.to_le_bytes())?;
+        writer.write_all(&bits_per_sample.get().to_le_bytes())?;
 
         Ok(())
     }
@@ -208,7 +219,7 @@ impl<W: Write + Seek> StreamedWavWriter<W> {
     ) -> AudioIOResult<()> {
         let format_code = Self::sample_type_to_format(sample_type);
         let bits_per_sample = sample_type.bits_per_sample();
-        let bytes_per_sample = sample_type.bytes_per_sample() as u16;
+        let bytes_per_sample = sample_type.bytes_per_sample().get() as u16;
         let block_align = channels * bytes_per_sample;
         let byte_rate = sample_rate * block_align as u32;
 
@@ -241,13 +252,13 @@ impl<W: Write + Seek> StreamedWavWriter<W> {
         writer.write_all(&sample_rate.to_le_bytes())?;
         writer.write_all(&byte_rate.to_le_bytes())?;
         writer.write_all(&block_align.to_le_bytes())?;
-        writer.write_all(&bits_per_sample.to_le_bytes())?;
+        writer.write_all(&bits_per_sample.get().to_le_bytes())?;
 
         // Extension size (2 bytes)
         writer.write_all(&22u16.to_le_bytes())?;
 
         // Extended format info (22 bytes)
-        writer.write_all(&bits_per_sample.to_le_bytes())?; // Valid bits per sample
+        writer.write_all(&bits_per_sample.get().to_le_bytes())?; // Valid bits per sample
         writer.write_all(&channel_mask.to_le_bytes())?;
 
         // Sub-format GUID (16 bytes)
@@ -264,9 +275,10 @@ impl<W: Write + Seek> StreamedWavWriter<W> {
     /// Convert sample type to format code.
     const fn sample_type_to_format(sample_type: ValidatedSampleType) -> FormatCode {
         match sample_type {
-            ValidatedSampleType::I16 | ValidatedSampleType::I24 | ValidatedSampleType::I32 => {
-                FormatCode::Pcm
-            }
+            ValidatedSampleType::U8
+            | ValidatedSampleType::I16
+            | ValidatedSampleType::I24
+            | ValidatedSampleType::I32 => FormatCode::Pcm,
             ValidatedSampleType::F32 | ValidatedSampleType::F64 => FormatCode::IeeeFloat,
         }
     }
@@ -310,7 +322,10 @@ impl<W: Write + Seek> StreamedWavWriter<W> {
 }
 
 // Implement AudioStreamWriter (object-safe trait)
-impl<W: Write + Seek> AudioStreamWriter for StreamedWavWriter<W> {
+impl<W> AudioStreamWriter for StreamedWavWriter<W>
+where
+    W: WriteSeek,
+{
     fn flush(&mut self) -> AudioIOResult<()> {
         self.writer.flush()?;
         Ok(())
@@ -379,15 +394,13 @@ impl<W: Write + Seek> AudioStreamWriter for StreamedWavWriter<W> {
 }
 
 // Implement AudioStreamWrite (generic trait)
-impl<W: Write + Seek> AudioStreamWrite for StreamedWavWriter<W> {
+impl<W> AudioStreamWrite for StreamedWavWriter<W>
+where
+    W: WriteSeek,
+{
     fn write_frames<T>(&mut self, samples: &AudioSamples<'_, T>) -> AudioIOResult<usize>
     where
-        T: AudioSample + 'static,
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>,
+        T: StandardSample + 'static,
     {
         if self.finalized {
             return Err(AudioIOError::corrupted_data_simple(
@@ -398,7 +411,7 @@ impl<W: Write + Seek> AudioStreamWrite for StreamedWavWriter<W> {
 
         // Validate channel count
         let input_channels = samples.num_channels();
-        if input_channels != self.channels as usize {
+        if input_channels.get() != self.channels as u32 {
             return Err(AudioIOError::corrupted_data_simple(
                 "Channel count mismatch",
                 format!(
@@ -409,15 +422,13 @@ impl<W: Write + Seek> AudioStreamWrite for StreamedWavWriter<W> {
         }
 
         let frames_per_channel = samples.samples_per_channel();
-        if frames_per_channel == 0 {
-            return Ok(0);
-        }
 
         // Get interleaved samples and convert to target format
         let interleaved = samples.data.as_interleaved_vec();
 
         // Convert and write based on target sample type
         let bytes_written = match self.sample_type {
+            ValidatedSampleType::U8 => self.write_samples_as::<T, u8>(&interleaved)?,
             ValidatedSampleType::I16 => self.write_samples_as::<T, i16>(&interleaved)?,
             ValidatedSampleType::I24 => self.write_samples_as::<T, I24>(&interleaved)?,
             ValidatedSampleType::I32 => self.write_samples_as::<T, i32>(&interleaved)?,
@@ -425,38 +436,46 @@ impl<W: Write + Seek> AudioStreamWrite for StreamedWavWriter<W> {
             ValidatedSampleType::F64 => self.write_samples_as::<T, f64>(&interleaved)?,
         };
 
-        self.frames_written += frames_per_channel;
+        self.frames_written += frames_per_channel.get();
         self.data_bytes_written += bytes_written as u64;
 
-        Ok(frames_per_channel)
+        Ok(frames_per_channel.get())
     }
 }
 
-impl<W: Write + Seek> StreamedWavWriter<W> {
+impl<W> StreamedWavWriter<W>
+where
+    W: WriteSeek,
+{
     /// Convert samples from type T to type U and write to the underlying writer.
     fn write_samples_as<T, U>(&mut self, samples: &[T]) -> AudioIOResult<usize>
     where
-        T: AudioSample + 'static,
-        U: AudioSample + 'static,
-        T: ConvertTo<U>,
+        T: StandardSample + ConvertTo<U> + 'static,
+        U: StandardSample + 'static,
     {
         // Stream in chunks to avoid large allocations
         const TARGET_CHUNK_BYTES: usize = 256 * 1024; // 256 KiB
-        let bytes_per_sample = U::BYTES;
+        let bytes_per_sample = U::BYTES as usize;
+        // safety: bytes_per_sample is guaranteed > 0 for valid sample types
+        let bytes_per_sample = unsafe {
+            NonZeroUsize::new_unchecked(bytes_per_sample)
+        };
         let samples_per_chunk = TARGET_CHUNK_BYTES / bytes_per_sample;
         let samples_per_chunk = samples_per_chunk.max(self.channels as usize);
+        // safety: We ensure samples_per_chunk > 0 and is a valid chunk size for processing
+        let samples_per_chunk = unsafe { NonZeroUsize::new_unchecked(samples_per_chunk) };
 
-        let mut buf = vec![0u8; samples_per_chunk * bytes_per_sample];
+        let mut buf = non_empty_vec![0u8; samples_per_chunk.checked_mul(bytes_per_sample).expect("Should not overflow")];
         let mut total_bytes = 0usize;
 
-        for chunk in samples.chunks(samples_per_chunk) {
+        for chunk in samples.chunks(samples_per_chunk.get()) {
             let mut write_idx = 0;
             for sample in chunk {
-                let converted: U = sample.convert_to();
+                let converted: U = (*sample).convert_to();
                 let bytes = converted.to_le_bytes();
-                let dst = &mut buf[write_idx..write_idx + bytes_per_sample];
+                let dst = &mut buf[write_idx..write_idx + bytes_per_sample.get()];
                 dst.copy_from_slice(bytes.as_ref());
-                write_idx += bytes_per_sample;
+                write_idx += bytes_per_sample.get();
             }
 
             self.writer.write_all(&buf[..write_idx])?;
@@ -473,7 +492,10 @@ impl<W: Write + Seek> StreamedWavWriter<W> {
 /// 1. finalize() can fail, and we can't return errors from drop
 /// 2. Auto-finalize might hide bugs where the user forgot to finalize
 /// 3. The WAV file will be invalid without proper headers anyway
-impl<W: Write + Seek> Drop for StreamedWavWriter<W> {
+impl<W> Drop for StreamedWavWriter<W>
+where
+    W: WriteSeek,
+{
     fn drop(&mut self) {
         if !self.finalized && self.frames_written > 0 {
             // Log a warning in debug builds
@@ -488,6 +510,8 @@ impl<W: Write + Seek> Drop for StreamedWavWriter<W> {
 
 #[cfg(test)]
 mod tests {
+    use audio_samples::{channels, nzu};
+
     use super::*;
     use std::io::Cursor;
     use std::num::NonZeroU32;
@@ -503,7 +527,7 @@ mod tests {
 
             // Create test audio
             let sample_rate = NonZeroU32::new(44100).expect("Invalid sample rate");
-            let samples = AudioSamples::<f32>::zeros_multi(2, 1024, sample_rate);
+            let samples = AudioSamples::<f32>::zeros_multi(channels!(2), nzu!(1024), sample_rate);
 
             let frames = writer.write_frames(&samples).expect("Write failed");
             assert_eq!(frames, 1024);
@@ -529,8 +553,8 @@ mod tests {
 
         // Write multiple chunks
         let sample_rate = NonZeroU32::new(22050).expect("Invalid sample rate");
-        let chunk1 = AudioSamples::<f32>::zeros_mono(512, sample_rate);
-        let chunk2 = AudioSamples::<f32>::zeros_mono(512, sample_rate);
+        let chunk1 = AudioSamples::<f32>::zeros_mono(nzu!(512), sample_rate);
+        let chunk2 = AudioSamples::<f32>::zeros_mono(nzu!(512), sample_rate);
 
         writer.write_frames(&chunk1).expect("Write 1 failed");
         writer.write_frames(&chunk2).expect("Write 2 failed");
@@ -564,7 +588,7 @@ mod tests {
 
         // Try to write mono audio to stereo writer
         let sample_rate = NonZeroU32::new(44100).expect("Invalid sample rate");
-        let mono_samples = AudioSamples::<f32>::zeros_mono(1024, sample_rate);
+        let mono_samples = AudioSamples::<f32>::zeros_mono(nzu!(1024), sample_rate);
         let result = writer.write_frames(&mono_samples);
 
         assert!(result.is_err());
@@ -581,7 +605,7 @@ mod tests {
         writer.finalize().expect("Finalize failed");
 
         let sample_rate = NonZeroU32::new(44100).expect("Invalid sample rate");
-        let samples = AudioSamples::<f32>::zeros_mono(1024, sample_rate);
+        let samples = AudioSamples::<f32>::zeros_mono(nzu!(1024), sample_rate);
         let result = writer.write_frames(&samples);
 
         assert!(result.is_err());

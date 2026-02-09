@@ -3,6 +3,7 @@ use core::str::FromStr;
 use std::borrow::{Borrow, Cow};
 use std::fs::File;
 use std::io;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -16,6 +17,7 @@ use crate::traits::AudioInfoMarker;
 /// Meant to reflect the SampleType enum but only allow valid sample types for audio files, everthing but unknown
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValidatedSampleType {
+    U8,
     I16,
     I24,
     I32,
@@ -24,17 +26,18 @@ pub enum ValidatedSampleType {
 }
 
 impl ValidatedSampleType {
-    pub const fn bits_per_sample(&self) -> usize {
+    pub const fn bits_per_sample(&self) -> NonZeroUsize {
         match self {
-            ValidatedSampleType::I16 => 16,
-            ValidatedSampleType::I24 => 24,
-            ValidatedSampleType::I32 | ValidatedSampleType::F32 => 32,
-            ValidatedSampleType::F64 => 64,
+            ValidatedSampleType::U8 => audio_samples::nzu!(8),
+            ValidatedSampleType::I16 => audio_samples::nzu!(16),
+            ValidatedSampleType::I24 => audio_samples::nzu!(24),
+            ValidatedSampleType::I32 | ValidatedSampleType::F32 => audio_samples::nzu!(32),
+            ValidatedSampleType::F64 => audio_samples::nzu!(64),
         }
     }
 
-    pub const fn bytes_per_sample(&self) -> usize {
-        self.bits_per_sample() / 8
+    pub const fn bytes_per_sample(&self) -> NonZeroUsize {
+        self.bits_per_sample().div_ceil(audio_samples::nzu!(8))
     }
 }
 
@@ -43,15 +46,12 @@ impl TryFrom<SampleType> for ValidatedSampleType {
 
     fn try_from(value: SampleType) -> Result<Self, Self::Error> {
         match value {
+            SampleType::U8 => Ok(ValidatedSampleType::U8),
             SampleType::I16 => Ok(ValidatedSampleType::I16),
             SampleType::I24 => Ok(ValidatedSampleType::I24),
             SampleType::I32 => Ok(ValidatedSampleType::I32),
             SampleType::F32 => Ok(ValidatedSampleType::F32),
             SampleType::F64 => Ok(ValidatedSampleType::F64),
-            _ => Err(AudioIOError::corrupted_data_simple(
-                "Unsupported sample type for audio file",
-                format!("{value:?}"),
-            )),
         }
     }
 }
@@ -59,6 +59,7 @@ impl TryFrom<SampleType> for ValidatedSampleType {
 impl From<ValidatedSampleType> for SampleType {
     fn from(val: ValidatedSampleType) -> Self {
         match val {
+            ValidatedSampleType::U8 => SampleType::U8,
             ValidatedSampleType::I16 => SampleType::I16,
             ValidatedSampleType::I24 => SampleType::I24,
             ValidatedSampleType::I32 => SampleType::I32,
@@ -170,7 +171,7 @@ impl FromStr for FileType {
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct BaseAudioInfo {
     /// Sample rate in Hz
-    pub sample_rate: u32,
+    pub sample_rate: NonZeroU32,
     /// Number of audio channels
     pub channels: u16,
     /// Bits per sample (8, 16, 24, 32)
@@ -195,7 +196,7 @@ pub struct BaseAudioInfo {
 
 impl BaseAudioInfo {
     pub const fn new(
-        sample_rate: u32,
+        sample_rate: NonZeroU32,
         channels: u16,
         bits_per_sample: u16,
         bytes_per_sample: u16,

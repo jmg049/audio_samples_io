@@ -6,6 +6,7 @@ use std::{
 use audio_samples::{
     AudioSample, AudioSamples, ConvertTo, I24, chirp, cosine_wave, sawtooth_wave, sine_wave,
     square_wave,
+    traits::{ConvertFrom, StandardSample},
 };
 use audio_samples_io::{
     traits::{AudioFile, AudioFileRead},
@@ -15,6 +16,7 @@ use audio_samples_io::{
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use hound::{Sample, SampleFormat, WavReader, WavSpec};
 use ndarray::Array2;
+use non_empty_slice::NonEmptyVec;
 
 const SAMPLE_RATES: &[u32] = &[44_100, 96_000];
 const CHANNEL_OPTIONS: &[usize] = &[1, 2, 6];
@@ -66,12 +68,8 @@ fn bench_read_case_with_hound<T>(
     sample_rate: u32,
     channels: usize,
 ) where
-    T: AudioSample + Sample + 'static,
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
+    T: StandardSample + Sample + 'static,
+    f64: ConvertTo<T> + ConvertFrom<T>,
 {
     let scenario = prepare_read_scenario::<T>(sample_rate, channels);
     let label = case_label(sample_rate, channels);
@@ -87,12 +85,8 @@ fn bench_read_case_audio_only<T>(
     sample_rate: u32,
     channels: usize,
 ) where
-    T: AudioSample + 'static,
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
+    T: StandardSample + 'static,
+    f64: ConvertTo<T> + ConvertFrom<T>,
 {
     let scenario = prepare_read_scenario::<T>(sample_rate, channels);
     let label = case_label(sample_rate, channels);
@@ -104,12 +98,8 @@ fn bench_write_case_with_hound<T>(
     sample_rate: u32,
     channels: usize,
 ) where
-    T: AudioSample + Sample + 'static,
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
+    T: StandardSample + Sample + 'static,
+    f64: ConvertTo<T> + ConvertFrom<T>,
 {
     let audio = Arc::new(generate_audio::<T>(sample_rate, channels));
     let payload_bytes = data_payload_bytes(audio.as_ref());
@@ -134,12 +124,8 @@ fn bench_write_case_audio_only<T>(
     sample_rate: u32,
     channels: usize,
 ) where
-    T: AudioSample + 'static,
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
+    T: StandardSample + 'static,
+    f64: ConvertTo<T> + ConvertFrom<T>,
 {
     let audio = Arc::new(generate_audio::<T>(sample_rate, channels));
     let payload_bytes = data_payload_bytes(audio.as_ref());
@@ -155,12 +141,8 @@ fn configure_group(group: &mut criterion::BenchmarkGroup<'_, criterion::measurem
 
 fn prepare_read_scenario<T>(sample_rate: u32, channels: usize) -> ReadScenario
 where
-    T: AudioSample + 'static,
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
+    T: StandardSample + 'static,
+    f64: ConvertTo<T> + ConvertFrom<T>,
 {
     let audio = generate_audio::<T>(sample_rate, channels);
     let path = asset_path::<T>(sample_rate, channels);
@@ -174,12 +156,7 @@ fn bench_audio_samples_io_read<T>(
     scenario: &ReadScenario,
     case_label: &str,
 ) where
-    T: AudioSample + 'static,
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
+    T: StandardSample + 'static,
 {
     let bench_id = BenchmarkId::new(format!("audio-{}", T::LABEL), case_label.to_string());
     let path = scenario.path.clone();
@@ -229,12 +206,7 @@ fn bench_audio_samples_io_write<T>(
     payload_bytes: u64,
     case_label: &str,
 ) where
-    T: AudioSample + 'static,
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
+    T: StandardSample + 'static,
 {
     let bench_id = BenchmarkId::new(format!("audio-{}", T::LABEL), case_label.to_string());
     let capacity = buffer_capacity(payload_bytes);
@@ -259,13 +231,13 @@ fn bench_audio_samples_io_write<T>(
 
 fn bench_hound_write_impl<T>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    samples: Arc<Vec<T>>,
+    samples: Arc<NonEmptyVec<T>>,
     payload_bytes: u64,
     sample_rate: u32,
     channels: usize,
     case_label: &str,
 ) where
-    T: AudioSample + Sample + 'static,
+    T: StandardSample + Sample + 'static,
 {
     let bench_id = BenchmarkId::new(format!("hound-{}", T::LABEL), case_label.to_string());
     let capacity = buffer_capacity(payload_bytes);
@@ -303,12 +275,8 @@ fn sample_format_for<T: 'static>() -> SampleFormat {
 
 fn generate_audio<T>(sample_rate: u32, channels: usize) -> AudioSamples<'static, T>
 where
-    T: AudioSample + 'static,
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
+    T: StandardSample + 'static,
+    f64: ConvertTo<T> + ConvertFrom<T>,
 {
     let duration = Duration::from_millis(SIGNAL_DURATION_MS);
     let mut planar = Vec::new();
@@ -328,12 +296,11 @@ where
     }
 
     let frames = frames_per_channel.expect("at least one channel");
-    let data = Array2::from_shape_vec((channels, frames), planar)
-        .expect("channel stacking should succeed");
+    let data = Array2::from_shape_vec((channels, frames), planar).expect("channel stacking should succeed");
     AudioSamples::new_multi_channel(
         data,
         NonZeroU32::new(sample_rate).expect("sample rate must be non-zero"),
-    )
+    ).unwrap()
 }
 
 fn channel_signal<T>(
@@ -342,21 +309,19 @@ fn channel_signal<T>(
     sample_rate: u32,
 ) -> AudioSamples<'static, T>
 where
-    T: AudioSample + 'static,
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
+    T: StandardSample + 'static,
+    f64: ConvertTo<T> + ConvertFrom<T>,
 {
     let base_freq = 110.0 + 55.0 * channel_idx as f64;
     let amplitude = 0.35 + 0.1 * (channel_idx % 4) as f64;
+    let sample_rate = NonZeroU32::new(sample_rate).expect("sample rate must be non-zero");
+    
     match channel_idx % 5 {
-        0 => sine_wave::<T, f64>(base_freq, duration, sample_rate, amplitude),
-        1 => cosine_wave::<T, f64>(base_freq * 1.5, duration, sample_rate, amplitude * 0.9),
-        2 => square_wave::<T, f64>(base_freq * 0.75, duration, sample_rate, amplitude * 0.8),
-        3 => sawtooth_wave::<T, f64>(base_freq * 1.2, duration, sample_rate, amplitude * 0.7),
-        _ => chirp::<T, f64>(
+        0 => sine_wave::<T>(base_freq, duration, sample_rate, amplitude),
+        1 => cosine_wave::<T>(base_freq * 1.5, duration, sample_rate, amplitude * 0.9),
+        2 => square_wave::<T>(base_freq * 0.75, duration, sample_rate, amplitude * 0.8),
+        3 => sawtooth_wave::<T>(base_freq * 1.2, duration, sample_rate, amplitude * 0.7),
+        _ => chirp::<T>(
             base_freq,
             base_freq * 3.0,
             duration,
@@ -382,13 +347,19 @@ fn case_label(sample_rate: u32, channels: usize) -> String {
     format!("{sample_rate}hz_{channels}ch")
 }
 
-fn data_payload_bytes<T: AudioSample>(audio: &AudioSamples<T>) -> u64 {
-    let frames = audio.samples_per_channel() as u64;
-    let channels = audio.num_channels() as u64;
+fn data_payload_bytes<T>(audio: &AudioSamples<T>) -> u64
+where
+    T: StandardSample,
+{
+    let frames = audio.samples_per_channel().get() as u64;
+    let channels = audio.num_channels().get() as u64;
     frames * channels * bytes_per_sample::<T>()
 }
 
-fn bytes_per_sample<T: AudioSample>() -> u64 {
+fn bytes_per_sample<T>() -> u64
+where
+    T: StandardSample,
+{
     T::BYTES as u64
 }
 

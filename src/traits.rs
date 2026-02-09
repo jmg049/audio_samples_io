@@ -1,11 +1,13 @@
 use core::fmt::{Debug, Display};
-use std::{path::Path, time::Duration};
+use std::{num::NonZeroUsize, path::Path, time::Duration};
 
 use crate::{
     error::{AudioIOError, AudioIOResult},
     types::{AudioInfo, BaseAudioInfo, FileType, OpenOptions, ValidatedSampleType},
 };
-use audio_samples::{AudioSample, AudioSamples, ConvertTo, I24, SampleType};
+use audio_samples::{
+    AudioSamples, ConvertFrom, ConvertTo, SampleType, traits::StandardSample,
+};
 
 /// Marker trait for audio info structs
 pub trait AudioInfoMarker {}
@@ -102,32 +104,19 @@ pub trait AudioFile {
 pub trait AudioFileRead<'a> {
     fn read<T>(&'a self) -> AudioIOResult<AudioSamples<'a, T>>
     where
-        T: AudioSample + 'static,
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>;
+        T: StandardSample + 'static;
 
     fn read_into<T>(&'a self, audio: &mut AudioSamples<'a, T>) -> AudioIOResult<()>
     where
-        T: AudioSample + 'static,
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>;
+        T: StandardSample + 'static;
 }
 
 pub trait AudioFileWrite: AudioFile {
     /// Write audio samples to the file
-    fn write<P: AsRef<Path>, T: AudioSample>(&mut self, out_fp: P) -> AudioIOResult<()>
+    fn write<P, T>(&mut self, out_fp: P) -> AudioIOResult<()>
     where
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>;
+        P: AsRef<Path>,
+        T: StandardSample + 'static;
 }
 
 pub trait SupportsSampleTypes<const N: usize>: AudioFile {
@@ -238,15 +227,10 @@ pub trait AudioStreamRead: AudioStreamReader + AudioFileMetadata {
     fn read_frames_into<T>(
         &mut self,
         buffer: &mut AudioSamples<'_, T>,
-        frame_count: usize,
+        frame_count: NonZeroUsize,
     ) -> AudioIOResult<usize>
     where
-        T: AudioSample + 'static,
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>;
+        T: StandardSample + ConvertTo<T> + ConvertFrom<T> + 'static;
 }
 
 // ============================================================================
@@ -365,10 +349,5 @@ pub trait AudioStreamWrite: AudioStreamWriter {
     /// - The stream has already been finalized
     fn write_frames<T>(&mut self, samples: &AudioSamples<'_, T>) -> AudioIOResult<usize>
     where
-        T: AudioSample + 'static,
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>;
+        T: StandardSample + ConvertTo<T> + ConvertFrom<T> + 'static;
 }

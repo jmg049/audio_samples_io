@@ -59,10 +59,16 @@ pub use crate::python::read_pyarray;
 use std::{
     fs::File,
     io::{BufReader, BufWriter, Read, Seek, Write},
+    num::NonZeroU32,
     path::Path,
 };
 
-use audio_samples::{AudioSample, AudioSamples, ConvertTo, I24};
+use audio_samples::{
+    AudioSamples, CastFrom, CastInto, ConvertTo,
+    operations::ResamplingQuality,
+    resample,
+    traits::{ConvertFrom, StandardSample},
+};
 
 pub use crate::{
     error::{AudioIOError, AudioIOResult},
@@ -76,7 +82,11 @@ pub(crate) const MAX_MMAP_SIZE: u64 = 512 * 1024 * 1024; // 512MB for memory map
 /// Convenience trait for types that implement both Read and Seek
 pub trait ReadSeek: Read + Seek {}
 
-impl<RS: Read + Seek> ReadSeek for RS where RS: Read + Seek {}
+impl<RS> ReadSeek for RS where RS: Read + Seek {}
+
+pub trait WriteSeek: Write + Seek {}
+
+impl<WS> WriteSeek for WS where WS: Write + Seek {}
 
 // Public API
 
@@ -125,13 +135,10 @@ pub fn info<P: AsRef<Path>>(fp: P) -> AudioIOResult<BaseAudioInfo> {
 /// Returns owned AudioSamples containing all audio data from the file.
 /// Automatically detects file format and handles sample type conversion.
 /// Currently supports WAV and FLAC formats (with appropriate features enabled).
-pub fn read<P: AsRef<Path>, T: AudioSample>(fp: P) -> AudioIOResult<AudioSamples<'static, T>>
+pub fn read<P, T>(fp: P) -> AudioIOResult<AudioSamples<'static, T>>
 where
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
+    P: AsRef<Path>,
+    T: StandardSample + 'static,
 {
     let path = fp.as_ref();
 
@@ -169,10 +176,33 @@ where
     }
 }
 
-pub fn read_with<'a, R: ReadSeek, T: AudioSample>(
-    _reader: R,
-) -> AudioIOResult<AudioSamples<'a, T>> {
+pub fn read_with<'a, R, T>(_reader: R) -> AudioIOResult<AudioSamples<'a, T>>
+where
+    R: ReadSeek,
+    T: StandardSample + ConvertTo<T> + ConvertFrom<T> + 'static,
+    f64: CastInto<T> + CastFrom<T> + ConvertTo<T> + ConvertFrom<T>,
+{
     todo!()
+}
+
+pub fn read_and_resample<P, T, F>(
+    fp: P,
+    target_sr: NonZeroU32,
+    quality: Option<ResamplingQuality>,
+) -> AudioIOResult<AudioSamples<'static, T>>
+where
+    P: AsRef<Path>,
+    T: StandardSample,
+    T: StandardSample + ConvertTo<T> + ConvertFrom<T> + 'static,
+    f64: CastInto<T> + CastFrom<T> + ConvertTo<T> + ConvertFrom<T>,
+{
+    let signal = read(fp)?;
+    resample::<T>(
+        &signal,
+        target_sr,
+        quality.unwrap_or(ResamplingQuality::Fast),
+    )
+    .map_err(|e| AudioIOError::AudioSamples(e))
 }
 
 /// Open a WAV file for streaming reads.
@@ -200,7 +230,10 @@ pub fn read_with<'a, R: ReadSeek, T: AudioSample>(
 /// # Ok::<(), audio_samples_io::error::AudioIOError>(())
 /// ```
 #[cfg(feature = "wav")]
-pub fn open_streamed<P: AsRef<Path>>(fp: P) -> AudioIOResult<StreamedWavFile<BufReader<File>>> {
+pub fn open_streamed<P>(fp: P) -> AudioIOResult<StreamedWavFile<BufReader<File>>>
+where
+    P: AsRef<Path>,
+{
     let path = fp.as_ref();
 
     match FileType::from_path(path) {
@@ -242,7 +275,10 @@ pub fn open_streamed<P: AsRef<Path>>(fp: P) -> AudioIOResult<StreamedWavFile<Buf
 /// # Ok::<(), audio_samples_io::error::AudioIOError>(())
 /// ```
 #[cfg(feature = "wav")]
-pub fn open_streamed_reader<R: ReadSeek>(reader: R) -> AudioIOResult<wav::StreamedWavFile<R>> {
+pub fn open_streamed_reader<R>(reader: R) -> AudioIOResult<wav::StreamedWavFile<R>>
+where
+    R: ReadSeek,
+{
     wav::StreamedWavFile::new(reader)
 }
 
@@ -272,7 +308,10 @@ pub fn open_streamed_reader<R: ReadSeek>(reader: R) -> AudioIOResult<wav::Stream
 /// process_any_stream(stream);
 /// # Ok::<(), audio_samples_io::error::AudioIOError>(())
 /// ```
-pub fn open_streamed_dyn<P: AsRef<Path>>(fp: P) -> AudioIOResult<Box<dyn AudioStreamReader>> {
+pub fn open_streamed_dyn<P>(fp: P) -> AudioIOResult<Box<dyn AudioStreamReader>>
+where
+    P: AsRef<Path>,
+{
     let path = fp.as_ref();
 
     match FileType::from_path(path) {
@@ -333,12 +372,15 @@ pub fn open_streamed_dyn<P: AsRef<Path>>(fp: P) -> AudioIOResult<Box<dyn AudioSt
 /// # Ok::<(), audio_samples_io::error::AudioIOError>(())
 /// ```
 #[cfg(feature = "wav")]
-pub fn create_streamed<P: AsRef<Path>>(
+pub fn create_streamed<P>(
     fp: P,
     channels: u16,
     sample_rate: u32,
     sample_type: ValidatedSampleType,
-) -> AudioIOResult<StreamedWavWriter<BufWriter<File>>> {
+) -> AudioIOResult<StreamedWavWriter<BufWriter<File>>>
+where
+    P: AsRef<Path>,
+{
     let path = fp.as_ref();
 
     match FileType::from_path(path) {
@@ -353,6 +395,9 @@ pub fn create_streamed<P: AsRef<Path>>(
                 let file = File::create(path)?;
                 let writer = BufWriter::new(file);
                 match sample_type {
+                    ValidatedSampleType::U8 => {
+                        StreamedWavWriter::new_i16(writer, channels, sample_rate)
+                    }
                     ValidatedSampleType::I16 => {
                         StreamedWavWriter::new_i16(writer, channels, sample_rate)
                     }
@@ -377,9 +422,9 @@ pub fn create_streamed<P: AsRef<Path>>(
     }
 }
 
-/// Create a streaming WAV writer to any `Write + Seek` destination.
+/// Create a streaming WAV writer to any `WriteSeek` destination.
 ///
-/// This allows streaming to any destination implementing `Write + Seek`,
+/// This allows streaming to any destination implementing `WriteSeek`,
 /// such as in-memory buffers, network streams, or custom I/O implementations.
 ///
 /// # Example
@@ -408,13 +453,17 @@ pub fn create_streamed<P: AsRef<Path>>(
 /// # Ok::<(), audio_samples_io::error::AudioIOError>(())
 /// ```
 #[cfg(feature = "wav")]
-pub fn create_streamed_writer<W: Write + Seek>(
+pub fn create_streamed_writer<W>(
     writer: W,
     channels: u16,
     sample_rate: u32,
     sample_type: ValidatedSampleType,
-) -> AudioIOResult<StreamedWavWriter<W>> {
+) -> AudioIOResult<StreamedWavWriter<W>>
+where
+    W: WriteSeek,
+{
     match sample_type {
+        ValidatedSampleType::U8 => StreamedWavWriter::new_i16(writer, channels, sample_rate),
         ValidatedSampleType::I16 => StreamedWavWriter::new_i16(writer, channels, sample_rate),
         ValidatedSampleType::I24 => StreamedWavWriter::new_i24(writer, channels, sample_rate),
         ValidatedSampleType::I32 => StreamedWavWriter::new_i32(writer, channels, sample_rate),
@@ -428,7 +477,10 @@ pub fn create_streamed_writer<W: Write + Seek>(
 /// Returns a trait object that can be used for low-level file operations.
 /// For simple use cases, prefer the `read()` and `info()` convenience functions.
 /// Currently supports WAV and FLAC formats (with appropriate features enabled).
-pub fn open<P: AsRef<Path>>(fp: P) -> AudioIOResult<Box<dyn AudioFile>> {
+pub fn open<P>(fp: P) -> AudioIOResult<Box<dyn AudioFile>>
+where
+    P: AsRef<Path>,
+{
     let path = fp.as_ref();
 
     match FileType::from_path(path) {
@@ -464,13 +516,10 @@ pub fn open<P: AsRef<Path>>(fp: P) -> AudioIOResult<Box<dyn AudioFile>> {
     }
 }
 
-pub fn write<P: AsRef<Path>, T: AudioSample>(fp: P, audio: &AudioSamples<T>) -> AudioIOResult<()>
+pub fn write<P, T>(fp: P, audio: &AudioSamples<T>) -> AudioIOResult<()>
 where
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
+    P: AsRef<Path>,
+    T: StandardSample + 'static,
 {
     let path = fp.as_ref();
 
@@ -536,17 +585,10 @@ where
 /// write_with(cursor, &audio, FileType::WAV)?;
 /// # Ok::<(), audio_samples_io::error::AudioIOError>(())
 /// ```
-pub fn write_with<T: AudioSample, W: Write>(
-    writer: W,
-    audio: &AudioSamples<T>,
-    format: FileType,
-) -> AudioIOResult<()>
+pub fn write_with<T, W>(writer: W, audio: &AudioSamples<T>, format: FileType) -> AudioIOResult<()>
 where
-    i16: ConvertTo<T>,
-    audio_samples::I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
+    T: StandardSample + 'static,
+    W: Write,
 {
     match format {
         FileType::WAV => {
@@ -581,6 +623,8 @@ where
 mod lib_tests {
     use std::time::Duration;
 
+    use audio_samples::sample_rate;
+
     use super::*;
 
     #[test]
@@ -590,7 +634,10 @@ mod lib_tests {
 
         let audio_info = info_result.expect("Expected successful info retrieval");
         assert_eq!(audio_info.file_type, FileType::WAV);
-        assert!(audio_info.sample_rate > 0, "Sample rate should be positive");
+        assert!(
+            audio_info.sample_rate.get() > 0,
+            "Sample rate should be positive"
+        );
         assert!(audio_info.channels > 0, "Channel count should be positive");
         println!("Audio info: {audio_info:#}");
     }
@@ -601,14 +648,6 @@ mod lib_tests {
         assert!(audio_result.is_ok(), "Failed to read test WAV file");
 
         let audio_samples = audio_result.expect("Expected successful audio read");
-        assert!(
-            !audio_samples.is_empty(),
-            "Audio samples should not be empty"
-        );
-        assert!(
-            audio_samples.sample_rate().get() > 0,
-            "Sample rate should be positive"
-        );
         println!(
             "Read {} samples at {} Hz",
             audio_samples.len(),
@@ -620,9 +659,6 @@ mod lib_tests {
     fn test_open_function() {
         let file_result = open("resources/test.wav");
         assert!(file_result.is_ok(), "Failed to open test WAV file");
-
-        let audio_file = file_result.expect("Expected successful file open");
-        assert!(!audio_file.is_empty(), "File should not be empty");
     }
 
     #[test]
@@ -631,9 +667,8 @@ mod lib_tests {
         use std::fs;
 
         // Generate test audio
-        let sample_rate = 44100;
-        let sine_samples =
-            sine_wave::<f32, f32>(440.0, Duration::from_secs_f64(0.1), sample_rate, 0.5);
+        let sample_rate = sample_rate!(44100);
+        let sine_samples = sine_wave::<f32>(440.0, Duration::from_secs_f64(0.1), sample_rate, 0.5);
 
         // Test writing WAV file
         let output_path = std::env::temp_dir().join("test_lib_write.wav");
@@ -646,7 +681,7 @@ mod lib_tests {
         );
 
         let read_back = read::<_, f32>(&output_path).expect("Failed to read back WAV file");
-        assert_eq!(read_back.sample_rate().get(), sample_rate);
+        assert_eq!(read_back.sample_rate(), sample_rate);
         assert_eq!(read_back.total_samples(), sine_samples.total_samples());
         assert_eq!(read_back.num_channels(), sine_samples.num_channels());
 
@@ -681,9 +716,8 @@ mod lib_tests {
         use std::io::Cursor;
 
         // Generate test audio
-        let sample_rate = 22050;
-        let sine_samples =
-            sine_wave::<i16, f32>(880.0, Duration::from_secs_f64(0.05), sample_rate, 0.8);
+        let sample_rate = sample_rate!(22050);
+        let sine_samples = sine_wave::<i16>(880.0, Duration::from_secs_f64(0.05), sample_rate, 0.8);
 
         // Write to in-memory buffer
         let mut buffer = Vec::new();
@@ -703,7 +737,7 @@ mod lib_tests {
         std::fs::write(&temp_file, &buffer).expect("Failed to write buffer to temp file");
 
         let read_back = read::<_, i16>(&temp_file).expect("Failed to read back WAV from buffer");
-        assert_eq!(read_back.sample_rate().get(), sample_rate);
+        assert_eq!(read_back.sample_rate(), sample_rate);
         assert_eq!(read_back.total_samples(), sine_samples.total_samples());
         assert_eq!(read_back.num_channels(), sine_samples.num_channels());
 
@@ -726,9 +760,8 @@ mod lib_tests {
         use std::io::Cursor;
 
         // Generate test audio
-        let sample_rate = 44100;
-        let sine_samples =
-            sine_wave::<f32, f32>(440.0, Duration::from_secs_f64(0.01), sample_rate, 0.5);
+        let sample_rate = sample_rate!(44100);
+        let sine_samples = sine_wave::<f32>(440.0, Duration::from_secs_f64(0.01), sample_rate, 0.5);
 
         // Test with explicit WAV format
         let mut wav_buffer = Vec::new();
@@ -768,9 +801,8 @@ mod lib_tests {
         use audio_samples::{AudioTypeConversion, sine_wave};
         use std::fs;
 
-        let sample_rate = 48000;
-        let sine_base =
-            sine_wave::<f32, f32>(1000.0, Duration::from_secs_f64(0.02), sample_rate, 0.3);
+        let sample_rate = sample_rate!(48000);
+        let sine_base = sine_wave::<f32>(1000.0, Duration::from_secs_f64(0.02), sample_rate, 0.3);
 
         // Test different sample types
         let test_cases = vec![
@@ -788,7 +820,7 @@ mod lib_tests {
                     let read_back =
                         read::<_, i16>(&output_path).expect("Failed to read back i16 WAV");
                     assert_eq!(
-                        read_back.sample_rate().get(),
+                        read_back.sample_rate(),
                         sample_rate,
                         "Sample rate mismatch for i16"
                     );
@@ -817,7 +849,7 @@ mod lib_tests {
                     let read_back =
                         read::<_, f32>(&output_path).expect("Failed to read back f32 WAV");
                     assert_eq!(
-                        read_back.sample_rate().get(),
+                        read_back.sample_rate(),
                         sample_rate,
                         "Sample rate mismatch for f32"
                     );
@@ -857,9 +889,8 @@ mod lib_tests {
     fn test_unsupported_format_error() {
         use audio_samples::sine_wave;
 
-        let sample_rate = 44100;
-        let sine_samples =
-            sine_wave::<f32, f32>(440.0, Duration::from_secs_f64(0.01), sample_rate, 0.1);
+        let sample_rate = sample_rate!(44100);
+        let sine_samples = sine_wave::<f32>(440.0, Duration::from_secs_f64(0.01), sample_rate, 0.1);
 
         // Try to write to unsupported format
         let result = write(std::env::temp_dir().join("test.mp3"), &sine_samples);

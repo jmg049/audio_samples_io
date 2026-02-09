@@ -2,12 +2,17 @@ use crate::{
     error::{AudioIOError, AudioIOResult},
     types::ValidatedSampleType,
 };
-use audio_samples::{AudioSample, ConvertTo, I24};
-use std::{any::TypeId, mem};
+use audio_samples::{
+    I24,
+    traits::{ConvertFrom, StandardSample},
+};
+use non_empty_iter::{IntoNonEmptyIterator, NonEmptyIterator};
+use non_empty_slice::NonEmptyVec;
+use std::{any::TypeId, mem, num::NonZeroU32};
 
 #[derive(Debug, Clone)]
 pub struct DataChunk<'a> {
-    bytes: &'a [u8],
+    bytes: &'a [u8], // Raw audio data bytes can be empty
 }
 
 impl<'a> AsRef<[u8]> for DataChunk<'a> {
@@ -21,10 +26,6 @@ impl<'a> DataChunk<'a> {
         self.bytes.len()
     }
 
-    pub const fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
-    }
-
     pub const fn from_bytes(bytes: &'a [u8]) -> DataChunk<'a> {
         DataChunk { bytes }
     }
@@ -34,15 +35,17 @@ impl<'a> DataChunk<'a> {
     }
 
     pub(crate) const fn total_samples(&self, sample_type: ValidatedSampleType) -> usize {
-        (self.bytes.len() as f64 / sample_type.bytes_per_sample() as f64) as usize
+        let sample_size = sample_type.bytes_per_sample().get();
+        self.bytes.len() / sample_size
     }
 
     pub(crate) const fn total_frames(
         &self,
         sample_type: ValidatedSampleType,
-        num_channels: usize,
+        num_channels: NonZeroU32,
     ) -> usize {
         let total_samples = self.total_samples(sample_type);
+        let num_channels = num_channels.get() as usize;
         total_samples / num_channels
     }
 
@@ -53,9 +56,12 @@ impl<'a> DataChunk<'a> {
     /// Ok(Vec<S>) if successful, or an AudioIOError if the data is corrupted or unsupported.
     ///
     /// *Note:* This function does not handle 24-bit samples; instead this is done before calling this function.
-    fn to_sample_vec<S: AudioSample>(&self) -> AudioIOResult<Vec<S>> {
-        let sample_size = S::BITS as usize / 8;
-        if !self.bytes.len().is_multiple_of(sample_size) {
+    fn to_sample_vec<S>(&self) -> AudioIOResult<NonEmptyVec<S>>
+    where
+        S: StandardSample,
+    {
+        let sample_size = S::BYTES;
+        if !(self.bytes.len()).is_multiple_of(sample_size as usize) {
             return Err(AudioIOError::corrupted_data_simple(
                 "Data size not aligned to sample boundaries",
                 format!(
@@ -70,15 +76,24 @@ impl<'a> DataChunk<'a> {
         let ptr = self.bytes.as_ptr();
         let aligned = (ptr as usize).is_multiple_of(mem::align_of::<S>());
         if aligned && (S::BITS == 16 || S::BITS == 32) {
-            let num_samples = self.bytes.len() / sample_size;
+            let num_samples = self.bytes.len() / sample_size as usize;
             // Safety: alignment and size multiples already checked.
             let slice = unsafe { core::slice::from_raw_parts(ptr as *const S, num_samples) };
-            return Ok(slice.to_vec());
+            // SAFETY: non-empty by design since data chunk must contain at least one sample to be valid
+            return Ok(unsafe { NonEmptyVec::new_unchecked(slice.to_vec()) });
         }
 
         // Fallback: decode little-endian bytes per sample.
-        let mut out = Vec::with_capacity(self.bytes.len() / sample_size);
+        let mut out = Vec::with_capacity(self.bytes.len() / sample_size as usize);
         match S::BITS {
+            8 => {
+                for &b in self.bytes {
+                    let v = b as i8;
+                    // Safety: i8 and S share size (8 bits enforced above).
+                    let s: S = unsafe { mem::transmute_copy(&v) };
+                    out.push(s);
+                }
+            }
             16 => {
                 for chunk in self.bytes.chunks_exact(2) {
                     let v = i16::from_le_bytes([chunk[0], chunk[1]]);
@@ -109,32 +124,38 @@ impl<'a> DataChunk<'a> {
                 ));
             }
         }
-
+        // safety: non-empty by design since data chunk must contain at least one sample to be valid
+        let out = unsafe {
+            NonEmptyVec::new_unchecked(out)
+        };
         Ok(out)
     }
 
     /// A necessary workaround to read 24-bit integer samples, since on disk they are stored as 3 bytes, but in memory they are represented as a 4-byte struct.
-    fn read_i24_vec(&self) -> AudioIOResult<Vec<I24>> {
+    fn read_i24_vec(&self) -> NonEmptyVec<I24> {
         // bytes multiple of 3 already validated
         let chunks = self.bytes.chunks_exact(3);
-        Ok(chunks
+        let v = chunks
             .into_iter()
             .map(|c| I24::from_le_bytes([c[0], c[1], c[2]]))
-            .collect())
+            .collect();
+        // SAFETY: non-empty by design since data chunk must contain at least one sample to be valid
+        unsafe { NonEmptyVec::new_unchecked(v) }
     }
 
     /// Read samples from the data chunk, converting from stored type `S` to desired type `T`.
-    pub fn read_samples<S: AudioSample + ConvertTo<T>, T: AudioSample>(
-        &self,
-    ) -> AudioIOResult<Vec<T>>
+    pub fn read_samples<S, T>(&self) -> AudioIOResult<NonEmptyVec<T>>
     where
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>,
+        S: StandardSample + 'static,
+        T: StandardSample + ConvertFrom<S> + 'static,
     {
-        let sample_size = S::BYTES;
+        if self.bytes.is_empty() {
+            return Err(AudioIOError::corrupted_data_simple(
+                "Tried to read samples from empty data chunk",
+                "data chunk is empty",
+            ));
+        }
+        let sample_size = S::BYTES as usize;
 
         if S::BITS == 24 {
             if !self.bytes.len().is_multiple_of(3) {
@@ -145,35 +166,37 @@ impl<'a> DataChunk<'a> {
             }
 
             return Ok(self
-                .read_i24_vec()?
-                .into_iter()
-                .map(S::convert_from)
-                .collect());
+                .read_i24_vec()
+                .into_non_empty_iter()
+                .map(T::convert_from)
+                .collect_non_empty());
         } else if S::BITS == 64 {
-            if !self.bytes.len().is_multiple_of(sample_size) {
+            if !self.bytes.len().is_multiple_of(sample_size as usize) {
                 return Err(AudioIOError::corrupted_data_simple(
                     "Data size not aligned to 64-bit samples",
                     format!("Data size {} is not a multiple of 8", self.bytes.len()),
                 ));
             }
 
-            let chunks = self.bytes.chunks_exact(sample_size);
-            return Ok(chunks
+            let chunks = self.bytes.chunks_exact(sample_size as usize);
+            let v = chunks
                 .into_iter()
                 .map(|c| {
                     let f: f64 =
                         f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
 
-                    S::convert_from(f)
+                    T::convert_from(f)
                 })
-                .collect());
+                .collect();
+            // safety: non-empty by design since data chunk must contain at least one sample to be valid
+            return Ok(unsafe { NonEmptyVec::new_unchecked(v) });
         }
 
         Ok(self
             .to_sample_vec::<S>()?
-            .into_iter()
+            .into_non_empty_iter()
             .map(T::convert_from)
-            .collect())
+            .collect_non_empty())
     }
 }
 
@@ -184,7 +207,8 @@ mod tests {
     #[test]
     fn test_data_chunk_rejects_unaligned_i16() {
         let data = [0u8; 1];
-        let chunk = DataChunk::from_bytes(&data);
+        let data_slice = non_empty_slice::non_empty_slice!(&data);
+        let chunk = DataChunk::from_bytes(data_slice);
         let err = chunk
             .read_samples::<i16, i16>()
             .expect_err("Expected unaligned read to fail");
@@ -195,7 +219,8 @@ mod tests {
     #[test]
     fn test_data_chunk_rejects_unaligned_i24() {
         let data = [0u8; 4]; // not a multiple of 3
-        let chunk = DataChunk::from_bytes(&data);
+        let data_slice = non_empty_slice::non_empty_slice!(&data);
+        let chunk = DataChunk::from_bytes(data_slice);
         let err = chunk
             .read_samples::<I24, I24>()
             .expect_err("Expected unaligned read to fail");
@@ -206,7 +231,8 @@ mod tests {
     #[test]
     fn test_data_chunk_rejects_unaligned_f64() {
         let data = [0u8; 10]; // not a multiple of 8
-        let chunk = DataChunk::from_bytes(&data);
+        let data_slice = non_empty_slice::non_empty_slice!(&data);
+        let chunk = DataChunk::from_bytes(data_slice);
         let err = chunk
             .read_samples::<f64, f64>()
             .expect_err("Expected unaligned read to fail");
@@ -218,11 +244,12 @@ mod tests {
     fn test_data_chunk_read_i24_with_padding() {
         // Single 24-bit sample (odd frame count is fine as long as size is multiple of 3)
         let bytes = [0x01u8, 0x02, 0x03];
-        let chunk = DataChunk::from_bytes(&bytes);
+        let data_slice = non_empty_slice::non_empty_slice!(&bytes);
+        let chunk = DataChunk::from_bytes(data_slice);
         let samples = chunk
             .read_samples::<I24, I24>()
             .expect("Expected aligned I24 read to succeed");
-        assert_eq!(samples.len(), 1);
+        assert_eq!(samples.len().get(), 1);
         assert_eq!(samples[0], I24::from_le_bytes([0x01, 0x02, 0x03]));
     }
 
@@ -233,10 +260,12 @@ mod tests {
         for v in values {
             bytes.extend_from_slice(&v.to_le_bytes());
         }
-        let chunk = DataChunk::from_bytes(&bytes);
+        let data_slice = non_empty_slice::non_empty_slice!(&bytes);
+        let chunk = DataChunk::from_bytes(data_slice);
         let samples = chunk
             .read_samples::<f64, f64>()
             .expect("Expected aligned f64 read to succeed");
+        let values = NonEmptyVec::new(values.to_vec()).unwrap();
         assert_eq!(samples, values);
     }
 }
