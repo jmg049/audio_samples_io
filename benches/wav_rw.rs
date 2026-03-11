@@ -296,11 +296,13 @@ where
     }
 
     let frames = frames_per_channel.expect("at least one channel");
-    let data = Array2::from_shape_vec((channels, frames), planar).expect("channel stacking should succeed");
+    let data = Array2::from_shape_vec((channels, frames), planar)
+        .expect("channel stacking should succeed");
     AudioSamples::new_multi_channel(
         data,
         NonZeroU32::new(sample_rate).expect("sample rate must be non-zero"),
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 fn channel_signal<T>(
@@ -315,7 +317,7 @@ where
     let base_freq = 110.0 + 55.0 * channel_idx as f64;
     let amplitude = 0.35 + 0.1 * (channel_idx % 4) as f64;
     let sample_rate = NonZeroU32::new(sample_rate).expect("sample rate must be non-zero");
-    
+
     match channel_idx % 5 {
         0 => sine_wave::<T>(base_freq, duration, sample_rate, amplitude),
         1 => cosine_wave::<T>(base_freq * 1.5, duration, sample_rate, amplitude * 0.9),

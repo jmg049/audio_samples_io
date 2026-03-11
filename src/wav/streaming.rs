@@ -43,7 +43,7 @@ use crate::{
 /// ```no_run
 /// use audio_samples_io::wav::StreamedWavFile;
 /// use audio_samples_io::traits::AudioFileMetadata;
-/// use audio_samples::AudioSamples;
+/// use audio_samples::{AudioSamples, nzu};
 /// use std::fs::File;
 /// use std::io::BufReader;
 /// use std::num::NonZeroU32;
@@ -52,11 +52,11 @@ use crate::{
 /// let mut streamed = StreamedWavFile::new(file)?;
 ///
 /// // Read 1024 frames at a time
-/// let channels = streamed.num_channels() as usize;
+/// let channels = NonZeroU32::new(streamed.num_channels() as u32).ok_or_else(|| audio_samples_io::error::AudioIOError::UnsupportedFormat("channels must be non-zero".to_string()))?;
 /// let sample_rate = NonZeroU32::new(streamed.sample_rate()).ok_or_else(|| audio_samples_io::error::AudioIOError::UnsupportedFormat("sample_rate must be non-zero".to_string()))?;
-/// let mut buffer = AudioSamples::<f32>::zeros_multi(channels, 1024, sample_rate);
+/// let mut buffer = AudioSamples::<f32>::zeros_multi(channels, nzu!(1024), sample_rate);
 /// while streamed.remaining_frames() > 0 {
-///     let frames_read = streamed.read_frames_into(&mut buffer, 1024)?;
+///     let frames_read = streamed.read_frames_into(&mut buffer, nzu!(1024))?;
 ///     // Process buffer...
 /// }
 /// # Ok::<(), audio_samples_io::error::AudioIOError>(())
@@ -483,16 +483,14 @@ where
         let num_channels = unsafe { NonZeroU32::new_unchecked(self.channels as u32) };
 
         if buffer.is_mono() {
-            buffer.replace_with_vec(converted)?;
+            buffer.replace_with_vec(&converted)?;
         } else {
-            let planar = audio_samples::simd_conversions::deinterleave_multi_vec(
-                &converted,
-                num_channels,
-            )
-            .map_err(|e| {
-                AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string())
-            })?;
-            buffer.replace_with_vec(planar)?;
+            let planar =
+                audio_samples::simd_conversions::deinterleave_multi_vec(&converted, num_channels)
+                    .map_err(|e| {
+                    AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string())
+                })?;
+            buffer.replace_with_vec(&planar)?;
         }
 
         self.current_frame += frames_read;

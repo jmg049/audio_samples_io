@@ -52,6 +52,9 @@ impl TryFrom<SampleType> for ValidatedSampleType {
             SampleType::I32 => Ok(ValidatedSampleType::I32),
             SampleType::F32 => Ok(ValidatedSampleType::F32),
             SampleType::F64 => Ok(ValidatedSampleType::F64),
+            _ => Err(AudioIOError::unsupported_format(format!(
+                "Unsupported sample type: {value:?}"
+            ))),
         }
     }
 }

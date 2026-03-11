@@ -125,9 +125,7 @@ impl<'a> DataChunk<'a> {
             }
         }
         // safety: non-empty by design since data chunk must contain at least one sample to be valid
-        let out = unsafe {
-            NonEmptyVec::new_unchecked(out)
-        };
+        let out = unsafe { NonEmptyVec::new_unchecked(out) };
         Ok(out)
     }
 

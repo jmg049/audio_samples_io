@@ -5,9 +5,7 @@ use crate::{
     error::{AudioIOError, AudioIOResult},
     types::{AudioInfo, BaseAudioInfo, FileType, OpenOptions, ValidatedSampleType},
 };
-use audio_samples::{
-    AudioSamples, ConvertFrom, ConvertTo, SampleType, traits::StandardSample,
-};
+use audio_samples::{AudioSamples, ConvertFrom, ConvertTo, SampleType, traits::StandardSample};
 
 /// Marker trait for audio info structs
 pub trait AudioInfoMarker {}
@@ -191,16 +189,16 @@ pub trait AudioStreamReader {
 ///
 /// ```no_run
 /// use audio_samples_io::traits::{AudioStreamRead, AudioStreamReader, AudioFileMetadata};
-/// use audio_samples::AudioSamples;
+/// use audio_samples::{AudioSamples, nzu};
 /// use std::num::NonZeroU32;
 ///
 /// fn read_all<S: AudioStreamRead + AudioFileMetadata>(stream: &mut S) -> Result<(), Box<dyn std::error::Error>> {
-///     let channels = stream.num_channels() as usize;
+///     let channels = NonZeroU32::new(stream.num_channels() as u32).ok_or("channels must be non-zero")?;
 ///     let sample_rate = NonZeroU32::new(stream.sample_rate()).ok_or("sample_rate must be non-zero")?;
-///     let mut buffer = AudioSamples::<f32>::zeros_multi(channels, 1024, sample_rate);
-///     
+///     let mut buffer = AudioSamples::<f32>::zeros_multi(channels, nzu!(1024), sample_rate);
+///
 ///     while stream.remaining_frames() > 0 {
-///         let frames = stream.read_frames_into(&mut buffer, 1024)?;
+///         let frames = stream.read_frames_into(&mut buffer, nzu!(1024))?;
 ///         // Process frames...
 ///     }
 ///     Ok(())

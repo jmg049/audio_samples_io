@@ -521,7 +521,8 @@ where
     // SAFETY: sample_rate comes from validated WAV header which requires non-zero sample rate
     if num_channels.get() == 1 {
         // Mono: data is already in correct format
-        AudioSamples::new_mono(Array1::from_vec(interleaved_data.to_vec()), sample_rate).map_err(Into::into)
+        AudioSamples::new_mono(Array1::from_vec(interleaved_data.to_vec()), sample_rate)
+            .map_err(Into::into)
     } else {
         let total_samples = interleaved_data.len();
         let frames = total_samples.get() / num_channels.get() as usize;
@@ -541,9 +542,12 @@ where
         .map_err(|e| AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string()))?;
 
         // Create the planar array with shape (num_channels, frames)
-        
-        let arr = Array2::from_shape_vec((num_channels.get() as usize, frames), planar_data.to_vec())
-            .map_err(|e| AudioIOError::corrupted_data_simple("Array shape error", e.to_string()))?;
+
+        let arr =
+            Array2::from_shape_vec((num_channels.get() as usize, frames), planar_data.to_vec())
+                .map_err(|e| {
+                    AudioIOError::corrupted_data_simple("Array shape error", e.to_string())
+                })?;
 
         AudioSamples::new_multi_channel(arr, sample_rate).map_err(Into::into)
     }
@@ -600,7 +604,7 @@ where
 
     // For mono audio, data is already in correct format
     if audio.is_mono() {
-        audio.replace_with_vec(converted).map_err(|e| e.into())
+        audio.replace_with_vec(&converted).map_err(|e| e.into())
     } else {
         // Multi-channel: deinterleave the converted data before replacing
         // Use optimized deinterleave from audio_samples
@@ -609,7 +613,7 @@ where
                 .map_err(|e| {
                     AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string())
                 })?;
-        audio.replace_with_vec(planar_data).map_err(|e| e.into())
+        audio.replace_with_vec(&planar_data).map_err(|e| e.into())
     }
 }
 
@@ -666,6 +670,7 @@ const fn sample_type_to_format(sample_type: SampleType) -> Option<FormatCode> {
             Some(FormatCode::Pcm)
         }
         SampleType::F32 | SampleType::F64 => Some(FormatCode::IeeeFloat),
+        _ => None,
     }
 }
 
@@ -711,8 +716,11 @@ const fn needs_extensible_format<T>(channels: u16) -> bool
 where
     T: StandardSample,
 {
-    // Use extensible format for more than 2 channels or non-standard bit depths
-    channels > 2 || (T::BITS != 16 && T::BITS != 32)
+    // Use extensible format for more than 2 channels or non-standard bit depths.
+    // 8-bit, 16-bit, and 32-bit PCM/float formats use base format for 1-2 channels
+    // for maximum compatibility (e.g. soundfile/libsndfile doesn't support
+    // WAVE_FORMAT_EXTENSIBLE with 8-bit PCM).
+    channels > 2 || (T::BITS != 8 && T::BITS != 16 && T::BITS != 32)
 }
 
 /// Write 40-byte extensible FMT chunk
@@ -771,11 +779,18 @@ where
     writer.write_all(&channel_mask.to_le_bytes())?; // Channel mask
 
     // Sub-format GUID (16 bytes)
+    // Standard KSDATAFORMAT_SUBTYPE_PCM:       {00000001-0000-0010-8000-00AA00389B71}
+    // Standard KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: {00000003-0000-0010-8000-00AA00389B71}
+    // In memory: Data1 (4 bytes LE), Data2 (2 bytes LE), Data3 (2 bytes LE), Data4 (8 bytes BE)
     let mut sub_format = [0u8; 16];
-    sub_format[0..2].copy_from_slice(&format_code.as_u16().to_le_bytes());
-    sub_format[2..16].copy_from_slice(&[
-        0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71, 0x00, 0x00,
-    ]);
+    // Data1: format_code as u32 LE (e.g. 1 for PCM, 3 for IEEE float)
+    sub_format[0..4].copy_from_slice(&(u32::from(format_code.as_u16())).to_le_bytes());
+    // Data2: 0x0000
+    sub_format[4..6].copy_from_slice(&0u16.to_le_bytes());
+    // Data3: 0x0010
+    sub_format[6..8].copy_from_slice(&0x0010u16.to_le_bytes());
+    // Data4: 0x8000-00AA00389B71 (big-endian)
+    sub_format[8..16].copy_from_slice(&[0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71]);
     writer.write_all(&sub_format)?;
 
     Ok(())

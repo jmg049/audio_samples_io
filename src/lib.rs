@@ -215,16 +215,16 @@ where
 /// ```no_run
 /// use audio_samples_io::open_streamed;
 /// use audio_samples_io::traits::AudioFileMetadata;
-/// use audio_samples::AudioSamples;
+/// use audio_samples::{AudioSamples, nzu};
 /// use std::num::NonZeroU32;
 ///
 /// let mut streamed = open_streamed("large_file.wav")?;
-/// let channels = streamed.num_channels() as usize;
+/// let channels = NonZeroU32::new(streamed.num_channels() as u32).ok_or_else(|| audio_samples_io::error::AudioIOError::UnsupportedFormat("channels must be non-zero".to_string()))?;
 /// let sample_rate = NonZeroU32::new(streamed.sample_rate()).ok_or_else(|| audio_samples_io::error::AudioIOError::UnsupportedFormat("sample_rate must be non-zero".to_string()))?;
-/// let mut buffer = AudioSamples::<f32>::zeros_multi(channels, 1024, sample_rate);
+/// let mut buffer = AudioSamples::<f32>::zeros_multi(channels, nzu!(1024), sample_rate);
 ///
 /// while streamed.remaining_frames() > 0 {
-///     let frames = streamed.read_frames_into(&mut buffer, 1024)?;
+///     let frames = streamed.read_frames_into(&mut buffer, nzu!(1024))?;
 ///     // Process frames...
 /// }
 /// # Ok::<(), audio_samples_io::error::AudioIOError>(())
@@ -352,7 +352,7 @@ where
 /// ```no_run
 /// use audio_samples_io::{create_streamed, types::ValidatedSampleType};
 /// use audio_samples_io::traits::{AudioStreamWrite, AudioStreamWriter};
-/// use audio_samples::AudioSamples;
+/// use audio_samples::{AudioSamples, channels, nzu};
 /// use std::num::NonZeroU32;
 ///
 /// let mut writer = create_streamed(
@@ -364,7 +364,7 @@ where
 ///
 /// // Write audio in chunks
 /// let sample_rate = NonZeroU32::new(44100).ok_or_else(|| audio_samples_io::error::AudioIOError::UnsupportedFormat("sample_rate must be non-zero".to_string()))?;
-/// let chunk = AudioSamples::<f32>::zeros_multi(2, 1024, sample_rate);
+/// let chunk = AudioSamples::<f32>::zeros_multi(channels!(2), nzu!(1024), sample_rate);
 /// writer.write_frames(&chunk)?;
 ///
 /// // Always finalize to update headers
@@ -432,7 +432,7 @@ where
 /// ```no_run
 /// use audio_samples_io::{create_streamed_writer, types::ValidatedSampleType};
 /// use audio_samples_io::traits::{AudioStreamWrite, AudioStreamWriter};
-/// use audio_samples::AudioSamples;
+/// use audio_samples::{AudioSamples, nzu};
 /// use std::io::Cursor;
 /// use std::num::NonZeroU32;
 ///
@@ -447,7 +447,7 @@ where
 /// )?;
 ///
 /// let sample_rate = NonZeroU32::new(22050).ok_or_else(|| audio_samples_io::error::AudioIOError::UnsupportedFormat("sample_rate must be non-zero".to_string()))?;
-/// let audio = AudioSamples::<f32>::zeros_mono(1024, sample_rate);
+/// let audio = AudioSamples::<f32>::zeros_mono(nzu!(1024), sample_rate);
 /// writer.write_frames(&audio)?;
 /// writer.finalize()?;
 /// # Ok::<(), audio_samples_io::error::AudioIOError>(())
@@ -574,11 +574,11 @@ where
 ///
 /// ```no_run
 /// use audio_samples_io::{write_with, types::FileType};
-/// use audio_samples::{AudioSamples, sine_wave};
+/// use audio_samples::{AudioSamples, sine_wave, sample_rate};
 /// use std::io::Cursor;
 /// use std::time::Duration;
 ///
-/// let audio = sine_wave::<f32, f32>(440.0, Duration::from_secs(1), 44100, 0.5);
+/// let audio = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(44100), 0.5);
 /// let mut buffer = Vec::new();
 /// let cursor = Cursor::new(&mut buffer);
 ///

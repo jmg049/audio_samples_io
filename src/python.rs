@@ -4,6 +4,7 @@
 //! deinterleaving overhead.
 
 use audio_samples::traits::StandardSample;
+use non_empty_slice::NonEmptyVec;
 use numpy::{Element, PyArray1, PyArray2, PyArrayMethods};
 use pyo3::prelude::*;
 use std::path::Path;
@@ -55,7 +56,7 @@ where
 }
 
 /// Read audio file into interleaved Vec with metadata,
-fn read_interleaved_with_info<P, T>(fp: P) -> AudioIOResult<(Vec<T>, BaseAudioInfo)>
+fn read_interleaved_with_info<P, T>(fp: P) -> AudioIOResult<(NonEmptyVec<T>, BaseAudioInfo)>
 where
     P: AsRef<Path>,
     T: StandardSample + 'static,
@@ -76,6 +77,7 @@ where
             let sample_type = wav_file.sample_type();
 
             let interleaved_vec = match sample_type {
+                ValidatedSampleType::U8 => data_chunk.read_samples::<u8, T>(),
                 ValidatedSampleType::I16 => data_chunk.read_samples::<i16, T>(),
                 ValidatedSampleType::I24 => data_chunk.read_samples::<I24, T>(),
                 ValidatedSampleType::I32 => data_chunk.read_samples::<i32, T>(),
@@ -99,12 +101,12 @@ where
 /// Create PyArray from interleaved Vec with Fortran layout.
 fn create_pyarray_fortran<T>(
     py: Python<'_>,
-    interleaved_vec: Vec<T>,
+    interleaved_vec: NonEmptyVec<T>,
     channels: usize,
     total_samples: usize,
 ) -> PyResult<Py<PyArray2<T>>>
 where
-    T: Element,
+    T: StandardSample + Element,
 {
     if channels == 0 {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -119,7 +121,7 @@ where
         )));
     }
 
-    if interleaved_vec.len() != total_samples {
+    if interleaved_vec.len().get() != total_samples {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
             "Vec length ({}) does not match total_samples ({})",
             interleaved_vec.len(),
@@ -131,7 +133,7 @@ where
     let shape = (channels, frames);
 
     // Create 1D array from Vec (takes ownership, zero-copy transfer to Python)
-    let array1 = PyArray1::from_vec(py, interleaved_vec);
+    let array1 = PyArray1::from_vec(py, interleaved_vec.to_vec());
 
     // Reshape to 2D with Fortran order
     // This is the key: Fortran layout interprets the same memory as column-major,
@@ -151,13 +153,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use non_empty_slice::non_empty_vec;
+    use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
 
     #[test]
     #[cfg(feature = "numpy")]
     fn test_create_pyarray_fortran_stereo() {
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             // Interleaved stereo: [L0, R0, L1, R1, L2, R2]
-            let interleaved = vec![1i16, 2, 3, 4, 5, 6];
+            let interleaved = non_empty_vec![1i16, 2, 3, 4, 5, 6];
             let channels = 2;
             let total_samples = 6;
 
@@ -176,63 +181,24 @@ mod tests {
             // arr[channel, frame]
             // Left channel (ch0): indices [0, 0], [0, 1], [0, 2] → values 1, 3, 5
             // Right channel (ch1): indices [1, 0], [1, 1], [1, 2] → values 2, 4, 6
-            assert_eq!(
-                bound
-                    .get_item([0, 0])
-                    .expect("Failed to get item")
-                    .extract::<i16>()
-                    .expect("Failed to extract value"),
-                1
-            );
-            assert_eq!(
-                bound
-                    .get_item([1, 0])
-                    .expect("Failed to get item")
-                    .extract::<i16>()
-                    .expect("Failed to extract value"),
-                2
-            );
-            assert_eq!(
-                bound
-                    .get_item([0, 1])
-                    .expect("Failed to get item")
-                    .extract::<i16>()
-                    .expect("Failed to extract value"),
-                3
-            );
-            assert_eq!(
-                bound
-                    .get_item([1, 1])
-                    .expect("Failed to get item")
-                    .extract::<i16>()
-                    .expect("Failed to extract value"),
-                4
-            );
-            assert_eq!(
-                bound
-                    .get_item([0, 2])
-                    .expect("Failed to get item")
-                    .extract::<i16>()
-                    .expect("Failed to extract value"),
-                5
-            );
-            assert_eq!(
-                bound
-                    .get_item([1, 2])
-                    .expect("Failed to get item")
-                    .extract::<i16>()
-                    .expect("Failed to extract value"),
-                6
-            );
+            let ro: PyReadonlyArray2<i16> = bound.readonly();
+            let nd = ro.as_array();
+            assert_eq!(nd[[0, 0]], 1);
+            assert_eq!(nd[[1, 0]], 2);
+            assert_eq!(nd[[0, 1]], 3);
+            assert_eq!(nd[[1, 1]], 4);
+            assert_eq!(nd[[0, 2]], 5);
+            assert_eq!(nd[[1, 2]], 6);
         });
     }
 
     #[test]
     #[cfg(feature = "numpy")]
     fn test_create_pyarray_fortran_mono() {
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             // Mono: [S0, S1, S2, S3]
-            let mono = vec![10i16, 20, 30, 40];
+            let mono = non_empty_vec![10i16, 20, 30, 40];
             let channels = 1;
             let total_samples = 4;
 
@@ -244,55 +210,30 @@ mod tests {
             assert_eq!(bound.shape(), &[1, 4]);
 
             // Verify values
-            assert_eq!(
-                bound
-                    .get_item([0, 0])
-                    .expect("Failed to get item")
-                    .extract::<i16>()
-                    .expect("Failed to extract value"),
-                10
-            );
-            assert_eq!(
-                bound
-                    .get_item([0, 1])
-                    .expect("Failed to get item")
-                    .extract::<i16>()
-                    .expect("Failed to extract value"),
-                20
-            );
-            assert_eq!(
-                bound
-                    .get_item([0, 2])
-                    .expect("Failed to get item")
-                    .extract::<i16>()
-                    .expect("Failed to extract value"),
-                30
-            );
-            assert_eq!(
-                bound
-                    .get_item([0, 3])
-                    .expect("Failed to get item")
-                    .extract::<i16>()
-                    .expect("Failed to extract value"),
-                40
-            );
+            let ro: PyReadonlyArray2<i16> = bound.readonly();
+            let nd = ro.as_array();
+            assert_eq!(nd[[0, 0]], 10);
+            assert_eq!(nd[[0, 1]], 20);
+            assert_eq!(nd[[0, 2]], 30);
+            assert_eq!(nd[[0, 3]], 40);
         });
     }
 
     #[test]
     #[cfg(feature = "numpy")]
     fn test_create_pyarray_fortran_validation() {
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             // Test zero channels
-            let result = create_pyarray_fortran(py, vec![1i16, 2], 0, 2);
+            let result = create_pyarray_fortran(py, non_empty_vec![1i16, 2], 0, 2);
             assert!(result.is_err());
 
             // Test mismatched total_samples
-            let result = create_pyarray_fortran(py, vec![1i16, 2, 3], 2, 2);
+            let result = create_pyarray_fortran(py, non_empty_vec![1i16, 2, 3], 2, 2);
             assert!(result.is_err());
 
             // Test non-divisible total_samples
-            let result = create_pyarray_fortran(py, vec![1i16, 2, 3], 2, 3);
+            let result = create_pyarray_fortran(py, non_empty_vec![1i16, 2, 3], 2, 3);
             assert!(result.is_err());
         });
     }

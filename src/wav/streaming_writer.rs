@@ -6,10 +6,7 @@
 
 use std::{io::SeekFrom, num::NonZeroUsize};
 
-use audio_samples::{
-    AudioSamples, ConvertTo, I24,
-    StandardSample,
-};
+use audio_samples::{AudioSamples, ConvertTo, I24, StandardSample};
 use non_empty_slice::non_empty_vec;
 
 use crate::{
@@ -457,9 +454,7 @@ where
         const TARGET_CHUNK_BYTES: usize = 256 * 1024; // 256 KiB
         let bytes_per_sample = U::BYTES as usize;
         // safety: bytes_per_sample is guaranteed > 0 for valid sample types
-        let bytes_per_sample = unsafe {
-            NonZeroUsize::new_unchecked(bytes_per_sample)
-        };
+        let bytes_per_sample = unsafe { NonZeroUsize::new_unchecked(bytes_per_sample) };
         let samples_per_chunk = TARGET_CHUNK_BYTES / bytes_per_sample;
         let samples_per_chunk = samples_per_chunk.max(self.channels as usize);
         // safety: We ensure samples_per_chunk > 0 and is a valid chunk size for processing
