@@ -26,6 +26,10 @@ impl<'a> DataChunk<'a> {
         self.bytes.len()
     }
 
+    pub const fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
     pub const fn from_bytes(bytes: &'a [u8]) -> DataChunk<'a> {
         DataChunk { bytes }
     }
@@ -188,6 +192,15 @@ impl<'a> DataChunk<'a> {
                 .collect();
             // safety: non-empty by design since data chunk must contain at least one sample to be valid
             return Ok(unsafe { NonEmptyVec::new_unchecked(v) });
+        }
+
+        // Fast path: when S == T the conversion is an identity — skip the collect entirely.
+        if TypeId::of::<S>() == TypeId::of::<T>() {
+            let samples = self.to_sample_vec::<S>()?;
+            // Safety: TypeId equality guarantees S and T are the same concrete type with
+            // identical in-memory layout.  NonEmptyVec<S> and NonEmptyVec<T> are both
+            // (ptr, len, cap) wrappers so their sizes always match — transmute is sound.
+            return Ok(unsafe { mem::transmute::<NonEmptyVec<S>, NonEmptyVec<T>>(samples) });
         }
 
         Ok(self

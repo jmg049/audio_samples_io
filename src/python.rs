@@ -7,11 +7,13 @@ use audio_samples::traits::StandardSample;
 use non_empty_slice::NonEmptyVec;
 use numpy::{Element, PyArray1, PyArray2, PyArrayMethods};
 use pyo3::prelude::*;
+use std::any::TypeId;
+use std::io::{BufReader, Read};
 use std::path::Path;
 
 use crate::traits::{AudioFile, AudioFileMetadata};
 use crate::types::{OpenOptions, ValidatedSampleType};
-use crate::wav::WavFile;
+use crate::wav::{WavFile, wav_file::parse_wav_header_streaming};
 use crate::{AudioIOError, AudioIOResult, BaseAudioInfo, FileType};
 use audio_samples::I24;
 
@@ -65,14 +67,21 @@ where
 
     match FileType::from_path(path) {
         FileType::WAV => {
-            // Open WAV file once and extract both metadata and data
+            // Fast path: T is a plain numeric type (not I24), little-endian platform.
+            // Parse only the WAV header, then read_exact directly into a Vec<T> —
+            // one syscall for the header (BufReader), one for the payload.  Avoids
+            // the mmap + intermediate-Vec copy that the mmap path requires.
+            #[cfg(target_endian = "little")]
+            if TypeId::of::<T>() != TypeId::of::<I24>() {
+                if let Ok(result) = read_wav_direct::<T>(path) {
+                    return Ok(result);
+                }
+                // Any error falls through to the mmap path below.
+            }
+
+            // Mmap path: general fallback (type conversion, I24, big-endian, etc.)
             let wav_file = WavFile::open_with_options(path, OpenOptions::default())?;
-
-            // Extract metadata
             let info = wav_file.base_info()?;
-
-            // Read samples with type conversion, keeping interleaved format
-            // DataChunk::read_samples() returns Vec<T> in the same order as file
             let data_chunk = wav_file.data();
             let sample_type = wav_file.sample_type();
 
@@ -96,6 +105,68 @@ where
             other
         ))),
     }
+}
+
+/// Direct-read fast path for WAV files: parse header with BufReader (one read syscall for the
+/// first ≤8 KiB), then `read_exact` the audio payload straight into a fresh `Vec<T>`.
+///
+/// Only used when:
+/// - The file is a WAV file
+/// - `T` matches the file's native sample type (no conversion needed)
+/// - Platform is little-endian
+/// - `T` is not `I24` (I24 has non-standard in-memory layout)
+///
+/// Returns `Err` if any of these preconditions aren't met, so the caller can fall back
+/// to the general mmap path.
+#[cfg(target_endian = "little")]
+fn read_wav_direct<T>(path: &Path) -> AudioIOResult<(NonEmptyVec<T>, BaseAudioInfo)>
+where
+    T: StandardSample + 'static,
+{
+    use std::mem::size_of;
+
+    let file = std::fs::File::open(path).map_err(AudioIOError::from)?;
+    let mut reader = BufReader::new(file);
+
+    let (info, data_byte_offset) = parse_wav_header_streaming(&mut reader)?;
+
+    // Verify T matches the file's native sample type — otherwise fall back to mmap path.
+    let native_matches = match info.sample_type {
+        audio_samples::SampleType::U8 => TypeId::of::<T>() == TypeId::of::<u8>(),
+        audio_samples::SampleType::I16 => TypeId::of::<T>() == TypeId::of::<i16>(),
+        audio_samples::SampleType::I32 => TypeId::of::<T>() == TypeId::of::<i32>(),
+        audio_samples::SampleType::F32 => TypeId::of::<T>() == TypeId::of::<f32>(),
+        audio_samples::SampleType::F64 => TypeId::of::<T>() == TypeId::of::<f64>(),
+        _ => false,
+    };
+    if !native_matches {
+        return Err(AudioIOError::unsupported_format(
+            "Type mismatch — use mmap path for conversion",
+        ));
+    }
+
+    let total_samples = info.total_samples;
+    let byte_count = total_samples * size_of::<T>();
+
+    // Allocate Vec<T> and read the entire payload directly into it.
+    // Safety: T: Copy; every byte is overwritten by read_exact before it is read.
+    let mut vec: Vec<T> = Vec::with_capacity(total_samples);
+    unsafe { vec.set_len(total_samples) };
+
+    let bytes =
+        unsafe { std::slice::from_raw_parts_mut(vec.as_mut_ptr().cast::<u8>(), byte_count) };
+
+    // No explicit seek needed: parse_wav_header_streaming stops reading at the first byte of the
+    // data payload, leaving the BufReader positioned there.  Its internal buffer already holds
+    // the first ≤8 KiB of audio data (read as part of the initial header scan), so we drain
+    // those cached bytes first and then read the remaining payload in one large kernel call.
+    let _ = data_byte_offset; // used only for the type-conversion fallback check above
+    reader.read_exact(bytes).map_err(AudioIOError::from)?;
+
+    let nev = NonEmptyVec::try_from(vec)
+        .map_err(|_| AudioIOError::corrupted_data_simple("Empty WAV file", "No audio samples"))?;
+
+    Ok((nev, info))
 }
 
 /// Create PyArray from interleaved Vec with Fortran layout.
@@ -133,7 +204,7 @@ where
     let shape = (channels, frames);
 
     // Create 1D array from Vec (takes ownership, zero-copy transfer to Python)
-    let array1 = PyArray1::from_vec(py, interleaved_vec.to_vec());
+    let array1 = PyArray1::from_vec(py, interleaved_vec.into_vec());
 
     // Reshape to 2D with Fortran order
     // This is the key: Fortran layout interprets the same memory as column-major,

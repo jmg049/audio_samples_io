@@ -1,10 +1,10 @@
 use audio_samples::{
-    AudioSamples, I24, SampleType,
+    AudioData, AudioSamples, I24, SampleType,
     traits::{ConvertFrom, StandardSample},
 };
 use core::fmt::{Display, Formatter, Result as FmtResult};
 use memmap2::MmapOptions;
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ShapeBuilder};
 use non_empty_slice::NonEmptyVec;
 use std::{
     any::TypeId,
@@ -504,12 +504,12 @@ impl<'a> AudioFileRead<'a> for WavFile<'a> {
     }
 }
 
-/// Convert interleaved samples to planar AudioSamples format
+/// Wrap interleaved WAV samples into an AudioSamples without a deinterleave copy.
 ///
-/// WAV files store samples in interleaved format: [L0, R0, L1, R1, ...]
-/// AudioSamples expects planar format: [[L0, L1, ...], [R0, R1, ...]]
-///
-/// Uses optimized SIMD deinterleave when the simd feature is enabled.
+/// WAV stores samples interleaved: [L0, R0, L1, R1, …].  Rather than physically rearranging
+/// memory into planar layout, multi-channel audio is represented as an F-order (column-major)
+/// Array2 with shape (channels, frames) and strides (1, channels), which matches the
+/// interleaved memory layout exactly.
 fn build_samples_from_interleaved_vec<'a, T>(
     interleaved_data: NonEmptyVec<T>,
     num_channels: NonZeroU32,
@@ -521,7 +521,7 @@ where
     // SAFETY: sample_rate comes from validated WAV header which requires non-zero sample rate
     if num_channels.get() == 1 {
         // Mono: data is already in correct format
-        AudioSamples::new_mono(Array1::from_vec(interleaved_data.to_vec()), sample_rate)
+        AudioSamples::new_mono(Array1::from_vec(interleaved_data.into_vec()), sample_rate)
             .map_err(Into::into)
     } else {
         let total_samples = interleaved_data.len();
@@ -534,20 +534,15 @@ where
             ));
         }
 
-        // Use optimized deinterleave from audio_samples
-        let planar_data = audio_samples::simd_conversions::deinterleave_multi_vec(
-            &interleaved_data,
-            num_channels,
+        // Fix C: wrap the interleaved Vec directly as an F-order (column-major) Array2.
+        // An F-order array with logical shape (channels, frames) stores data as
+        // [s[0,0], s[1,0], s[0,1], s[1,1], …] — exactly WAV's interleaved layout.
+        // This avoids the deinterleave allocation and scatter-write entirely.
+        let arr = Array2::from_shape_vec(
+            (num_channels.get() as usize, frames).f(),
+            interleaved_data.into_vec(), // Fix B: move, no copy
         )
-        .map_err(|e| AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string()))?;
-
-        // Create the planar array with shape (num_channels, frames)
-
-        let arr =
-            Array2::from_shape_vec((num_channels.get() as usize, frames), planar_data.to_vec())
-                .map_err(|e| {
-                    AudioIOError::corrupted_data_simple("Array shape error", e.to_string())
-                })?;
+        .map_err(|e| AudioIOError::corrupted_data_simple("Array shape error", e.to_string()))?;
 
         AudioSamples::new_multi_channel(arr, sample_rate).map_err(Into::into)
     }
@@ -813,26 +808,113 @@ where
         return Ok(());
     }
 
+    // Fast path: F-order (Fortran-contiguous) multi-channel arrays already have interleaved
+    // layout in memory — [L0, R0, L1, R1, …] — matching WAV's on-disk format exactly.
+    // On little-endian platforms the in-memory bytes need no reordering for any integer or
+    // float type (except I24 which uses a non-standard 4-byte in-memory representation).
+    #[cfg(target_endian = "little")]
+    if TypeId::of::<T>() != TypeId::of::<I24>() {
+        if let AudioData::Multi(ref m) = audio.data {
+            let view = m.as_view();
+            if !view.is_standard_layout() {
+                if let Some(slice) = view.as_slice_memory_order() {
+                    // Safety: T is a plain numeric type (StandardSample, not I24).
+                    // Casting any &[T] to &[u8] is valid — bytes are always initialised.
+                    let bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            slice.as_ptr().cast::<u8>(),
+                            std::mem::size_of_val(slice),
+                        )
+                    };
+                    writer.write_all(bytes)?;
+                    return Ok(());
+                }
+            }
+        }
+    }
+
     let bytes_per_sample = if TypeId::of::<T>() == TypeId::of::<I24>() {
         3usize
     } else {
         mem::size_of::<T>()
     };
 
-    // Use optimized interleave: get interleaved samples using AudioSamples' method
-    // which now uses SIMD-accelerated interleave internally
+    // C-order (standard-layout) path: stream interleaved bytes via a small tile buffer.
+    //
+    // The naive approach (view.t().as_standard_layout()) allocates a 10 MB intermediate Vec
+    // upfront, incurring ~2500 OS page faults (~2.5 ms) before any data moves.  Instead, we
+    // reuse a single fixed-size tile buffer (~64 KB), fill it with interleaved samples one
+    // tile at a time, and write each tile to the output — zero large allocations, sequential
+    // reads within each channel's tile window, sequential writes.
+    #[cfg(target_endian = "little")]
+    if TypeId::of::<T>() != TypeId::of::<I24>() {
+        if let AudioData::Multi(ref m) = audio.data {
+            let view = m.as_view();
+            if view.is_standard_layout() {
+                use std::mem::MaybeUninit;
+
+                let channels = view.shape()[0];
+                let frames = view.shape()[1];
+                let sample_size = mem::size_of::<T>();
+
+                // Tile size: aim for ~64 KB of output data to stay in L1/L2 cache.
+                const TARGET_TILE_BYTES: usize = 512 * 1024;
+                let tile_frames = (TARGET_TILE_BYTES / (channels * sample_size)).max(1);
+
+                // One contiguous slice per channel (rows are contiguous in C-order).
+                let rows: Vec<&[T]> = (0..channels)
+                    .map(|c| view.row(c).to_slice().expect("C-order row is contiguous"))
+                    .collect();
+
+                // Pre-allocate tile buffer once — avoids per-tile page faults.
+                let tile_capacity = tile_frames * channels;
+
+                // Allocate uninitialised buffer
+                let mut tile: Vec<MaybeUninit<T>> = Vec::with_capacity(tile_capacity);
+
+                // SAFETY: we will initialise every element before reading
+                unsafe { tile.set_len(tile_capacity) };
+
+                for tile_start in (0..frames).step_by(tile_frames) {
+                    let tile_end = (tile_start + tile_frames).min(frames);
+                    let actual_frames = tile_end - tile_start;
+                    // Channels-outer loop: each channel's tile window is read sequentially,
+                    // letting the HW prefetcher stream contiguous cache lines.  Writes land
+                    // at stride=channels in the tile buffer (still within a small working set).
+                    for c in 0..channels {
+                        for (i, f) in (tile_start..tile_end).enumerate() {
+                            // Safety: f < frames and c < channels, both in bounds.
+                            tile[i * channels + c].write(rows[c][f]);
+                        }
+                    }
+                    // Safety: T is a plain numeric type (not I24), LE platform; tile
+                    // slice is fully initialised above.
+                    let bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            tile.as_ptr().cast::<u8>(),
+                            actual_frames * channels * sample_size,
+                        )
+                    };
+                    writer.write_all(bytes)?;
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    // Fallback: materialise an interleaved Vec then serialise sample-by-sample.
+    // Handles I24, big-endian platforms, and non-contiguous array layouts.
     let interleaved = audio.data.as_interleaved_vec();
     let total_samples = interleaved.len();
 
-    // Stream in chunks to cap peak allocation and improve cache locality
-    const TARGET_CHUNK_BYTES: usize = 256 * 1024; // 256 KiB target buffer
+    const TARGET_CHUNK_BYTES: usize = 256 * 1024;
     let chunk_samples = TARGET_CHUNK_BYTES
         .checked_div(bytes_per_sample)
         .ok_or(AudioIOError::corrupted_data_simple(
             "Chunk size calculation overflow",
             "TARGET_CHUNK_BYTES / bytes_per_sample",
         ))?
-        .max(num_channels.get() as usize); // At least one frame
+        .max(num_channels.get() as usize);
 
     let mut buf = vec![0u8; chunk_samples * bytes_per_sample];
 
@@ -842,7 +924,6 @@ where
         let samples_this_chunk = remaining.min(chunk_samples);
         let bytes_this_chunk = samples_this_chunk * bytes_per_sample;
 
-        // Convert interleaved samples to bytes
         let mut write_idx = 0;
         for sample in interleaved
             .iter()

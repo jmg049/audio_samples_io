@@ -202,7 +202,7 @@ where
         target_sr,
         quality.unwrap_or(ResamplingQuality::Fast),
     )
-    .map_err(|e| AudioIOError::AudioSamples(e))
+    .map_err(AudioIOError::AudioSamples)
 }
 
 /// Open a WAV file for streaming reads.
@@ -363,7 +363,7 @@ where
 /// )?;
 ///
 /// // Write audio in chunks
-/// let sample_rate = NonZeroU32::new(44100).ok_or_else(|| audio_samples_io::error::AudioIOError::UnsupportedFormat("sample_rate must be non-zero".to_string()))?;
+/// let sample_rate = nzu!(44100)
 /// let chunk = AudioSamples::<f32>::zeros_multi(channels!(2), nzu!(1024), sample_rate);
 /// writer.write_frames(&chunk)?;
 ///
@@ -394,11 +394,9 @@ where
             {
                 let file = File::create(path)?;
                 let writer = BufWriter::new(file);
+                // todo: implement the new_u8 variant for the ValidatedSampleType::U8 case
                 match sample_type {
-                    ValidatedSampleType::U8 => {
-                        StreamedWavWriter::new_i16(writer, channels, sample_rate)
-                    }
-                    ValidatedSampleType::I16 => {
+                    ValidatedSampleType::U8 | ValidatedSampleType::I16 => {
                         StreamedWavWriter::new_i16(writer, channels, sample_rate)
                     }
                     ValidatedSampleType::I24 => {
@@ -446,7 +444,7 @@ where
 ///     ValidatedSampleType::I16,
 /// )?;
 ///
-/// let sample_rate = NonZeroU32::new(22050).ok_or_else(|| audio_samples_io::error::AudioIOError::UnsupportedFormat("sample_rate must be non-zero".to_string()))?;
+/// let sample_rate = nzu!(22050);
 /// let audio = AudioSamples::<f32>::zeros_mono(nzu!(1024), sample_rate);
 /// writer.write_frames(&audio)?;
 /// writer.finalize()?;
@@ -462,9 +460,11 @@ pub fn create_streamed_writer<W>(
 where
     W: WriteSeek,
 {
+    // todo: implement the new_u8 variant for the ValidatedSampleType::U8 case
     match sample_type {
-        ValidatedSampleType::U8 => StreamedWavWriter::new_i16(writer, channels, sample_rate),
-        ValidatedSampleType::I16 => StreamedWavWriter::new_i16(writer, channels, sample_rate),
+        ValidatedSampleType::U8 | ValidatedSampleType::I16 => {
+            StreamedWavWriter::new_i16(writer, channels, sample_rate)
+        }
         ValidatedSampleType::I24 => StreamedWavWriter::new_i24(writer, channels, sample_rate),
         ValidatedSampleType::I32 => StreamedWavWriter::new_i32(writer, channels, sample_rate),
         ValidatedSampleType::F32 => StreamedWavWriter::new_f32(writer, channels, sample_rate),
