@@ -9,7 +9,7 @@ use non_empty_slice::NonEmptyVec;
 use std::{
     any::TypeId,
     fs::File,
-    io::{BufReader, BufWriter, Read, Write},
+    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     mem,
     num::NonZeroU32,
     ops::Range,
@@ -444,6 +444,147 @@ impl<'a> AudioFile for WavFile<'a> {
     fn len(&self) -> u64 {
         self.data_source.len() as u64
     }
+}
+
+/// Parse just the WAV header from a seekable reader, returning audio metadata and the byte offset
+/// where the `data` chunk payload begins.
+///
+/// Unlike [`WavFile::open_with_options`] this never loads or maps the audio payload — it stops
+/// scanning as soon as it has seen the `fmt ` and `data` chunk headers.  On a typical WAV file the
+/// header fits in the first 8 KiB read by the `BufReader`, so this triggers at most one read
+/// syscall regardless of file size.
+#[inline]
+pub fn parse_wav_header_streaming<R: Read + Seek>(
+    reader: &mut R,
+) -> AudioIOResult<(BaseAudioInfo, u64)> {
+    use crate::wav::chunks::RIFF_CHUNK;
+
+    // ---- RIFF + WAVE header (12 bytes) ----
+    let mut buf12 = [0u8; 12];
+    reader.read_exact(&mut buf12).map_err(AudioIOError::from)?;
+    if &buf12[0..4] != RIFF_CHUNK.as_bytes() {
+        return Err(AudioIOError::corrupted_data_simple(
+            "Not a RIFF file",
+            "First 4 bytes are not 'RIFF'",
+        ));
+    }
+    if &buf12[8..12] != b"WAVE" {
+        return Err(AudioIOError::corrupted_data_simple(
+            "Not a WAV file",
+            "Bytes 8-12 are not 'WAVE'",
+        ));
+    }
+
+    // ---- scan sub-chunks until we find fmt  and data ----
+    let mut fmt_buf = [0u8; 40]; // enough for base (16) or extensible (40) fmt chunk
+    let mut fmt_size: usize = 0;
+    let mut have_fmt = false;
+    let mut data_byte_offset: Option<u64> = None;
+    let mut data_byte_count: Option<usize> = None;
+
+    let mut chunk_hdr = [0u8; 8];
+
+    loop {
+        match reader.read_exact(&mut chunk_hdr) {
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(AudioIOError::from(e)),
+            Ok(_) => {}
+        }
+        let id = &chunk_hdr[0..4];
+        let size = u32::from_le_bytes(match chunk_hdr[4..8].try_into() {
+            Ok(b) => b,
+            Err(_) => unreachable!(
+                "chunk header is 8 bytes long, 4..8 is a 4-byte slice, try_into will always succeed"
+            ),
+        }) as usize;
+        let padded = size + (size & 1); // RIFF chunks are padded to even sizes
+
+        if id == b"fmt " {
+            if !(16..=40).contains(&size) {
+                return Err(AudioIOError::corrupted_data_simple(
+                    "Invalid fmt chunk size",
+                    format!("Expected 16 or 40, got {size}"),
+                ));
+            }
+            reader
+                .read_exact(&mut fmt_buf[..size])
+                .map_err(AudioIOError::from)?;
+            if size & 1 != 0 {
+                reader
+                    .read_exact(&mut [0u8; 1])
+                    .map_err(AudioIOError::from)?;
+            }
+            fmt_size = size;
+            have_fmt = true;
+        } else if id == b"data" {
+            // Current stream position is now at the first byte of audio data.
+            data_byte_offset = Some(reader.stream_position().map_err(AudioIOError::from)?);
+            data_byte_count = Some(size);
+            break; // we have everything we need
+        } else {
+            // Skip this chunk (including any padding byte).
+            reader
+                .seek(SeekFrom::Current(padded as i64))
+                .map_err(AudioIOError::from)?;
+        }
+    }
+
+    if !have_fmt {
+        return Err(AudioIOError::corrupted_data_simple(
+            "No fmt chunk found",
+            "WAV file must contain a fmt  chunk before data",
+        ));
+    }
+    let data_byte_offset = data_byte_offset.ok_or_else(|| {
+        AudioIOError::corrupted_data_simple("No data chunk found", "WAV file has no data chunk")
+    })?;
+
+    let data_byte_count = data_byte_count.ok_or_else(|| {
+        AudioIOError::corrupted_data_simple(
+            "Data chunk size missing",
+            "Could not determine size of audio data from data chunk header",
+        )
+    })?;
+
+    // ---- parse fmt bytes ----
+    let fmt_chunk =
+        FmtChunk::from_bytes_validated(&fmt_buf[..fmt_size]).map_err(AudioIOError::WavError)?;
+    let sample_type: ValidatedSampleType = fmt_chunk
+        .actual_sample_type()
+        .map_err(AudioIOError::WavError)?;
+
+    let (_, channels, sample_rate, byte_rate, block_align, bits_per_sample) = fmt_chunk.fmt_chunk();
+    let sample_rate = NonZeroU32::new(sample_rate).ok_or_else(|| {
+        AudioIOError::corrupted_data_simple("Invalid sample rate", "Sample rate cannot be zero")
+    })?;
+
+    let bytes_per_sample = fmt_chunk.bytes_per_sample();
+    let total_samples = if bytes_per_sample > 0 {
+        data_byte_count / bytes_per_sample as usize
+    } else {
+        0
+    };
+    let total_frames = if channels > 0 {
+        total_samples / channels as usize
+    } else {
+        0
+    };
+    let duration = Duration::from_secs_f64(total_frames as f64 / sample_rate.get() as f64);
+
+    let info = BaseAudioInfo::new(
+        sample_rate,
+        channels,
+        bits_per_sample,
+        bytes_per_sample,
+        byte_rate,
+        block_align,
+        total_samples,
+        duration,
+        FileType::WAV,
+        sample_type.into(),
+    );
+
+    Ok((info, data_byte_offset))
 }
 
 impl<'a> AudioFileRead<'a> for WavFile<'a> {
