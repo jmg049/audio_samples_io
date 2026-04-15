@@ -64,10 +64,7 @@ use std::{
 };
 
 use audio_samples::{
-    AudioSamples, CastFrom, CastInto, ConvertTo,
-    operations::ResamplingQuality,
-    resample,
-    traits::{ConvertFrom, StandardSample},
+    AudioSamples, operations::ResamplingQuality, resample, traits::StandardSample,
 };
 
 pub use crate::{
@@ -176,16 +173,7 @@ where
     }
 }
 
-pub fn read_with<'a, R, T>(_reader: R) -> AudioIOResult<AudioSamples<'a, T>>
-where
-    R: ReadSeek,
-    T: StandardSample + ConvertTo<T> + ConvertFrom<T> + 'static,
-    f64: CastInto<T> + CastFrom<T> + ConvertTo<T> + ConvertFrom<T>,
-{
-    todo!()
-}
-
-pub fn read_and_resample<P, T, F>(
+pub fn read_and_resample<P, T>(
     fp: P,
     target_sr: NonZeroU32,
     quality: Option<ResamplingQuality>,
@@ -193,8 +181,6 @@ pub fn read_and_resample<P, T, F>(
 where
     P: AsRef<Path>,
     T: StandardSample,
-    T: StandardSample + ConvertTo<T> + ConvertFrom<T> + 'static,
-    f64: CastInto<T> + CastFrom<T> + ConvertTo<T> + ConvertFrom<T>,
 {
     let signal = read(fp)?;
     resample::<T>(
