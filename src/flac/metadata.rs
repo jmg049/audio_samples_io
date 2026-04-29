@@ -93,7 +93,7 @@ pub struct MetadataBlockHeader {
 
 impl MetadataBlockHeader {
     /// Parse a metadata block header from 4 bytes.
-    pub fn from_bytes(bytes: &[u8; 4]) -> Self {
+    pub const fn from_bytes(bytes: &[u8; 4]) -> Self {
         let is_last = (bytes[0] & 0x80) != 0;
         let block_type = MetadataBlockType::from_byte(bytes[0] & 0x7F);
         let length = u32::from_be_bytes([0, bytes[1], bytes[2], bytes[3]]);
@@ -106,7 +106,7 @@ impl MetadataBlockHeader {
     }
 
     /// Serialize to 4 bytes.
-    pub fn to_bytes(&self) -> [u8; 4] {
+    pub const fn to_bytes(&self) -> [u8; 4] {
         let type_byte = self.block_type.as_byte() | if self.is_last { 0x80 } else { 0 };
         let len_bytes = self.length.to_be_bytes();
         [type_byte, len_bytes[1], len_bytes[2], len_bytes[3]]
@@ -250,7 +250,7 @@ impl StreamInfo {
 
     /// Calculate block align (bytes per frame, all channels)
     pub const fn block_align(&self) -> u16 {
-        let bytes_per_sample = (self.bits_per_sample as u16 + 7) / 8;
+        let bytes_per_sample = (self.bits_per_sample as u16).div_ceil(8);
         bytes_per_sample * self.channels as u16
     }
 
@@ -314,7 +314,7 @@ impl SeekPoint {
     pub const PLACEHOLDER_SAMPLE: u64 = 0xFFFFFFFFFFFFFFFF;
 
     /// Parse a seek point from 18 bytes.
-    pub fn from_bytes(bytes: &[u8; Self::SIZE]) -> Self {
+    pub const fn from_bytes(bytes: &[u8; Self::SIZE]) -> Self {
         let sample_number = u64::from_be_bytes([
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]);
@@ -354,7 +354,7 @@ pub struct SeekTable {
 impl SeekTable {
     /// Parse a seek table from bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, FlacError> {
-        if bytes.len() % SeekPoint::SIZE != 0 {
+        if !bytes.len().is_multiple_of(SeekPoint::SIZE) {
             return Err(FlacError::InvalidMetadataBlockSize {
                 size: bytes.len() as u32,
             });
@@ -583,7 +583,6 @@ pub enum PictureType {
 impl PictureType {
     pub const fn from_u32(value: u32) -> Self {
         match value {
-            0 => PictureType::Other,
             1 => PictureType::FileIcon,
             2 => PictureType::OtherFileIcon,
             3 => PictureType::FrontCover,
@@ -788,7 +787,7 @@ impl MetadataBlock {
     }
 
     /// Get the block type.
-    pub fn block_type(&self) -> MetadataBlockType {
+    pub const fn block_type(&self) -> MetadataBlockType {
         match self {
             MetadataBlock::StreamInfo(_) => MetadataBlockType::StreamInfo,
             MetadataBlock::Padding(_) => MetadataBlockType::Padding,
@@ -813,9 +812,8 @@ impl MetadataBlock {
             }
             MetadataBlock::SeekTable(table) => table.to_bytes(),
             MetadataBlock::VorbisComment(comment) => comment.to_bytes(),
-            MetadataBlock::CueSheet(data) => data.clone(),
             MetadataBlock::Picture(picture) => picture.to_bytes(),
-            MetadataBlock::Unknown { data, .. } => data.clone(),
+            MetadataBlock::CueSheet(data) | MetadataBlock::Unknown { data, .. } => data.clone(),
         }
     }
 }

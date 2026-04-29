@@ -6,7 +6,7 @@
 
 use std::num::NonZeroU32;
 
-use audio_samples::{AudioSample, AudioSamples, ConvertTo, I24};
+use audio_samples::{AudioSamples, I24, traits::StandardSample};
 use ndarray::{Array1, Array2};
 
 use crate::error::{AudioIOError, AudioIOResult};
@@ -28,7 +28,7 @@ pub struct DecodedAudio {
 
 impl DecodedAudio {
     /// Create new decoded audio from channel data.
-    pub fn new(channels: Vec<Vec<i32>>, bits_per_sample: u8, sample_rate: u32) -> Self {
+    pub const fn new(channels: Vec<Vec<i32>>, bits_per_sample: u8, sample_rate: u32) -> Self {
         DecodedAudio {
             channels,
             bits_per_sample,
@@ -37,7 +37,7 @@ impl DecodedAudio {
     }
 
     /// Number of channels.
-    pub fn num_channels(&self) -> usize {
+    pub const fn num_channels(&self) -> usize {
         self.channels.len()
     }
 
@@ -52,12 +52,12 @@ impl DecodedAudio {
     }
 
     /// Bits per sample of the source data.
-    pub fn bits_per_sample(&self) -> u8 {
+    pub const fn bits_per_sample(&self) -> u8 {
         self.bits_per_sample
     }
 
     /// Sample rate in Hz.
-    pub fn sample_rate(&self) -> u32 {
+    pub const fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
 
@@ -68,12 +68,7 @@ impl DecodedAudio {
     /// The returned AudioSamples owns its data, so it can be coerced to any lifetime.
     pub fn read_samples<'a, T>(&self, sample_rate: NonZeroU32) -> AudioIOResult<AudioSamples<'a, T>>
     where
-        T: AudioSample + 'static,
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>,
+        T: StandardSample + 'static,
     {
         let num_channels = self.num_channels();
         let samples_per_channel = self.samples_per_channel();
@@ -85,25 +80,44 @@ impl DecodedAudio {
             ));
         }
 
-        // Convert each channel to target type
-        let converted_channels: Vec<Vec<T>> = self
-            .channels
-            .iter()
-            .map(|ch| self.convert_channel_samples::<T>(ch))
-            .collect::<AudioIOResult<_>>()?;
-
         if num_channels == 1 {
-            // Mono: use new_mono which returns AudioSamples<'b, T>
-            let data = Array1::from(converted_channels.into_iter().next().unwrap());
-            Ok(AudioSamples::new_mono(data, sample_rate))
+            // Mono: single allocation, direct conversion into Array1's buffer.
+            let data = Array1::from_shape_fn(samples_per_channel, |i| {
+                self.convert_one_sample::<T>(self.channels[0][i])
+            });
+            AudioSamples::new_mono(data, sample_rate).map_err(Into::into)
         } else {
-            // Multi-channel: flatten to row-major and create Array2
-            let flat: Vec<T> = converted_channels.into_iter().flatten().collect();
+            // Multi-channel: one flat allocation, fill channel-by-channel.
+            // Avoids the N intermediate Vec<T> allocations from the old path.
+            let mut flat = Vec::with_capacity(num_channels * samples_per_channel);
+            for ch in &self.channels {
+                for &s in ch {
+                    flat.push(self.convert_one_sample::<T>(s));
+                }
+            }
             let arr =
                 Array2::from_shape_vec((num_channels, samples_per_channel), flat).map_err(|e| {
                     AudioIOError::corrupted_data_simple("Array shape error", e.to_string())
                 })?;
-            Ok(AudioSamples::new_multi_channel(arr, sample_rate))
+            AudioSamples::new_multi_channel(arr, sample_rate).map_err(Into::into)
+        }
+    }
+
+    /// Convert a single i32 FLAC sample to target type T.
+    #[inline(always)]
+    fn convert_one_sample<T>(&self, s: i32) -> T
+    where
+        T: StandardSample + 'static,
+    {
+        use audio_samples::I24;
+        match self.bits_per_sample {
+            1..=8 => {
+                let shift = 16 - self.bits_per_sample;
+                T::convert_from((s << shift) as i16)
+            }
+            9..=16 => T::convert_from(s as i16),
+            17..=24 => T::convert_from(I24::wrapping_from_i32(s)),
+            _ => T::convert_from(s),
         }
     }
 
@@ -111,12 +125,7 @@ impl DecodedAudio {
     /// Channels are concatenated: [ch0_samples..., ch1_samples..., ...]
     pub fn read_samples_planar<T>(&self) -> AudioIOResult<Vec<T>>
     where
-        T: AudioSample + 'static,
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>,
+        T: StandardSample + 'static,
     {
         let mut result = Vec::with_capacity(self.total_samples());
 
@@ -131,12 +140,7 @@ impl DecodedAudio {
     /// Read samples for a single channel.
     pub fn read_channel_samples<T>(&self, channel: usize) -> AudioIOResult<Vec<T>>
     where
-        T: AudioSample + 'static,
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>,
+        T: StandardSample + 'static,
     {
         let samples = self.channels.get(channel).ok_or_else(|| {
             AudioIOError::corrupted_data_simple(
@@ -155,12 +159,7 @@ impl DecodedAudio {
     /// Read all samples in interleaved format.
     pub fn read_samples_interleaved<T>(&self) -> AudioIOResult<Vec<T>>
     where
-        T: AudioSample + 'static,
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>,
+        T: StandardSample + 'static,
     {
         let num_channels = self.num_channels();
         let samples_per_channel = self.samples_per_channel();
@@ -194,12 +193,7 @@ impl DecodedAudio {
     /// We convert based on the original bit depth to maintain proper scaling.
     fn convert_channel_samples<T>(&self, samples: &[i32]) -> AudioIOResult<Vec<T>>
     where
-        T: AudioSample + 'static,
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>,
+        T: StandardSample + 'static,
     {
         match self.bits_per_sample {
             1..=8 => {
@@ -300,8 +294,123 @@ mod tests {
 
         let sample_rate = NonZeroU32::new(44100).unwrap();
         let samples: AudioSamples<'static, i16> = audio.read_samples(sample_rate).unwrap();
-        assert_eq!(samples.num_channels(), 2);
-        assert_eq!(samples.samples_per_channel(), 2);
+        assert_eq!(samples.num_channels().get(), 2);
+        assert_eq!(samples.samples_per_channel().get(), 2);
         assert_eq!(samples.sample_rate(), sample_rate);
+    }
+
+    // =========================================================================
+    // Additional data.rs tests
+    // =========================================================================
+
+    #[test]
+    fn test_read_samples_mono() {
+        let channels = vec![vec![1000i32, 2000, 3000, 4000]];
+        let audio = DecodedAudio::new(channels, 16, 48000);
+
+        let sample_rate = NonZeroU32::new(48000).unwrap();
+        let samples: AudioSamples<'static, i16> = audio.read_samples(sample_rate).unwrap();
+
+        assert_eq!(samples.num_channels().get(), 1, "mono");
+        assert_eq!(samples.samples_per_channel().get(), 4, "4 samples/ch");
+        assert_eq!(samples.sample_rate(), sample_rate);
+        assert_eq!(samples.total_samples().get(), 4);
+    }
+
+    #[test]
+    fn test_read_samples_multi_channel_shape() {
+        let n = 8;
+        let channels: Vec<Vec<i32>> = (0..6).map(|ch| vec![(ch as i32) * 100; n]).collect();
+        let audio = DecodedAudio::new(channels, 24, 96000);
+
+        let sample_rate = NonZeroU32::new(96000).unwrap();
+        let samples: AudioSamples<'static, I24> = audio.read_samples(sample_rate).unwrap();
+
+        assert_eq!(samples.num_channels().get(), 6, "6 channels");
+        assert_eq!(samples.samples_per_channel().get(), n, "n samples/ch");
+        assert_eq!(samples.total_samples().get(), 6 * n, "total samples");
+    }
+
+    #[test]
+    fn test_empty_audio_returns_error() {
+        let audio = DecodedAudio::new(vec![], 16, 44100);
+        let sample_rate = NonZeroU32::new(44100).unwrap();
+        let result: Result<AudioSamples<'static, i16>, _> = audio.read_samples(sample_rate);
+        assert!(result.is_err(), "empty channels should return error");
+    }
+
+    #[test]
+    fn test_empty_samples_per_channel_returns_error() {
+        let audio = DecodedAudio::new(vec![vec![]], 16, 44100);
+        let sample_rate = NonZeroU32::new(44100).unwrap();
+        let result: Result<AudioSamples<'static, i16>, _> = audio.read_samples(sample_rate);
+        assert!(result.is_err(), "zero samples_per_channel should return error");
+    }
+
+    #[test]
+    fn test_16bit_conversion_preserves_values() {
+        // At 16-bit, raw i32 values should come back as i16 unchanged
+        let samples_i32 = vec![0i32, 100, -100, 16383, -16384, 32767, -32768];
+        let channels = vec![samples_i32.clone()];
+        let audio = DecodedAudio::new(channels, 16, 44100);
+
+        let result: Vec<i16> = audio.read_samples_planar().unwrap();
+        let expected: Vec<i16> = samples_i32.iter().map(|&s| s as i16).collect();
+        assert_eq!(result, expected, "16-bit conversion should preserve values");
+    }
+
+    #[test]
+    fn test_read_samples_as_f32_normalises() {
+        // At 16-bit, i16::MAX should map to approximately 1.0 in f32
+        let channels = vec![vec![32767i32, -32768, 0]];
+        let audio = DecodedAudio::new(channels, 16, 44100);
+        let sample_rate = NonZeroU32::new(44100).unwrap();
+
+        let samples: AudioSamples<'static, f32> = audio.read_samples(sample_rate).unwrap();
+        let iv = samples.to_interleaved_vec();
+        assert!(iv[0].abs() > 0.9, "max i16 should map to near 1.0 in f32: {}", iv[0]);
+        assert!(iv[1] < -0.9, "min i16 should map to near -1.0 in f32: {}", iv[1]);
+        assert!(iv[2].abs() < 1e-6, "zero should map to zero in f32: {}", iv[2]);
+    }
+
+    #[test]
+    fn test_read_samples_as_f64_normalises() {
+        let channels = vec![vec![32767i32, -32768, 0]];
+        let audio = DecodedAudio::new(channels, 16, 44100);
+        let sample_rate = NonZeroU32::new(44100).unwrap();
+
+        let samples: AudioSamples<'static, f64> = audio.read_samples(sample_rate).unwrap();
+        let iv = samples.to_interleaved_vec();
+        assert!(iv[0].abs() > 0.9, "max i16 → near 1.0 in f64");
+        assert!(iv[1] < -0.9, "min i16 → near -1.0 in f64");
+        assert!(iv[2].abs() < 1e-12, "zero → 0.0 in f64");
+    }
+
+    #[test]
+    fn test_total_samples_correct() {
+        let channels = vec![vec![0i32; 100]; 3];
+        let audio = DecodedAudio::new(channels, 16, 44100);
+        assert_eq!(audio.total_samples(), 300, "3 channels × 100 samples = 300");
+    }
+
+    #[test]
+    fn test_read_channel_samples_oob() {
+        let channels = vec![vec![1i32, 2], vec![3i32, 4]];
+        let audio = DecodedAudio::new(channels, 16, 44100);
+
+        let result: Result<Vec<i16>, _> = audio.read_channel_samples(5);
+        assert!(result.is_err(), "out-of-bounds channel index should fail");
+    }
+
+    #[test]
+    fn test_8bit_conversion() {
+        // 8-bit sample: should be scaled up to 16-bit range
+        let channels = vec![vec![127i32, -128]]; // max/min 8-bit
+        let audio = DecodedAudio::new(channels, 8, 44100);
+
+        let samples: Vec<i16> = audio.read_samples_planar().unwrap();
+        assert_eq!(samples.len(), 2);
+        // Should be scaled to 16-bit range: 127 << 8 = 32512
+        assert!(samples[0] > 0, "positive 8-bit value should scale positive");
     }
 }

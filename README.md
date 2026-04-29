@@ -16,9 +16,10 @@ Rust crate providing audio file I/O utilities and helpers.
 
 ## NOTE: Still under development
 
-Currently only supports `.wav` files
+Currently supports `.wav` and `.flac` files.
 
-- flac
+Planned:
+
 - mp3
 - aiff
 - ogg
@@ -53,12 +54,16 @@ pub fn main() -> AudioIOResult<()> {
 
 ## Benchmarks
 
-Checkout the [benchmark summary](./benchmark_summary.md) doc for a comparison against [Hound](https://crates.io/crates/hound) and [libsndfile](https://libsndfile.github.io/libsndfile/).
+Checkout the [wav benchmark summary](./benches/wav_benchmark_summary.md) doc for a comparison against [Hound](https://crates.io/crates/hound) and [libsndfile](https://libsndfile.github.io/libsndfile/). Check out [flac benchmark summary](./benches/flac_benchmark_summary.md)
 
 To run the benchmarks (Criterion) reading and writing.
 
 ```bash
-cargo bench --bench wav_rw
+cargo bench --bench wav_rw --features "wav"
+```
+
+```bash
+cargo bench --bench flac_rw --features "flac"
 ```
 
 I have included a small benchmark reported binary for collating benchmarks to a markdown file

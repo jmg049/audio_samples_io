@@ -241,7 +241,12 @@ impl<'a> AudioFile for WavFile<'a> {
         let use_mmap = options.use_memory_map && file_size <= MAX_MMAP_SIZE;
 
         let audio_data_source: AudioDataSource<'a> = if use_mmap {
-            AudioDataSource::MemoryMapped(unsafe { MmapOptions::new().map(&file)? })
+            let mmap = unsafe { MmapOptions::new().map(&file)? };
+            // Hint to the OS that pages will be accessed sequentially, enabling aggressive
+            // read-ahead prefetching.  Best-effort: ignore errors (e.g. on platforms that
+            // don't support it).
+            let _ = mmap.advise(memmap2::Advice::Sequential);
+            AudioDataSource::MemoryMapped(mmap)
         } else {
             // Fallback to buffered read for large files or when mmap is disabled
             let mut buf_reader = BufReader::new(file);

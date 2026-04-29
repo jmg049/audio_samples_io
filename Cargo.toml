@@ -1,6 +1,6 @@
 [package]
 name = "audio_samples_io"
-version = "0.1.11"
+version = "0.2.0"
 edition = "2024"
 authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
 license = "MIT"
@@ -14,7 +14,7 @@ categories = ["encoding", "multimedia", "science"]
 exclude = ["/examples/*", "/tests/*", "/target/*", "/benches/*", "*.wav", "*.flac"]
 
 [dependencies]
-audio_samples = { version = "1.0.5", default-features = false, features = ["editing", "random-generation", "resampling"]}
+audio_samples = { version = "1.0.6", default-features = false, features = ["editing", "random-generation", "resampling"]}
 colored = { version = "3.0.0", optional = true }
 memmap2 = "0.9.10"
 thiserror = "2.0.18"
@@ -29,15 +29,20 @@ numpy = { version = "0.28", optional = true }
 pyo3 = { version = "0.28.3", optional = true, default-features = false }
 non-empty-slice = "0.5.1"
 non-empty-iter = "0.2.0"
+rayon = { version = "1", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
 hound = "3.5.0"
+symphonia = { version = "0.5", default-features = false, features = ["flac"] }
 
 [features]
 default = ["wav"]
+# Full features does not include simd since that requires nightly Rust, numpy is not included since that is specific to building for python, and benchmark_reporting is not included since that is only needed for generating benchmark reports
+full = ["wav", "flac", "flac-parallel", "colored"]
 colored = ["dep:colored"]
 simd = ["audio_samples/simd"]
+flac-parallel = ["dep:rayon"]
 benchmark_reporting = [
     "dep:chrono",
     "dep:sysinfo",
@@ -53,7 +58,17 @@ flac = []
 [[bench]]
 name = "wav_rw"
 harness = false
+required-features = ["wav"]
+
+[[bench]]
+name = "flac_rw"
+harness = false
+required-features = ["flac"]
 
 [[bin]]
 name = "benchmark_reporter"
 path = "src/bin/benchmark_reporter.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

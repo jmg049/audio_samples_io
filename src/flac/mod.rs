@@ -86,15 +86,8 @@ impl CompressionLevel {
     /// Get recommended block size for this level
     pub const fn block_size(self) -> u32 {
         match self.0 {
-            0 => 1152,
-            1 => 1152,
-            2 => 2304,
-            3 => 2304,
-            4 => 4096,
-            5 => 4096,
-            6 => 4096,
-            7 => 4096,
-            8 => 4096,
+            0 | 1 => 1152,
+            2 | 3 => 2304,
             _ => 4096,
         }
     }
@@ -102,15 +95,9 @@ impl CompressionLevel {
     /// Get maximum LPC order for this level
     pub const fn max_lpc_order(self) -> u8 {
         match self.0 {
-            0 => 0, // Fixed predictors only
-            1 => 0, // Fixed predictors only
-            2 => 0, // Fixed predictors only
+            0..=2 => 0, // Fixed predictors only
             3 => 6,
-            4 => 8,
-            5 => 8,
-            6 => 8,
-            7 => 12,
-            8 => 12,
+            7 | 8 => 12,
             _ => 8,
         }
     }
@@ -128,15 +115,9 @@ impl CompressionLevel {
     /// Get Rice partition order range (min, max)
     pub const fn rice_partition_order_range(self) -> (u8, u8) {
         match self.0 {
-            0 => (0, 3),
-            1 => (0, 3),
-            2 => (0, 4),
-            3 => (0, 4),
-            4 => (0, 5),
-            5 => (0, 5),
-            6 => (0, 6),
-            7 => (0, 6),
-            8 => (0, 6),
+            0 | 1 => (0, 3),
+            2 | 3 => (0, 4),
+            6..=8 => (0, 6),
             _ => (0, 5),
         }
     }
@@ -149,7 +130,6 @@ impl CompressionLevel {
     /// LPC coefficient quantization precision
     pub const fn qlp_precision(self) -> u8 {
         match self.0 {
-            0..=4 => 12,
             5..=7 => 14,
             8 => 15,
             _ => 12,

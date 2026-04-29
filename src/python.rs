@@ -17,6 +17,119 @@ use crate::wav::{WavFile, wav_file::parse_wav_header_streaming};
 use crate::{AudioIOError, AudioIOResult, BaseAudioInfo, FileType};
 use audio_samples::I24;
 
+/// Type-erased container for a natively-typed audio array produced by [`read_pyarray_native`].
+///
+/// Each variant holds a Fortran-layout `PyArray2<T>` matching the file's native sample type,
+/// so callers can dispatch on the type without a second file open or header parse.
+#[cfg(target_endian = "little")]
+pub enum NativeAudioArray {
+    U8(Py<PyArray2<u8>>, BaseAudioInfo),
+    I16(Py<PyArray2<i16>>, BaseAudioInfo),
+    I32(Py<PyArray2<i32>>, BaseAudioInfo),
+    F32(Py<PyArray2<f32>>, BaseAudioInfo),
+    F64(Py<PyArray2<f64>>, BaseAudioInfo),
+}
+
+/// Single-pass WAV read: one `File::open`, one header parse, one `read_exact` into a
+/// freshly-allocated `PyArray2<T>` whose type matches the file's native sample type.
+///
+/// Returns `None` when the fast path does not apply (non-WAV, I24, big-endian).
+/// Returns `Some(Err(...))` for I/O errors encountered after the file was opened.
+///
+/// The happy path for the common `read(fp)` call (no type conversion) should always hit
+/// this function, saving ~3 µs per call by avoiding the redundant `peek_native_type` open.
+#[cfg(target_endian = "little")]
+pub fn read_pyarray_native(
+    py: Python<'_>,
+    path: &Path,
+) -> Option<PyResult<NativeAudioArray>> {
+    // Only WAV files are handled by the single-pass direct path.
+    if !matches!(FileType::from_path(path), FileType::WAV) {
+        return None;
+    }
+
+    // Step 1: open + header (GIL released — pure I/O)
+    let parse_result: AudioIOResult<(BaseAudioInfo, BufReader<std::fs::File>)> = py.detach(|| {
+        let file = std::fs::File::open(path).map_err(AudioIOError::from)?;
+        let mut reader = BufReader::with_capacity(65536, file);
+        let (info, _) = parse_wav_header_streaming(&mut reader)?;
+        Ok((info, reader))
+    });
+
+    // Return None on any parse error — the caller will try the slower fallback path.
+    let (info, reader) = parse_result.ok()?;
+
+    // I24 has a non-standard in-memory layout — exclude from the direct path.
+    if matches!(info.sample_type, audio_samples::SampleType::I24) {
+        return None;
+    }
+
+    let channels = info.channels as usize;
+    let total_samples = info.total_samples;
+    if channels == 0 || total_samples == 0 || total_samples % channels != 0 {
+        return None;
+    }
+
+    // Step 2 + 3: allocate PyArray (GIL held) then fill it (GIL released), dispatched per type.
+    let result = match info.sample_type {
+        audio_samples::SampleType::U8 => {
+            alloc_and_fill::<u8>(py, reader, info).map(|(a, i)| NativeAudioArray::U8(a, i))
+        }
+        audio_samples::SampleType::I16 => {
+            alloc_and_fill::<i16>(py, reader, info).map(|(a, i)| NativeAudioArray::I16(a, i))
+        }
+        audio_samples::SampleType::I32 => {
+            alloc_and_fill::<i32>(py, reader, info).map(|(a, i)| NativeAudioArray::I32(a, i))
+        }
+        audio_samples::SampleType::F32 => {
+            alloc_and_fill::<f32>(py, reader, info).map(|(a, i)| NativeAudioArray::F32(a, i))
+        }
+        audio_samples::SampleType::F64 => {
+            alloc_and_fill::<f64>(py, reader, info).map(|(a, i)| NativeAudioArray::F64(a, i))
+        }
+        _ => return None,
+    };
+
+    Some(result)
+}
+
+/// Allocate a Fortran-layout `PyArray2<T>` and fill it from the open `BufReader`.
+///
+/// GIL is held for the allocation, released for the `read_exact` call.
+#[cfg(target_endian = "little")]
+fn alloc_and_fill<T>(
+    py: Python<'_>,
+    reader: BufReader<std::fs::File>,
+    info: BaseAudioInfo,
+) -> PyResult<(Py<PyArray2<T>>, BaseAudioInfo)>
+where
+    T: Element + 'static,
+{
+    use std::mem::size_of;
+
+    let channels = info.channels as usize;
+    let total_samples = info.total_samples;
+    let frames = total_samples / channels;
+    let byte_count = total_samples * size_of::<T>();
+
+    // Fortran (column-major) layout: element [c, f] → c + f*channels, matching WAV interleaved.
+    let array = unsafe { PyArray2::<T>::new(py, [channels, frames], true) };
+    let data_ptr_usize = array.data() as usize;
+
+    let read_result: AudioIOResult<()> = py.detach(|| {
+        let mut r = reader;
+        // Safety: pointer valid (just allocated, not yet shared), CPython is non-moving.
+        let bytes =
+            unsafe { std::slice::from_raw_parts_mut(data_ptr_usize as *mut u8, byte_count) };
+        r.read_exact(bytes).map_err(AudioIOError::from)
+    });
+
+    read_result
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+
+    Ok((array.unbind(), info))
+}
+
 /// Read audio file directly into NumPy array.
 ///
 /// For multichannel audio, creates Fortran-layout (column-major) array that matches
@@ -40,13 +153,22 @@ where
 {
     let path = fp.as_ref();
 
-    // Read file without GIL (expensive I/O operation)
-    // Opens file once and extracts both data and metadata
+    // Fast path: parse header once, allocate numpy array directly, read into its buffer.
+    // Eliminates the intermediate Vec allocation and the extra mmap(MAP_ANONYMOUS) zero-fill
+    // overhead that Vec::with_capacity triggers for large allocations.
+    #[cfg(target_endian = "little")]
+    if TypeId::of::<T>() != TypeId::of::<I24>() {
+        if let Some(result) = read_pyarray_direct::<T>(py, path) {
+            return result;
+        }
+        // Falls through to the Vec path below if direct path is not applicable.
+    }
+
+    // Vec path: reads into intermediate Vec<T>, then hands ownership to numpy (zero-copy).
     let (interleaved_vec, info) = py
         .detach(|| read_interleaved_with_info::<_, T>(path))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
 
-    // Create PyArray with optimal layout (requires GIL, but fast ~2ms)
     let pyarray = create_pyarray_fortran(
         py,
         interleaved_vec,
@@ -55,6 +177,89 @@ where
     )?;
 
     Ok((pyarray, info))
+}
+
+/// Fast path for WAV loading: parse header, allocate PyArray2 with Fortran layout, read
+/// audio payload directly into numpy's buffer — no intermediate Vec allocation.
+///
+/// Returns `None` when the fast path does not apply (type mismatch, I24, big-endian, or
+/// any I/O error), letting the caller fall back to the Vec path.
+///
+/// # Safety
+///
+/// The raw data pointer obtained from the freshly-allocated, unshared PyArray is used while
+/// the GIL is released.  This is sound because:
+/// 1. The array was just created and has not been returned to Python — no other thread holds it.
+/// 2. CPython uses reference-counted, non-moving GC; object addresses are stable.
+/// 3. We hold a strong reference (`Bound<'_, PyArray2<T>>`) that prevents deallocation.
+#[cfg(target_endian = "little")]
+fn read_pyarray_direct<T>(
+    py: Python<'_>,
+    path: &Path,
+) -> Option<PyResult<(Py<PyArray2<T>>, BaseAudioInfo)>>
+where
+    T: StandardSample + Element + 'static,
+{
+    use std::mem::size_of;
+
+    // Step 1: Parse WAV header with GIL released (I/O).  A 64 KB BufReader reads the header
+    // and the first chunk of audio data in a single syscall, reducing round-trips.
+    let parse_result: AudioIOResult<(BaseAudioInfo, BufReader<std::fs::File>)> = py.detach(|| {
+        let file = std::fs::File::open(path).map_err(AudioIOError::from)?;
+        let mut reader = BufReader::with_capacity(65536, file);
+        let (info, _) = parse_wav_header_streaming(&mut reader)?;
+        Ok((info, reader))
+    });
+
+    let (info, reader) = match parse_result {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+
+    // Fast path applies only when T matches the file's native sample type.
+    let native_matches = match info.sample_type {
+        audio_samples::SampleType::U8 => TypeId::of::<T>() == TypeId::of::<u8>(),
+        audio_samples::SampleType::I16 => TypeId::of::<T>() == TypeId::of::<i16>(),
+        audio_samples::SampleType::I32 => TypeId::of::<T>() == TypeId::of::<i32>(),
+        audio_samples::SampleType::F32 => TypeId::of::<T>() == TypeId::of::<f32>(),
+        audio_samples::SampleType::F64 => TypeId::of::<T>() == TypeId::of::<f64>(),
+        _ => false,
+    };
+    if !native_matches {
+        return None;
+    }
+
+    let channels = info.channels as usize;
+    let total_samples = info.total_samples;
+    if channels == 0 || total_samples == 0 || total_samples % channels != 0 {
+        return None;
+    }
+    let frames = total_samples / channels;
+    let byte_count = total_samples * size_of::<T>();
+
+    // Step 2: Allocate PyArray2 with Fortran (column-major) layout (GIL held, fast).
+    // Fortran layout for shape (channels, frames) maps element [c, f] to index c + f*channels,
+    // which is exactly WAV's interleaved on-disk format — no deinterleave needed.
+    // `PyArray2::new` is the numpy equivalent of `numpy.empty(..., order='F')`.
+    let array = unsafe { PyArray2::<T>::new(py, [channels, frames], true) };
+
+    // Step 3: Read audio payload directly into the PyArray's buffer (GIL released).
+    // Convert the raw data pointer to usize so it can cross the `py.detach()` Ungil boundary.
+    let data_ptr_usize = array.data() as usize;
+
+    let read_result: AudioIOResult<()> = py.detach(|| {
+        let mut r = reader;
+        // Safety: pointer was valid when captured (step 2), array is held alive by `array`,
+        // CPython does not move objects, no other thread has seen this array.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(data_ptr_usize as *mut u8, byte_count) };
+        r.read_exact(bytes).map_err(AudioIOError::from)
+    });
+
+    if let Err(e) = read_result {
+        return Some(Err(PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string())));
+    }
+
+    Some(Ok((array.unbind(), info)))
 }
 
 /// Read audio file into interleaved Vec with metadata,
@@ -97,9 +302,40 @@ where
             Ok((interleaved_vec, info))
         }
         #[cfg(feature = "flac")]
-        FileType::FLAC => Err(AudioIOError::unsupported_format(
-            "FLAC support with PyArray not yet implemented",
-        )),
+        FileType::FLAC => {
+            use crate::flac::FlacFile;
+            use crate::traits::{AudioFile, AudioFileRead};
+
+            let flac_file = FlacFile::open_with_options(path, OpenOptions::default())?;
+            let info = flac_file.base_info()?;
+            let channels = info.channels as usize;
+            let total_samples = info.total_samples;
+            let frames = total_samples / channels;
+
+            // FLAC decode → planar layout: [ch0[0..frames], ch1[0..frames], ...]
+            // Stored as C-order Array2(channels, frames).
+            let audio = flac_file.read::<T>()?.into_owned();
+            let planar = audio.as_slice().ok_or_else(|| {
+                AudioIOError::corrupted_data_simple(
+                    "FLAC decode produced non-contiguous data",
+                    "Cannot extract samples",
+                )
+            })?;
+
+            // Convert planar → interleaved so create_pyarray_fortran can reuse the WAV path.
+            let mut interleaved: Vec<T> = Vec::with_capacity(total_samples);
+            for f in 0..frames {
+                for c in 0..channels {
+                    interleaved.push(planar[c * frames + f]);
+                }
+            }
+
+            let nev = NonEmptyVec::try_from(interleaved).map_err(|_| {
+                AudioIOError::corrupted_data_simple("Empty FLAC file", "No samples decoded")
+            })?;
+
+            Ok((nev, info))
+        }
         other => Err(AudioIOError::unsupported_format(format!(
             "Unsupported file format: {:?}",
             other
@@ -126,7 +362,7 @@ where
     use std::mem::size_of;
 
     let file = std::fs::File::open(path).map_err(AudioIOError::from)?;
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::with_capacity(65536, file);
 
     let (info, data_byte_offset) = parse_wav_header_streaming(&mut reader)?;
 

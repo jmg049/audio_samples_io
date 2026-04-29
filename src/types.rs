@@ -250,6 +250,7 @@ impl Display for BaseAudioInfo {
         // ============ COLOURED VERSION ============
         #[cfg(feature = "colored")]
         {
+                use colored::{ColoredString, Colorize};
             // Helper functions (NOT closures with impl Trait)
             fn label(s: &str) -> ColoredString {
                 s.bold().bright_blue()
@@ -261,7 +262,7 @@ impl Display for BaseAudioInfo {
 
             writeln!(f, "{}", "Audio Info".bold().underline())?;
 
-            writeln!(f, "├─ {}: {}", label("File Type"), value(self.format))?;
+            writeln!(f, "├─ {}: {}", label("File Type"), value(self.file_type))?;
             writeln!(
                 f,
                 "├─ {}: {}",
@@ -291,7 +292,7 @@ impl Display for BaseAudioInfo {
                 f,
                 "├─ {}: {}",
                 label("Total Samples"),
-                value(self.n_samples)
+                value(self.total_samples)
             )?;
             writeln!(
                 f,

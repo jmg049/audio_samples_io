@@ -56,6 +56,9 @@ pub mod python;
 #[cfg(feature = "numpy")]
 pub use crate::python::read_pyarray;
 
+#[cfg(all(feature = "numpy", target_endian = "little"))]
+pub use crate::python::{NativeAudioArray, read_pyarray_native};
+
 use std::{
     fs::File,
     io::{BufReader, BufWriter, Read, Seek, Write},
@@ -87,6 +90,61 @@ impl<WS> WriteSeek for WS where WS: Write + Seek {}
 
 // Public API
 
+/// Peek at the native sample type of an audio file with minimal I/O.
+///
+/// Uses a small buffered read (one syscall for the first 64 KB covers any WAV/FLAC header)
+/// instead of mmapping the entire file.  This is significantly cheaper than [`info`] when
+/// only the sample type is needed, such as when auto-detecting the read target type.
+pub fn peek_native_type<P: AsRef<Path>>(fp: P) -> AudioIOResult<ValidatedSampleType> {
+    let path = fp.as_ref();
+
+    match FileType::from_path(path) {
+        FileType::WAV => {
+            #[cfg(not(feature = "wav"))]
+            return Err(crate::error::AudioIOError::missing_feature(
+                "'wav' feature must be enabled to peek WAV files",
+            ));
+
+            #[cfg(feature = "wav")]
+            {
+                use crate::wav::wav_file::parse_wav_header_streaming;
+                let file = File::open(path)?;
+                let mut reader = BufReader::with_capacity(65536, file);
+                let (info, _) = parse_wav_header_streaming(&mut reader)?;
+                ValidatedSampleType::try_from(info.sample_type).map_err(|_| {
+                    AudioIOError::unsupported_format(format!(
+                        "Unsupported native sample type: {:?}",
+                        info.sample_type
+                    ))
+                })
+            }
+        }
+        FileType::FLAC => {
+            #[cfg(not(feature = "flac"))]
+            return Err(crate::error::AudioIOError::missing_feature(
+                "'flac' feature must be enabled to peek FLAC files",
+            ));
+
+            #[cfg(feature = "flac")]
+            {
+                use crate::flac::FlacFile;
+                use crate::traits::{AudioFile, AudioFileMetadata};
+                let flac_file = FlacFile::open_with_options(path, OpenOptions::default())?;
+                let info = flac_file.base_info()?;
+                ValidatedSampleType::try_from(info.sample_type).map_err(|_| {
+                    AudioIOError::unsupported_format(format!(
+                        "Unsupported native sample type: {:?}",
+                        info.sample_type
+                    ))
+                })
+            }
+        }
+        other => Err(crate::error::AudioIOError::unsupported_format(format!(
+            "peek_native_type does not support: {other:?}"
+        ))),
+    }
+}
+
 /// Get basic audio information from a file
 ///
 /// Automatically detects the file format and extracts metadata.
@@ -115,10 +173,10 @@ pub fn info<P: AsRef<Path>>(fp: P) -> AudioIOResult<BaseAudioInfo> {
 
             #[cfg(feature = "flac")]
             {
-                // TODO: Implement FLAC info extraction when FLAC support is added
-                Err(crate::error::AudioIOError::unsupported_format(
-                    "FLAC info extraction not yet implemented",
-                ))
+                use crate::flac::FlacFile;
+                use crate::traits::AudioFileMetadata;
+                let flac_file = FlacFile::open_metadata(path)?;
+                flac_file.base_info()
             }
         }
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
@@ -161,10 +219,11 @@ where
 
             #[cfg(feature = "flac")]
             {
-                // TODO: Implement FLAC reading when FLAC support is added
-                Err(crate::error::AudioIOError::unsupported_format(
-                    "FLAC reading not yet implemented",
-                ))
+                use crate::flac::FlacFile;
+                use crate::traits::{AudioFile, AudioFileRead};
+                let flac_file = FlacFile::open_with_options(path, OpenOptions::default())?;
+                let samples = flac_file.read::<T>()?;
+                Ok(samples.into_owned())
             }
         }
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
@@ -338,7 +397,7 @@ where
 /// ```no_run
 /// use audio_samples_io::{create_streamed, types::ValidatedSampleType};
 /// use audio_samples_io::traits::{AudioStreamWrite, AudioStreamWriter};
-/// use audio_samples::{AudioSamples, channels, nzu};
+/// use audio_samples::{AudioSamples, channels, nzu, sample_rate};
 /// use std::num::NonZeroU32;
 ///
 /// let mut writer = create_streamed(
@@ -349,7 +408,7 @@ where
 /// )?;
 ///
 /// // Write audio in chunks
-/// let sample_rate = nzu!(44100)
+/// let sample_rate = sample_rate!(44100);
 /// let chunk = AudioSamples::<f32>::zeros_multi(channels!(2), nzu!(1024), sample_rate);
 /// writer.write_frames(&chunk)?;
 ///
@@ -416,7 +475,7 @@ where
 /// ```no_run
 /// use audio_samples_io::{create_streamed_writer, types::ValidatedSampleType};
 /// use audio_samples_io::traits::{AudioStreamWrite, AudioStreamWriter};
-/// use audio_samples::{AudioSamples, nzu};
+/// use audio_samples::{AudioSamples, nzu, sample_rate};
 /// use std::io::Cursor;
 /// use std::num::NonZeroU32;
 ///
@@ -430,7 +489,7 @@ where
 ///     ValidatedSampleType::I16,
 /// )?;
 ///
-/// let sample_rate = nzu!(22050);
+/// let sample_rate = sample_rate!(22050);
 /// let audio = AudioSamples::<f32>::zeros_mono(nzu!(1024), sample_rate);
 /// writer.write_frames(&audio)?;
 /// writer.finalize()?;
@@ -490,10 +549,10 @@ where
 
             #[cfg(feature = "flac")]
             {
-                // TODO: Implement FLAC opening when FLAC support is added
-                Err(crate::error::AudioIOError::unsupported_format(
-                    "FLAC opening not yet implemented",
-                ))
+                use crate::flac::FlacFile;
+                use crate::traits::AudioFile;
+                let flac_file = FlacFile::open_with_options(path, OpenOptions::default())?;
+                Ok(Box::new(flac_file))
             }
         }
         other => Err(crate::error::AudioIOError::unsupported_format(format!(

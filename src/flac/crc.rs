@@ -48,6 +48,83 @@ const CRC16_TABLE: [u16; 256] = {
     table
 };
 
+/// Advance CRC-16 state by one zero byte.
+const fn crc16_advance1(x: u16) -> u16 {
+    ((x & 0xFF) << 8) ^ CRC16_TABLE[(x >> 8) as usize]
+}
+
+/// Slicing-by-4 tables for CRC-16/IBM (0x8005, MSB-first).
+///
+/// Allows 4 bytes to be processed with 6 independent table lookups (no serial
+/// dependency chain). Based on the linearity of CRC over GF(2):
+///
+///   CRC([b0,b1,b2,b3] from state c) =
+///       M⁴·c  ⊕  M³·R(b0)  ⊕  M²·R(b1)  ⊕  M·R(b2)  ⊕  R(b3)
+///
+/// where M is the "multiply by x⁸ mod poly" matrix and R(b)=CRC16_TABLE[b].
+///
+/// State contribution: M⁴·c = TABLE_STATE_HI[c>>8] ⊕ TABLE_STATE_LO[c&0xFF]
+/// Data contributions: TABLE_B0..B2 plus CRC16_TABLE itself for b3.
+/// M⁴ applied to state (k << 8): advance high byte of CRC by 4 zero bytes.
+const CRC16_TABLE_STATE_HI: [u16; 256] = {
+    let mut t = [0u16; 256];
+    let mut i = 0;
+    while i < 256 {
+        let x = crc16_advance1(crc16_advance1(crc16_advance1(crc16_advance1((i as u16) << 8))));
+        t[i] = x;
+        i += 1;
+    }
+    t
+};
+
+/// M⁴ applied to state k: advance low byte of CRC by 4 zero bytes.
+const CRC16_TABLE_STATE_LO: [u16; 256] = {
+    let mut t = [0u16; 256];
+    let mut i = 0;
+    while i < 256 {
+        let x = crc16_advance1(crc16_advance1(crc16_advance1(crc16_advance1(i as u16))));
+        t[i] = x;
+        i += 1;
+    }
+    t
+};
+
+/// M³·R(b): contribution of data byte b at position 0 (3 bytes before end of chunk).
+const CRC16_TABLE_B0: [u16; 256] = {
+    let mut t = [0u16; 256];
+    let mut i = 0;
+    while i < 256 {
+        let x = crc16_advance1(crc16_advance1(crc16_advance1(CRC16_TABLE[i])));
+        t[i] = x;
+        i += 1;
+    }
+    t
+};
+
+/// M²·R(b): contribution of data byte b at position 1.
+const CRC16_TABLE_B1: [u16; 256] = {
+    let mut t = [0u16; 256];
+    let mut i = 0;
+    while i < 256 {
+        let x = crc16_advance1(crc16_advance1(CRC16_TABLE[i]));
+        t[i] = x;
+        i += 1;
+    }
+    t
+};
+
+/// M·R(b): contribution of data byte b at position 2.
+const CRC16_TABLE_B2: [u16; 256] = {
+    let mut t = [0u16; 256];
+    let mut i = 0;
+    while i < 256 {
+        let x = crc16_advance1(CRC16_TABLE[i]);
+        t[i] = x;
+        i += 1;
+    }
+    t
+};
+
 /// CRC-8 calculator for FLAC frame headers.
 ///
 /// # Example
@@ -73,7 +150,7 @@ impl Crc8 {
 
     /// Update the CRC with a single byte.
     #[inline]
-    pub fn update_byte(&mut self, byte: u8) {
+    pub const fn update_byte(&mut self, byte: u8) {
         self.crc = CRC8_TABLE[(self.crc ^ byte) as usize];
     }
 
@@ -93,7 +170,7 @@ impl Crc8 {
 
     /// Reset the CRC to initial state.
     #[inline]
-    pub fn reset(&mut self) {
+    pub const fn reset(&mut self) {
         self.crc = 0;
     }
 
@@ -111,16 +188,12 @@ impl Default for Crc8 {
         Self::new()
     }
 }
-
-/// CRC-16 calculator for FLAC frames.
-///
-/// # Example
-///
 /// ```
 /// use audio_samples_io::flac::crc::Crc16;
 ///
+/// let frame_bytes: &[u8] = b"...";
 /// let mut crc = Crc16::new();
-/// crc.update(&frame_bytes);
+/// crc.update(frame_bytes);
 /// let checksum = crc.finalize();
 /// ```
 #[derive(Debug, Clone, Copy)]
@@ -137,7 +210,7 @@ impl Crc16 {
 
     /// Update the CRC with a single byte.
     #[inline]
-    pub fn update_byte(&mut self, byte: u8) {
+    pub const fn update_byte(&mut self, byte: u8) {
         self.crc = (self.crc << 8) ^ CRC16_TABLE[((self.crc >> 8) as u8 ^ byte) as usize];
     }
 
@@ -157,16 +230,30 @@ impl Crc16 {
 
     /// Reset the CRC to initial state.
     #[inline]
-    pub fn reset(&mut self) {
+    pub const fn reset(&mut self) {
         self.crc = 0;
     }
 
-    /// Compute CRC-16 for a byte slice in one call.
+    /// Compute CRC-16 for a byte slice using slicing-by-4 (4 bytes per iteration).
+    ///
+    /// Processes 4 bytes at a time with 6 independent table lookups — no serial
+    /// dependency chain — giving ~2-3× throughput vs the byte-by-byte loop.
     #[inline]
     pub fn compute(data: &[u8]) -> u16 {
-        let mut crc = Self::new();
-        crc.update(data);
-        crc.finalize()
+        let mut crc: u16 = 0;
+        let mut chunks = data.chunks_exact(4);
+        for chunk in &mut chunks {
+            crc = CRC16_TABLE_STATE_HI[(crc >> 8) as usize]
+                ^ CRC16_TABLE_STATE_LO[(crc & 0xFF) as usize]
+                ^ CRC16_TABLE_B0[chunk[0] as usize]
+                ^ CRC16_TABLE_B1[chunk[1] as usize]
+                ^ CRC16_TABLE_B2[chunk[2] as usize]
+                ^ CRC16_TABLE[chunk[3] as usize];
+        }
+        for &byte in chunks.remainder() {
+            crc = (crc << 8) ^ CRC16_TABLE[((crc >> 8) as u8 ^ byte) as usize];
+        }
+        crc
     }
 }
 

@@ -6,26 +6,8 @@ pub const FLAC_MARKER: [u8; 4] = *b"fLaC";
 /// Frame sync code (14 bits: 0b11111111111110)
 pub const FRAME_SYNC_CODE: u16 = 0x3FFE;
 
-/// Maximum block size in samples (65535)
-pub const MAX_BLOCK_SIZE: u32 = 65535;
-
-/// Minimum block size in samples (16)
-pub const MIN_BLOCK_SIZE: u32 = 16;
-
 /// Maximum LPC order
 pub const MAX_LPC_ORDER: usize = 32;
-
-/// Maximum Rice partition order
-pub const MAX_RICE_PARTITION_ORDER: u8 = 15;
-
-/// Maximum channels
-pub const MAX_CHANNELS: u8 = 8;
-
-/// Maximum bits per sample (FLAC supports 4-24 bits only)
-pub const MAX_BITS_PER_SAMPLE: u8 = 24;
-
-/// Minimum bits per sample (FLAC supports 4-24 bits only)
-pub const MIN_BITS_PER_SAMPLE: u8 = 4;
 
 /// STREAMINFO block size (always 34 bytes)
 pub const STREAMINFO_SIZE: usize = 34;
@@ -36,19 +18,6 @@ pub const MD5_SIZE: usize = 16;
 /// Fixed predictor orders (0-4 supported)
 pub const MAX_FIXED_ORDER: usize = 4;
 
-/// Fixed predictor coefficients for each order
-/// Order 0: constant (no prediction)
-/// Order 1: s[n] = s[n-1]
-/// Order 2: s[n] = 2*s[n-1] - s[n-2]
-/// Order 3: s[n] = 3*s[n-1] - 3*s[n-2] + s[n-3]
-/// Order 4: s[n] = 4*s[n-1] - 6*s[n-2] + 4*s[n-3] - s[n-4]
-pub const FIXED_COEFFICIENTS: [[i32; 4]; 5] = [
-    [0, 0, 0, 0],   // Order 0
-    [1, 0, 0, 0],   // Order 1
-    [2, -1, 0, 0],  // Order 2
-    [3, -3, 1, 0],  // Order 3
-    [4, -6, 4, -1], // Order 4
-];
 
 /// Sample rate lookup table for frame header
 /// Index 0-11 are predefined, 12-14 read from end of header
@@ -130,7 +99,7 @@ pub const fn sample_rate_to_code(rate: u32) -> (u8, u8) {
         96000 => (11, 0),
         _ => {
             // Check if expressible as kHz (8-bit)
-            if rate % 1000 == 0 && rate / 1000 <= 255 {
+            if rate.is_multiple_of(1000) && rate / 1000 <= 255 {
                 (12, 1)
             }
             // Check if expressible as Hz (16-bit)
@@ -138,7 +107,7 @@ pub const fn sample_rate_to_code(rate: u32) -> (u8, u8) {
                 (13, 2)
             }
             // Express as 10Hz units (16-bit)
-            else if rate % 10 == 0 && rate / 10 <= 65535 {
+            else if rate.is_multiple_of(10) && rate / 10 <= 65535 {
                 (14, 3)
             }
             // Fallback to STREAMINFO
