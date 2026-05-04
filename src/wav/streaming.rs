@@ -473,11 +473,10 @@ where
 
         let actual_bytes = frames_read * self.bytes_per_frame();
 
-        // Convert bytes to samples based on file's sample type
-        let converted = self.convert_bytes_to_samples::<T>(&self.byte_buffer[..actual_bytes])?;
-
-        // safety: We have already verified that converted.len() == total samples to read
-        let converted = unsafe { NonEmptyVec::new_unchecked(converted) };
+        let mut converted_buf = Vec::new();
+        self.convert_bytes_to_samples::<T>(&self.byte_buffer[..actual_bytes], &mut converted_buf);
+        // safety: We have already verified that converted_buf.len() == total samples to read
+        let converted = unsafe { NonEmptyVec::new_unchecked(converted_buf) };
         // Deinterleave and replace buffer contents
         // safety: channels is guaranteed > 0 from parsing, and converted length matches frames read
         let num_channels = unsafe { NonZeroU32::new_unchecked(self.channels as u32) };
@@ -497,38 +496,39 @@ where
         Ok(frames_read)
     }
 
-    /// Convert raw bytes to samples of type T based on file's sample type.
-    fn convert_bytes_to_samples<T>(&self, bytes: &[u8]) -> AudioIOResult<Vec<T>>
+    /// Convert raw bytes to samples of type T, writing into `out` (cleared first).
+    fn convert_bytes_to_samples<T>(&self, bytes: &[u8], out: &mut Vec<T>)
     where
         T: StandardSample + 'static,
     {
+        out.clear();
         match self.sample_type {
-            ValidatedSampleType::U8 => Ok(bytes.iter().map(|&b| T::convert_from(b)).collect()),
-            ValidatedSampleType::I16 => Ok(bytes
-                .chunks_exact(2)
-                .map(|c| i16::from_le_bytes([c[0], c[1]]))
-                .map(T::convert_from)
-                .collect()),
-            ValidatedSampleType::I24 => Ok(bytes
-                .chunks_exact(3)
-                .map(|c| I24::from_le_bytes([c[0], c[1], c[2]]))
-                .map(T::convert_from)
-                .collect()),
-            ValidatedSampleType::I32 => Ok(bytes
-                .chunks_exact(4)
-                .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .map(T::convert_from)
-                .collect()),
-            ValidatedSampleType::F32 => Ok(bytes
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .map(T::convert_from)
-                .collect()),
-            ValidatedSampleType::F64 => Ok(bytes
-                .chunks_exact(8)
-                .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
-                .map(T::convert_from)
-                .collect()),
+            ValidatedSampleType::U8 => out.extend(bytes.iter().map(|&b| T::convert_from(b))),
+            ValidatedSampleType::I16 => out.extend(
+                bytes
+                    .chunks_exact(2)
+                    .map(|c| T::convert_from(i16::from_le_bytes([c[0], c[1]]))),
+            ),
+            ValidatedSampleType::I24 => out.extend(
+                bytes
+                    .chunks_exact(3)
+                    .map(|c| T::convert_from(I24::from_le_bytes([c[0], c[1], c[2]]))),
+            ),
+            ValidatedSampleType::I32 => out.extend(
+                bytes
+                    .chunks_exact(4)
+                    .map(|c| T::convert_from(i32::from_le_bytes([c[0], c[1], c[2], c[3]]))),
+            ),
+            ValidatedSampleType::F32 => out.extend(
+                bytes
+                    .chunks_exact(4)
+                    .map(|c| T::convert_from(f32::from_le_bytes([c[0], c[1], c[2], c[3]]))),
+            ),
+            ValidatedSampleType::F64 => out.extend(bytes.chunks_exact(8).map(|c| {
+                T::convert_from(f64::from_le_bytes([
+                    c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
+                ]))
+            })),
         }
     }
 
@@ -596,6 +596,38 @@ where
             window_size,
             hop_size,
             first_window: true,
+        }
+    }
+
+    /// Create a sample iterator over this streamed file.
+    ///
+    /// Yields individual samples in interleaved channel order (L, R, L, R, … for stereo),
+    /// converting from the file's native sample type to `T` on the fly. Reads from the
+    /// source in chunks to amortise I/O cost.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use audio_samples_io::wav::StreamedWavFile;
+    /// use std::{fs::File, io::BufReader};
+    ///
+    /// let mut reader = StreamedWavFile::new(BufReader::new(File::open("audio.wav")?))?;
+    /// let peak: f32 = reader.samples::<f32>()
+    ///     .flatten()
+    ///     .map(f32::abs)
+    ///     .fold(0.0_f32, f32::max);
+    /// # Ok::<(), audio_samples_io::error::AudioIOError>(())
+    /// ```
+    pub fn samples<T>(&mut self) -> StreamedSampleIter<'_, R, T>
+    where
+        T: StandardSample + Copy + 'static,
+    {
+        let byte_buf = vec![0u8; 512 * self.bytes_per_frame()];
+        StreamedSampleIter {
+            source: self,
+            byte_buf,
+            sample_buf: Vec::new(),
+            pos: 0,
         }
     }
 }
@@ -819,6 +851,75 @@ where
             Err(e) => Some(Err(e)),
         }
     }
+}
+
+/// Iterator over individual samples from a streamed WAV file.
+///
+/// Samples are yielded in interleaved channel order. Internally reads from the
+/// source in chunks to amortise I/O overhead. Use [`StreamedWavFile::samples`]
+/// to construct this iterator.
+pub struct StreamedSampleIter<'a, R, T>
+where
+    R: ReadSeek,
+    T: StandardSample + Copy + 'static,
+{
+    source: &'a mut StreamedWavFile<R>,
+    byte_buf: Vec<u8>,
+    sample_buf: Vec<T>,
+    pos: usize,
+}
+
+impl<'a, R, T> Iterator for StreamedSampleIter<'a, R, T>
+where
+    R: ReadSeek,
+    T: StandardSample + Copy + 'static,
+{
+    type Item = AudioIOResult<T>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos < self.sample_buf.len() {
+            let s = self.sample_buf[self.pos];
+            self.pos += 1;
+            return Some(Ok(s));
+        }
+
+        if self.source.remaining_frames() == 0 {
+            return None;
+        }
+
+        let bpf = self.source.bytes_per_frame();
+        let frames_to_read = (self.byte_buf.len() / bpf).min(self.source.remaining_frames());
+        let bytes_to_read = frames_to_read * bpf;
+
+        let bytes_read = match self.source.reader.read(&mut self.byte_buf[..bytes_to_read]) {
+            Err(e) => return Some(Err(AudioIOError::from(e))),
+            Ok(0) => return None,
+            Ok(n) => n,
+        };
+
+        let actual_bytes = (bytes_read / bpf) * bpf;
+        let frames_read = actual_bytes / bpf;
+
+        self.source
+            .convert_bytes_to_samples::<T>(&self.byte_buf[..actual_bytes], &mut self.sample_buf);
+        self.source.current_frame += frames_read;
+        self.pos = 1;
+        Some(Ok(self.sample_buf[0]))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let buffered = self.sample_buf.len() - self.pos;
+        let from_file = self.source.remaining_frames() * self.source.channels as usize;
+        (buffered + from_file, Some(buffered + from_file))
+    }
+}
+
+impl<'a, R, T> ExactSizeIterator for StreamedSampleIter<'a, R, T>
+where
+    R: ReadSeek,
+    T: StandardSample + Copy + 'static,
+{
 }
 
 #[cfg(test)]

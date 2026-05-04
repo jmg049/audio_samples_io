@@ -276,7 +276,7 @@ mod tests {
         let samples = chunk
             .read_samples::<f64, f64>()
             .expect("Expected aligned f64 read to succeed");
-        let values = NonEmptyVec::new(values.to_vec()).unwrap();
+        let values = NonEmptyVec::new(values.to_vec()).expect("values is non-empty");
         assert_eq!(samples, values);
     }
 }

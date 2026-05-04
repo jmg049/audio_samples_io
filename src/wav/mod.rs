@@ -6,7 +6,7 @@ pub mod streaming;
 pub mod streaming_writer;
 pub mod wav_file;
 use core::fmt::{Display, Formatter, Result as FmtResult};
-pub use streaming::{StreamedFrameIter, StreamedWavFile, StreamedWindowIter};
+pub use streaming::{StreamedFrameIter, StreamedSampleIter, StreamedWavFile, StreamedWindowIter};
 pub use streaming_writer::StreamedWavWriter;
 pub use wav_file::WavFile;
 

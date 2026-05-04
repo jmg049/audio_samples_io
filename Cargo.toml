@@ -70,5 +70,7 @@ name = "benchmark_reporter"
 path = "src/bin/benchmark_reporter.rs"
 
 [profile.release]
+opt-level = 3
 lto = "thin"
 codegen-units = 1
+panic = "abort"

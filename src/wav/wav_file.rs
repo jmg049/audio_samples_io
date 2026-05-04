@@ -1435,7 +1435,7 @@ mod wav_tests {
 
         // Combine into stereo
         let stereo =
-            audio_samples::AudioEditing::stack(NonEmptySlice::new(&[left, right]).unwrap())
+            audio_samples::AudioEditing::stack(NonEmptySlice::new(&[left, right]).expect("two channels"))
                 .expect("Failed to create stereo");
 
         // Write to file
