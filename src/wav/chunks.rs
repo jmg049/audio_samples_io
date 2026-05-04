@@ -112,3 +112,5 @@ pub const DATA_CHUNK: ChunkID = ChunkID::new(b"data");
 pub const FACT_CHUNK: ChunkID = ChunkID::new(b"fact");
 pub const LIST_CHUNK: ChunkID = ChunkID::new(b"LIST");
 pub const CUE_CHUNK: ChunkID = ChunkID::new(b"cue ");
+pub const SMPL_CHUNK: ChunkID = ChunkID::new(b"smpl");
+pub const BEXT_CHUNK: ChunkID = ChunkID::new(b"bext");

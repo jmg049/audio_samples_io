@@ -669,6 +669,8 @@ where
         WavFileInfo {
             available_chunks: self.chunks.iter().map(|c| c.id).collect(),
             encoding: self.format_code,
+            fact_num_samples: None,
+            info_metadata: None,
         }
     }
 

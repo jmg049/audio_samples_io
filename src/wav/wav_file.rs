@@ -24,10 +24,18 @@ use crate::{
     types::{AudioDataSource, BaseAudioInfo, FileType, OpenOptions, ValidatedSampleType},
     wav::{
         FormatCode,
-        chunks::{ChunkDesc, ChunkID, DATA_CHUNK, FMT_CHUNK, RIFF_CHUNK, WAVE_CHUNK},
+        bext::BextChunk,
+        chunks::{
+            BEXT_CHUNK, CUE_CHUNK, ChunkDesc, ChunkID, DATA_CHUNK, FACT_CHUNK, FMT_CHUNK,
+            LIST_CHUNK, RIFF_CHUNK, SMPL_CHUNK, WAVE_CHUNK,
+        },
+        cue::CueChunk,
         data::DataChunk,
         error::WavError,
+        fact::FactChunk,
         fmt::FmtChunk,
+        list_info::{InfoMetadata, ListChunk},
+        smpl::SmplChunk,
     },
 };
 
@@ -35,6 +43,10 @@ use crate::{
 pub struct WavFileInfo {
     pub available_chunks: Vec<ChunkID>,
     pub encoding: FormatCode,
+    /// Sample frame count from the FACT chunk, if present.
+    pub fact_num_samples: Option<u32>,
+    /// Metadata tags from the LIST/INFO chunk, if present and parseable.
+    pub info_metadata: Option<InfoMetadata>,
 }
 
 impl Display for WavFileInfo {
@@ -42,6 +54,13 @@ impl Display for WavFileInfo {
         writeln!(f, "WAV File Info:")?;
         writeln!(f, "Encoding: {}", self.encoding)?;
         writeln!(f, "Available Chunks: {:?}", self.available_chunks)?;
+        if let Some(n) = self.fact_num_samples {
+            writeln!(f, "Fact Sample Count: {n}")?;
+        }
+        if let Some(ref meta) = self.info_metadata {
+            writeln!(f, "Info Metadata:")?;
+            write!(f, "{meta}")?;
+        }
         Ok(())
     }
 }
@@ -97,20 +116,75 @@ impl<'a> WavFile<'a> {
         &self.data_source[self.data_range.clone()]
     }
 
-    pub fn fact(&'a self) -> Result<(), WavError> {
-        todo!()
+    /// Parse the FACT chunk, if present.
+    ///
+    /// Returns `None` when the file does not contain a FACT chunk.
+    pub fn fact(&self) -> AudioIOResult<Option<FactChunk<'_>>> {
+        self.chunks
+            .iter()
+            .find(|c| c.id == FACT_CHUNK)
+            .map(|desc| {
+                FactChunk::from_bytes(&self.data_source[desc.data_range()])
+                    .map_err(AudioIOError::WavError)
+            })
+            .transpose()
     }
 
-    pub fn list(&'a self) -> Result<(), WavError> {
-        todo!()
+    /// Parse the first LIST chunk, if present.
+    ///
+    /// Returns `None` when the file does not contain a LIST chunk.
+    /// Call [`ListChunk::info_metadata`] on the result to access INFO tags.
+    pub fn list(&self) -> AudioIOResult<Option<ListChunk<'_>>> {
+        self.chunks
+            .iter()
+            .find(|c| c.id == LIST_CHUNK)
+            .map(|desc| {
+                ListChunk::from_bytes(&self.data_source[desc.data_range()])
+                    .map_err(AudioIOError::WavError)
+            })
+            .transpose()
     }
 
-    pub fn plst(&'a self) -> Result<(), WavError> {
-        todo!()
+    /// Parse the CUE chunk, if present.
+    ///
+    /// Returns `None` when the file does not contain a CUE chunk.
+    pub fn cue(&self) -> AudioIOResult<Option<CueChunk<'_>>> {
+        self.chunks
+            .iter()
+            .find(|c| c.id == CUE_CHUNK)
+            .map(|desc| {
+                CueChunk::from_bytes(&self.data_source[desc.data_range()])
+                    .map_err(AudioIOError::WavError)
+            })
+            .transpose()
     }
 
-    pub fn cue(&'a self) -> Result<(), WavError> {
-        todo!()
+    /// Parse the SMPL chunk, if present.
+    ///
+    /// Returns `None` when the file does not contain a SMPL chunk.
+    pub fn smpl(&self) -> AudioIOResult<Option<SmplChunk<'_>>> {
+        self.chunks
+            .iter()
+            .find(|c| c.id == SMPL_CHUNK)
+            .map(|desc| {
+                SmplChunk::from_bytes(&self.data_source[desc.data_range()])
+                    .map_err(AudioIOError::WavError)
+            })
+            .transpose()
+    }
+
+    /// Parse the BEXT chunk, if present.
+    ///
+    /// Returns `None` when the file does not contain a BEXT chunk.
+    pub fn bext(&self) -> AudioIOResult<Option<BextChunk<'_>>> {
+        self.chunks
+            .iter()
+            .find(|c| c.id == BEXT_CHUNK)
+            .map(|desc| {
+                BextChunk::from_bytes(&self.data_source[desc.data_range()])
+                    .map_err(AudioIOError::WavError)
+            })
+            .transpose()
     }
 
     #[allow(dead_code)]
@@ -189,9 +263,18 @@ impl<'a> AudioFileMetadata for WavFile<'a> {
 
     #[allow(refining_impl_trait)]
     fn specific_info(&self) -> WavFileInfo {
+        let fact_num_samples = self.fact().ok().flatten().map(|f| f.num_samples());
+        let info_metadata = self
+            .list()
+            .ok()
+            .flatten()
+            .and_then(|l| l.info_metadata())
+            .and_then(|r| r.ok());
         WavFileInfo {
             available_chunks: self.chunks.iter().map(|c| c.id).collect(),
             encoding: self.fmt_chunk().format_code(),
+            fact_num_samples,
+            info_metadata,
         }
     }
 
@@ -1434,9 +1517,10 @@ mod wav_tests {
         let right = sine_wave::<f32>(880.0, duration, sample_rate, 0.4);
 
         // Combine into stereo
-        let stereo =
-            audio_samples::AudioEditing::stack(NonEmptySlice::new(&[left, right]).expect("two channels"))
-                .expect("Failed to create stereo");
+        let stereo = audio_samples::AudioEditing::stack(
+            NonEmptySlice::new(&[left, right]).expect("two channels"),
+        )
+        .expect("Failed to create stereo");
 
         // Write to file
         let output_path = std::env::temp_dir().join("test_write_stereo.wav");
@@ -1706,5 +1790,167 @@ mod wav_tests {
             // Clean up
             fs::remove_file(&output_path).ok();
         }
+    }
+
+    /// Build a minimal WAV in memory, then append a LIST/INFO chunk and optionally a FACT chunk,
+    /// then verify that `WavFile::list()` / `WavFile::fact()` parse them correctly.
+    fn build_wav_with_chunks(include_fact: bool, info_tags: &[(&[u8; 4], &str)]) -> Vec<u8> {
+        // 1. Core WAV: RIFF + fmt  + data (silence, 8-bit PCM mono, 8 kHz)
+        let sample_rate: u32 = 8000;
+        let num_samples: u32 = 8000; // 1 second of silence
+        let data_bytes = vec![128u8; num_samples as usize]; // 8-bit PCM silence
+
+        // FMT chunk (16 bytes)
+        let mut fmt_data = Vec::new();
+        fmt_data.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        fmt_data.extend_from_slice(&1u16.to_le_bytes()); // 1 channel
+        fmt_data.extend_from_slice(&sample_rate.to_le_bytes());
+        fmt_data.extend_from_slice(&sample_rate.to_le_bytes()); // byte rate
+        fmt_data.extend_from_slice(&1u16.to_le_bytes()); // block align
+        fmt_data.extend_from_slice(&8u16.to_le_bytes()); // 8 bits
+
+        // Build optional FACT chunk
+        let mut fact_chunk = Vec::new();
+        if include_fact {
+            fact_chunk.extend_from_slice(b"fact");
+            fact_chunk.extend_from_slice(&4u32.to_le_bytes());
+            fact_chunk.extend_from_slice(&num_samples.to_le_bytes());
+        }
+
+        // Build LIST/INFO chunk
+        let mut info_subchunks: Vec<u8> = Vec::new();
+        for &(id, value) in info_tags {
+            let mut payload = value.as_bytes().to_vec();
+            payload.push(0); // null terminator
+            info_subchunks.extend_from_slice(id);
+            info_subchunks.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            info_subchunks.extend_from_slice(&payload);
+            if !payload.len().is_multiple_of(2) {
+                info_subchunks.push(0); // padding
+            }
+        }
+
+        let mut list_chunk = Vec::new();
+        if !info_tags.is_empty() {
+            let list_data_len = 4 + info_subchunks.len(); // "INFO" + subchunks
+            list_chunk.extend_from_slice(b"LIST");
+            list_chunk.extend_from_slice(&(list_data_len as u32).to_le_bytes());
+            list_chunk.extend_from_slice(b"INFO");
+            list_chunk.extend_from_slice(&info_subchunks);
+        }
+
+        // Assemble the full RIFF file
+        let wave_payload_size = 8 + fmt_data.len()  // "fmt " header + data
+            + 8 + data_bytes.len()                   // "data" header + samples
+            + fact_chunk.len()
+            + list_chunk.len()
+            + 4; // "WAVE" tag
+
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(wave_payload_size as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&(fmt_data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&fmt_data);
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data_bytes.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&data_bytes);
+        wav.extend_from_slice(&fact_chunk);
+        wav.extend_from_slice(&list_chunk);
+        wav
+    }
+
+    #[test]
+    fn test_fact_chunk_absent_for_plain_pcm() {
+        let path = std::env::temp_dir().join(format!("test_no_fact_{}.wav", std::process::id()));
+        let wav_bytes = build_wav_with_chunks(false, &[]);
+        std::fs::write(&path, &wav_bytes).expect("write test wav");
+        let wav = WavFile::open_with_options(&path, OpenOptions::default()).expect("open test wav");
+        assert!(wav.fact().expect("fact() should not error").is_none());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_fact_chunk_parsed() {
+        let path = std::env::temp_dir().join(format!("test_fact_{}.wav", std::process::id()));
+        let wav_bytes = build_wav_with_chunks(true, &[]);
+        std::fs::write(&path, &wav_bytes).expect("write test wav");
+
+        let wav = WavFile::open_with_options(&path, OpenOptions::default()).expect("open test wav");
+        let fact = wav
+            .fact()
+            .expect("fact() should not error")
+            .expect("FACT chunk should be present");
+        assert_eq!(fact.num_samples(), 8000);
+
+        let info = wav.specific_info();
+        assert_eq!(info.fact_num_samples, Some(8000));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_list_info_chunk_parsed() {
+        let tags: &[(&[u8; 4], &str)] = &[
+            (b"INAM", "Test Track"),
+            (b"IART", "Test Artist"),
+            (b"IPRD", "Test Album"),
+        ];
+        let path = std::env::temp_dir().join(format!("test_list_info_{}.wav", std::process::id()));
+        let wav_bytes = build_wav_with_chunks(false, tags);
+        std::fs::write(&path, &wav_bytes).expect("write test wav");
+
+        let wav = WavFile::open_with_options(&path, OpenOptions::default()).expect("open test wav");
+        let list = wav
+            .list()
+            .expect("list() should not error")
+            .expect("LIST chunk should be present");
+        assert!(list.is_info());
+        let meta = list
+            .info_metadata()
+            .expect("is INFO type")
+            .expect("parses without error");
+        assert_eq!(meta.title.as_deref(), Some("Test Track"));
+        assert_eq!(meta.artist.as_deref(), Some("Test Artist"));
+        assert_eq!(meta.album.as_deref(), Some("Test Album"));
+        assert!(meta.genre.is_none());
+
+        // Also check specific_info exposes the same data
+        let info = wav.specific_info();
+        let si_meta = info
+            .info_metadata
+            .expect("info_metadata should be populated");
+        assert_eq!(si_meta.title.as_deref(), Some("Test Track"));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_fact_and_list_together() {
+        let tags: &[(&[u8; 4], &str)] = &[(b"IGNR", "Ambient"), (b"ICRD", "2024")];
+        let path =
+            std::env::temp_dir().join(format!("test_fact_and_list_{}.wav", std::process::id()));
+        let wav_bytes = build_wav_with_chunks(true, tags);
+        std::fs::write(&path, &wav_bytes).expect("write test wav");
+
+        let wav = WavFile::open_with_options(&path, OpenOptions::default()).expect("open test wav");
+        assert_eq!(
+            wav.fact()
+                .expect("fact() should not error")
+                .expect("FACT chunk should be present")
+                .num_samples(),
+            8000
+        );
+        let meta = wav
+            .list()
+            .expect("list() should not error")
+            .expect("LIST chunk should be present")
+            .info_metadata()
+            .expect("is INFO type")
+            .expect("parses without error");
+        assert_eq!(meta.genre.as_deref(), Some("Ambient"));
+        assert_eq!(meta.date.as_deref(), Some("2024"));
+
+        std::fs::remove_file(&path).ok();
     }
 }

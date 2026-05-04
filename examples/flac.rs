@@ -1,4 +1,3 @@
-
 #[cfg(feature = "flac")]
 use audio_samples_io::error::AudioIOResult;
 
@@ -18,7 +17,7 @@ pub fn main() -> AudioIOResult<()> {
     println!("Original: {sine_wave:#}");
     audio_samples_io::write("./sine_test.flac", &sine_wave)?;
     let read_sine_wave: AudioSamples<f32> = audio_samples_io::read("./sine_test.flac")?;
-    
+
     // FLAC is integer-only (24-bit). f32 → 24-bit int → f32 is lossy by ~1.2e-7 per sample.
     // Use a tolerance matching 1 LSB of 24-bit quantization (1/8388607 ≈ 1.19e-7).
     const TOLERANCE: f32 = 2e-7;
@@ -30,7 +29,9 @@ pub fn main() -> AudioIOResult<()> {
         if diff > TOLERANCE {
             eprintln!("Frame {i}: {a_val:.8} vs {b_val:.8} (diff={diff:.2e})");
             mismatches += 1;
-            if mismatches >= 10 { break; }
+            if mismatches >= 10 {
+                break;
+            }
         }
     }
     if mismatches == 0 {
@@ -42,7 +43,7 @@ pub fn main() -> AudioIOResult<()> {
 }
 
 #[cfg(not(feature = "flac"))]
-pub fn main() -> () {
+pub fn main() {
     use std::process::exit;
     eprintln!("FLAC feature not enabled");
     exit(1);
