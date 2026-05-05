@@ -21,7 +21,7 @@ use crate::{
     MAX_MMAP_SIZE, MAX_WAV_SIZE,
     error::{AudioIOError, AudioIOResult, ErrorPosition},
     traits::{AudioFile, AudioFileMetadata, AudioFileRead, AudioFileWrite, AudioInfoMarker},
-    types::{AudioDataSource, BaseAudioInfo, FileType, OpenOptions, ValidatedSampleType},
+    types::{AudioDataSource, BaseAudioInfo, FileType, OpenOptions, ValidatedSampleType, WriteOptions},
     wav::{
         FormatCode,
         bext::BextChunk,
@@ -1174,7 +1174,7 @@ where
 }
 
 // Write complete WAV file to a writer
-pub(crate) fn write_wav<T, W>(writer: W, audio: &AudioSamples<T>) -> AudioIOResult<()>
+pub(crate) fn write_wav<T, W>(writer: W, audio: &AudioSamples<T>, opts: WriteOptions) -> AudioIOResult<()>
 where
     T: StandardSample + 'static,
     W: Write,
@@ -1221,8 +1221,7 @@ where
     // Calculate total file size
     let file_size = 4 + fmt_total_size + 8 + padded_data_size; // WAVE + FMT + DATA
 
-    // Always buffer writes to avoid caller-dependent performance cliffs
-    let mut writer = BufWriter::new(writer);
+    let mut writer = BufWriter::with_capacity(opts.write_buf_capacity, writer);
 
     // Write RIFF header
     writer.write_all(b"RIFF")?;
@@ -1258,16 +1257,9 @@ impl<'a> AudioFileWrite for WavFile<'a> {
         P: AsRef<Path>,
         T: StandardSample + 'static,
     {
-        // Read audio data as the target type T
         let audio = self.read::<T>()?;
-
-        // Create output file with buffered writer
         let file = File::create(out_fp)?;
-        let buf_writer = BufWriter::new(file);
-
-        // Write WAV using the core function
-        write_wav(buf_writer, &audio)?;
-
+        write_wav(file, &audio, WriteOptions::default())?;
         Ok(())
     }
 }
@@ -1396,10 +1388,9 @@ mod wav_tests {
         // Write to file
         let output_path = std::env::temp_dir().join("test_write_i16.wav");
         write_wav(
-            std::io::BufWriter::new(
-                std::fs::File::create(&output_path).expect("Failed to create output file"),
-            ),
+            std::fs::File::create(&output_path).expect("Failed to create output file"),
             &sine_i16,
+            WriteOptions::default(),
         )
         .expect("Failed to write WAV file");
 
@@ -1438,10 +1429,9 @@ mod wav_tests {
         // Write to file
         let output_path = std::env::temp_dir().join("test_write_f32.wav");
         write_wav(
-            std::io::BufWriter::new(
-                std::fs::File::create(&output_path).expect("Failed to create output file"),
-            ),
+            std::fs::File::create(&output_path).expect("Failed to create output file"),
             &sine_samples,
+            WriteOptions::default(),
         )
         .expect("Failed to write WAV file");
 
@@ -1479,10 +1469,9 @@ mod wav_tests {
             std::process::id()
         ));
         write_wav(
-            std::io::BufWriter::new(
-                std::fs::File::create(&output_path).expect("Failed to create output file"),
-            ),
+            std::fs::File::create(&output_path).expect("Failed to create output file"),
             &audio,
+            WriteOptions::default(),
         )
         .expect("Failed to write I24 WAV file");
 
@@ -1525,10 +1514,9 @@ mod wav_tests {
         // Write to file
         let output_path = std::env::temp_dir().join("test_write_stereo.wav");
         write_wav(
-            std::io::BufWriter::new(
-                std::fs::File::create(&output_path).expect("Failed to create output file"),
-            ),
+            std::fs::File::create(&output_path).expect("Failed to create output file"),
             &stereo,
+            WriteOptions::default(),
         )
         .expect("Failed to write stereo WAV file");
 
@@ -1562,10 +1550,9 @@ mod wav_tests {
         let output_path = std::env::temp_dir().join("test_conversion.wav");
         let sine_i16 = sine_f32.to_format::<i16>();
         write_wav(
-            std::io::BufWriter::new(
-                std::fs::File::create(&output_path).expect("Failed to create output file"),
-            ),
+            std::fs::File::create(&output_path).expect("Failed to create output file"),
             &sine_i16,
+            WriteOptions::default(),
         )
         .expect("Failed to write converted WAV file");
 
@@ -1593,10 +1580,9 @@ mod wav_tests {
         let sine_samples = sine_wave::<i16>(330.0, Duration::from_secs_f64(0.2), sample_rate, 0.5);
         let input_path = std::env::temp_dir().join("test_input.wav");
         write_wav(
-            std::io::BufWriter::new(
-                std::fs::File::create(&input_path).expect("Failed to create input file"),
-            ),
+            std::fs::File::create(&input_path).expect("Failed to create input file"),
             &sine_samples,
+            WriteOptions::default(),
         )
         .expect("Failed to write input WAV file");
 
@@ -1649,11 +1635,9 @@ mod wav_tests {
                 "i16" => {
                     let samples = base_sine.to_format::<i16>();
                     write_wav(
-                        std::io::BufWriter::new(
-                            std::fs::File::create(&output_path)
-                                .expect("Failed to create output file"),
-                        ),
+                        std::fs::File::create(&output_path).expect("Failed to create output file"),
                         &samples,
+                        WriteOptions::default(),
                     )
                     .expect("Failed to write WAV file");
 
@@ -1680,11 +1664,9 @@ mod wav_tests {
                 "i32" => {
                     let samples = base_sine.to_format::<i32>();
                     write_wav(
-                        std::io::BufWriter::new(
-                            std::fs::File::create(&output_path)
-                                .expect("Failed to create output file"),
-                        ),
+                        std::fs::File::create(&output_path).expect("Failed to create output file"),
                         &samples,
+                        WriteOptions::default(),
                     )
                     .expect("Failed to write WAV file");
 
@@ -1710,11 +1692,9 @@ mod wav_tests {
                 }
                 "f32" => {
                     write_wav(
-                        std::io::BufWriter::new(
-                            std::fs::File::create(&output_path)
-                                .expect("Failed to create output file"),
-                        ),
+                        std::fs::File::create(&output_path).expect("Failed to create output file"),
                         &base_sine,
+                        WriteOptions::default(),
                     )
                     .expect("Failed to write WAV file");
 

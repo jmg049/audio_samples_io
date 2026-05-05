@@ -250,7 +250,7 @@ impl Display for BaseAudioInfo {
         // ============ COLOURED VERSION ============
         #[cfg(feature = "colored")]
         {
-                use colored::{ColoredString, Colorize};
+            use colored::{ColoredString, Colorize};
             // Helper functions (NOT closures with impl Trait)
             fn label(s: &str) -> ColoredString {
                 s.bold().bright_blue()
@@ -484,6 +484,48 @@ impl Default for OpenOptions {
     fn default() -> Self {
         OpenOptions {
             use_memory_map: true,
+        }
+    }
+}
+
+/// Default write-buffer capacity: 4 MiB.
+///
+/// Large enough to hold a full 10-second stereo file (≤ 3.5 MiB) in one shot,
+/// flushing the kernel page-cache in a single `write()` syscall.
+pub const DEFAULT_WRITE_BUF_CAPACITY: usize = 4 * 1024 * 1024;
+
+/// Options controlling how audio data is written.
+///
+/// # Example
+///
+/// ```
+/// use audio_samples_io::types::WriteOptions;
+///
+/// // Default: 4 MiB write buffer.
+/// let default_opts = WriteOptions::default();
+///
+/// // Smaller buffer for memory-constrained environments.
+/// let small_opts = WriteOptions { write_buf_capacity: 256 * 1024 };
+///
+/// // Larger buffer for writing many multi-minute files sequentially.
+/// let large_opts = WriteOptions { write_buf_capacity: 16 * 1024 * 1024 };
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct WriteOptions {
+    /// Size of the internal write buffer in bytes.
+    ///
+    /// A larger buffer reduces the number of `write()` syscalls at the cost of a larger
+    /// upfront allocation.  The default (`DEFAULT_WRITE_BUF_CAPACITY`, 4 MiB) fully buffers
+    /// most short audio files before issuing any I/O, and cuts syscall count significantly
+    /// for longer ones.  Reduce this in memory-constrained environments; increase it when
+    /// writing many large files sequentially.
+    pub write_buf_capacity: usize,
+}
+
+impl Default for WriteOptions {
+    fn default() -> Self {
+        WriteOptions {
+            write_buf_capacity: DEFAULT_WRITE_BUF_CAPACITY,
         }
     }
 }
