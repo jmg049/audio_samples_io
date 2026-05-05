@@ -39,10 +39,7 @@ pub enum NativeAudioArray {
 /// The happy path for the common `read(fp)` call (no type conversion) should always hit
 /// this function, saving ~3 µs per call by avoiding the redundant `peek_native_type` open.
 #[cfg(target_endian = "little")]
-pub fn read_pyarray_native(
-    py: Python<'_>,
-    path: &Path,
-) -> Option<PyResult<NativeAudioArray>> {
+pub fn read_pyarray_native(py: Python<'_>, path: &Path) -> Option<PyResult<NativeAudioArray>> {
     // Only WAV files are handled by the single-pass direct path.
     if !matches!(FileType::from_path(path), FileType::WAV) {
         return None;
@@ -124,8 +121,7 @@ where
         r.read_exact(bytes).map_err(AudioIOError::from)
     });
 
-    read_result
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+    read_result.map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
 
     Ok((array.unbind(), info))
 }
@@ -251,12 +247,15 @@ where
         let mut r = reader;
         // Safety: pointer was valid when captured (step 2), array is held alive by `array`,
         // CPython does not move objects, no other thread has seen this array.
-        let bytes = unsafe { std::slice::from_raw_parts_mut(data_ptr_usize as *mut u8, byte_count) };
+        let bytes =
+            unsafe { std::slice::from_raw_parts_mut(data_ptr_usize as *mut u8, byte_count) };
         r.read_exact(bytes).map_err(AudioIOError::from)
     });
 
     if let Err(e) = read_result {
-        return Some(Err(PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string())));
+        return Some(Err(PyErr::new::<pyo3::exceptions::PyIOError, _>(
+            e.to_string(),
+        )));
     }
 
     Some(Ok((array.unbind(), info)))
