@@ -11,8 +11,31 @@
 
 Rust crate providing audio file I/O utilities and helpers.
 
-`audio_samples_io` is the IO extension of the [audio_samples](https://crates.io/crates/audio_samples) crate.
-`audio_samples_io` builds on top of the representations provided by `audio_samples` to provide the functionality necessary for reading, writing and investigating audio files.
+`audio_samples_io` is the I/O layer of the AudioSamples ecosystem. It builds on top of the representations provided by `audio_samples` to provide reading, writing, and streaming for WAV and FLAC files.
+
+## The AudioSamples Ecosystem
+
+
+```text
+audio_samples
+├── core types, signal generation, DSP, analysis
+├── audio_samples_io
+│   └── file I/O: read and write WAV and FLAC
+├── audio_samples_python
+│   └── python bindings via PyO3
+├── audio_samples_streaming
+│   └── streaming pipeline, device I/O, rodio, async
+└── audio_samples_ml
+    └── STT and TTS integrations
+```
+
+| Crate | What it provides | Start here if... |
+|---|---|---|
+| [`audio_samples`](https://crates.io/crates/audio_samples) | `AudioSamples<T>`, core types, signal generation, DSP, analysis | You need in-memory audio representations or signal processing primitives |
+| [`audio_samples_io`](https://crates.io/crates/audio_samples_io) | Read and write WAV and FLAC files | You need to load or save audio files with minimal setup |
+| [`audio_samples_python`](https://crates.io/crates/audio_samples_python) | Python bindings via PyO3 and NumPy interop | You want to use the library from Python or integrate with Python workflows |
+| [`audio_samples_streaming`](https://crates.io/crates/audio_samples_streaming) | Chunk-based streaming, real-time device I/O, async pipelines | You need real-time audio processing or streaming pipelines |
+| [`audio_samples_ml`](https://crates.io/crates/audio_samples_ml) | Speech-to-text (STT) and text-to-speech (TTS) integrations | You want to integrate transcription or synthesis into your audio pipeline |
 
 ## NOTE: Still under development
 
@@ -37,17 +60,17 @@ cargo add audio_samples_io
 use std::time::Duration;
 
 use audio_samples_io::error::AudioIOResult;
-use audio_samples::{AudioSamples, sine_wave};
+use audio_samples::{AudioSamples, sample_rate, sine_wave};
 
 pub fn main() -> AudioIOResult<()> {
     // create and write a basic signal and read it back
     let sine_wave: AudioSamples<f32> =
-        sine_wave::<_, f32>(440.0, Duration::from_secs_f64(10.0), 44100, 1.0);
+        sine_wave::<f32>(440.0, Duration::from_secs_f64(10.0), sample_rate!(44100), 1.0);
     audio_samples_io::write("./sine_wave.wav", &sine_wave)?;
 
     let read_sine_wave: AudioSamples<f32> = audio_samples_io::read("./sine_wave.wav")?;
     println!("{:#}", read_sine_wave);
-    println!("Duration: {:.1}s", read_sine_wave.duration_seconds::<f32>());
+    println!("Duration: {:.1}s", read_sine_wave.duration_seconds());
     Ok(())
 }
 ```
@@ -88,6 +111,24 @@ MIT License
 
 Contributions are welcome. Please submit a pull request and see
 [CONTRIBUTING.md](CONTRIBUTING.md) for guidance.
+
+## Citing
+
+If you use AudioSamples in research, please cite:
+
+```bibtex
+@inproceedings{geraghty2026audio,
+  author    = {Geraghty, Jack and Golpayegani, Fatemeh and Hines, Andrew},
+  title     = {Audio Made Simple: A Modern Framework for Audio Processing},
+  booktitle = {ACM Multimedia Systems Conference 2026 (MMSys '26)},
+  year      = {2026},
+  month     = apr,
+  publisher = {ACM},
+  address   = {Hong Kong, Hong Kong},
+  doi       = {10.1145/3793853.3799811},
+  note      = {Accepted for publication}
+}
+```
 
 [crate]: https://crates.io/crates/audio_samples_io  
 [crate-img]: https://img.shields.io/crates/v/audio_samples_io?style=for-the-badge&color=009E73&label=crates.io
