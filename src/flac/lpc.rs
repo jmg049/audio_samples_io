@@ -38,10 +38,7 @@ mod avx2_lpc {
         let c_vec = _mm_loadu_si128(c as *const __m128i);
         let s_raw = _mm_loadu_si128(s_ptr as *const __m128i);
         let s_rev = _mm_shuffle_epi32(s_raw, 0x1B); // [3,2,1,0] reverse
-        let prod = _mm256_mul_epi32(
-            _mm256_cvtepi32_epi64(c_vec),
-            _mm256_cvtepi32_epi64(s_rev),
-        );
+        let prod = _mm256_mul_epi32(_mm256_cvtepi32_epi64(c_vec), _mm256_cvtepi32_epi64(s_rev));
         hsum4_i64(prod)
     }
 
@@ -89,36 +86,45 @@ mod avx2_lpc {
     #[inline]
     pub unsafe fn dot_order<const ORDER: usize>(c: *const i32, s: *const i32, si: usize) -> i64 {
         match ORDER {
-            1  => *c as i64 * *s.add(si-1) as i64,
-            2  => *c as i64 * *s.add(si-1) as i64
-                + *c.add(1) as i64 * *s.add(si-2) as i64,
-            3  => *c as i64 * *s.add(si-1) as i64
-                + *c.add(1) as i64 * *s.add(si-2) as i64
-                + *c.add(2) as i64 * *s.add(si-3) as i64,
-            4  => dot4(c, s.add(si-4)),
-            5  => dot4(c, s.add(si-4))
-                + *c.add(4) as i64 * *s.add(si-5) as i64,
-            6  => dot4(c, s.add(si-4))
-                + *c.add(4) as i64 * *s.add(si-5) as i64
-                + *c.add(5) as i64 * *s.add(si-6) as i64,
-            7  => dot4(c, s.add(si-4))
-                + *c.add(4) as i64 * *s.add(si-5) as i64
-                + *c.add(5) as i64 * *s.add(si-6) as i64
-                + *c.add(6) as i64 * *s.add(si-7) as i64,
-            8  => dot8(c, s.add(si-8)),
-            9  => dot8(c, s.add(si-8))
-                + *c.add(8) as i64 * *s.add(si-9) as i64,
-            10 => dot8(c, s.add(si-8))
-                + *c.add(8) as i64 * *s.add(si-9) as i64
-                + *c.add(9) as i64 * *s.add(si-10) as i64,
-            11 => dot8(c, s.add(si-8))
-                + *c.add(8) as i64 * *s.add(si-9) as i64
-                + *c.add(9) as i64 * *s.add(si-10) as i64
-                + *c.add(10) as i64 * *s.add(si-11) as i64,
-            12 => dot12(c, s.add(si-12)),
-            _  => {
+            1 => *c as i64 * *s.add(si - 1) as i64,
+            2 => *c as i64 * *s.add(si - 1) as i64 + *c.add(1) as i64 * *s.add(si - 2) as i64,
+            3 => {
+                *c as i64 * *s.add(si - 1) as i64
+                    + *c.add(1) as i64 * *s.add(si - 2) as i64
+                    + *c.add(2) as i64 * *s.add(si - 3) as i64
+            }
+            4 => dot4(c, s.add(si - 4)),
+            5 => dot4(c, s.add(si - 4)) + *c.add(4) as i64 * *s.add(si - 5) as i64,
+            6 => {
+                dot4(c, s.add(si - 4))
+                    + *c.add(4) as i64 * *s.add(si - 5) as i64
+                    + *c.add(5) as i64 * *s.add(si - 6) as i64
+            }
+            7 => {
+                dot4(c, s.add(si - 4))
+                    + *c.add(4) as i64 * *s.add(si - 5) as i64
+                    + *c.add(5) as i64 * *s.add(si - 6) as i64
+                    + *c.add(6) as i64 * *s.add(si - 7) as i64
+            }
+            8 => dot8(c, s.add(si - 8)),
+            9 => dot8(c, s.add(si - 8)) + *c.add(8) as i64 * *s.add(si - 9) as i64,
+            10 => {
+                dot8(c, s.add(si - 8))
+                    + *c.add(8) as i64 * *s.add(si - 9) as i64
+                    + *c.add(9) as i64 * *s.add(si - 10) as i64
+            }
+            11 => {
+                dot8(c, s.add(si - 8))
+                    + *c.add(8) as i64 * *s.add(si - 9) as i64
+                    + *c.add(9) as i64 * *s.add(si - 10) as i64
+                    + *c.add(10) as i64 * *s.add(si - 11) as i64
+            }
+            12 => dot12(c, s.add(si - 12)),
+            _ => {
                 let mut acc = 0i64;
-                for j in 0..ORDER { acc += *c.add(j) as i64 * *s.add(si-1-j) as i64; }
+                for j in 0..ORDER {
+                    acc += *c.add(j) as i64 * *s.add(si - 1 - j) as i64;
+                }
                 acc
             }
         }
@@ -140,15 +146,23 @@ mod avx2_lpc {
     /// Tail samples (n % 4 != 0) fall through to the scalar `dot_order` path.
     #[target_feature(enable = "avx2")]
     pub unsafe fn lpc_residuals4<const ORDER: usize>(
-        s: *const i32, c: *const i32, shift: i32, out: *mut i32, n: usize,
+        s: *const i32,
+        c: *const i32,
+        shift: i32,
+        out: *mut i32,
+        n: usize,
     ) {
         let ushift = shift as u64;
         // Arithmetic right shift workaround: logical shift + OR sign-fill bits.
         // fill_bits = upper `shift` bits all 1; applied only to negative accumulators.
-        let fill_bits: u64 = if ushift == 0 { 0 } else { !0u64 << (64 - ushift) };
-        let shift_v  = _mm256_set1_epi64x(ushift as i64);
-        let fill_v   = _mm256_set1_epi64x(fill_bits as i64);
-        let zero     = _mm256_setzero_si256();
+        let fill_bits: u64 = if ushift == 0 {
+            0
+        } else {
+            !0u64 << (64 - ushift)
+        };
+        let shift_v = _mm256_set1_epi64x(ushift as i64);
+        let fill_v = _mm256_set1_epi64x(fill_bits as i64);
+        let zero = _mm256_setzero_si256();
         // Permutation to select lower 32 bits of each i64 lane into lower 128 bits.
         let narrow_perm = _mm256_set_epi32(0, 0, 0, 0, 6, 4, 2, 0);
 
@@ -173,23 +187,23 @@ mod avx2_lpc {
             //   s[base-1-j], s[base-j], s[base+1-j], s[base+2-j]
             // which are the samples used by residuals k, k+1, k+2, k+3 respectively.
             for (j, &cj) in c_i32.iter().enumerate().take(ORDER) {
-                let cj   = _mm256_set1_epi64x(cj as i64);
-                let s4   = _mm_loadu_si128(s.add(base - 1 - j) as *const __m128i);
-                let s4e  = _mm256_cvtepi32_epi64(s4);
+                let cj = _mm256_set1_epi64x(cj as i64);
+                let s4 = _mm_loadu_si128(s.add(base - 1 - j) as *const __m128i);
+                let s4e = _mm256_cvtepi32_epi64(s4);
                 acc = _mm256_add_epi64(acc, _mm256_mul_epi32(cj, s4e));
             }
 
             // Arithmetic right shift by `shift`.
-            let lshifted  = _mm256_srlv_epi64(acc, shift_v);
+            let lshifted = _mm256_srlv_epi64(acc, shift_v);
             let sign_mask = _mm256_cmpgt_epi64(zero, acc); // -1 where acc < 0
-            let pred      = _mm256_or_si256(lshifted, _mm256_and_si256(sign_mask, fill_v));
+            let pred = _mm256_or_si256(lshifted, _mm256_and_si256(sign_mask, fill_v));
 
             // actual[k..k+4] as i64
-            let actual4  = _mm_loadu_si128(s.add(base) as *const __m128i);
+            let actual4 = _mm_loadu_si128(s.add(base) as *const __m128i);
             let actual4e = _mm256_cvtepi32_epi64(actual4);
 
             // residual = actual - pred (i64), then narrow to i32
-            let res64  = _mm256_sub_epi64(actual4e, pred);
+            let res64 = _mm256_sub_epi64(actual4e, pred);
             let narrow = _mm256_permutevar8x32_epi32(res64, narrow_perm);
             _mm_storeu_si128(out.add(k) as *mut __m128i, _mm256_castsi256_si128(narrow));
 
@@ -198,13 +212,12 @@ mod avx2_lpc {
 
         // Scalar tail for remaining 0-3 samples.
         while k < n {
-            let i    = ORDER + k;
+            let i = ORDER + k;
             let pred = dot_order::<ORDER>(c, s, i) >> shift;
             *out.add(k) = (*s.add(i) as i64 - pred) as i32;
             k += 1;
         }
     }
-
 }
 
 /// Restore one sample: compute the LPC dot product and add residual.
@@ -222,9 +235,7 @@ mod avx2_lpc {
 ///   shift + add + store:      3 cycles
 ///   Total: ~15 cycles  (vs ~23 for dot12+hsum4)
 #[inline(always)]
-unsafe fn restore_sample<const ORDER: usize>(
-    buf: *const i32, cv: &[i32; ORDER], si: usize,
-) -> i64 {
+unsafe fn restore_sample<const ORDER: usize>(buf: *const i32, cv: &[i32; ORDER], si: usize) -> i64 {
     // Enumerate all products explicitly.  Since every p_j is independent,
     // LLVM issues all ORDER IMUL instructions simultaneously.
     // The flat-sum expression lets LLVM pick the optimal tree reduction.
@@ -241,21 +252,29 @@ unsafe fn restore_sample<const ORDER: usize>(
 /// critical-path analysis.
 #[inline(always)]
 unsafe fn lpc_restore_fast<const ORDER: usize>(
-    buf: *mut i32, res: *const i32, n: usize, c: *const i32, shift: i32,
+    buf: *mut i32,
+    res: *const i32,
+    n: usize,
+    c: *const i32,
+    shift: i32,
 ) {
     // Stack-local copy: prevents LLVM from treating c and buf as aliases,
     // which would force coefficient reloads on every outer iteration.
     let mut cv = [0i32; ORDER];
     for (j, item) in cv.iter_mut().enumerate().take(ORDER) {
         // safety: caller guarantees c points to ORDER i32 coefficients; j < ORDER bounds the access.
-        unsafe { *item = *c.add(j); }
+        unsafe {
+            *item = *c.add(j);
+        }
     }
 
     for k in 0..n {
         let si = ORDER + k;
         let pred = unsafe { restore_sample::<ORDER>(buf, &cv, si) } >> shift;
         let residual = unsafe { *res.add(k) } as i64;
-        unsafe { *buf.add(si) = (pred + residual) as i32; }
+        unsafe {
+            *buf.add(si) = (pred + residual) as i32;
+        }
     }
 }
 
@@ -274,7 +293,9 @@ pub fn fixed_predictor_residual(samples: &[i32], order: usize) -> Result<Vec<i32
         return Err(FlacError::InvalidFixedOrder { order: order as u8 });
     }
     if samples.len() < order {
-        return Err(FlacError::InvalidBlockSize { size: samples.len() as u32 });
+        return Err(FlacError::InvalidBlockSize {
+            size: samples.len() as u32,
+        });
     }
 
     let n = samples.len();
@@ -291,7 +312,9 @@ pub fn fixed_predictor_residual(samples: &[i32], order: usize) -> Result<Vec<i32
         }
         1 => {
             for i in 0..out_len {
-                unsafe { ptr.add(i).write(samples[i + 1].wrapping_sub(samples[i])); }
+                unsafe {
+                    ptr.add(i).write(samples[i + 1].wrapping_sub(samples[i]));
+                }
             }
         }
         2 => {
@@ -300,7 +323,9 @@ pub fn fixed_predictor_residual(samples: &[i32], order: usize) -> Result<Vec<i32
                 let r = samples[i + 2]
                     .wrapping_sub(samples[i + 1].wrapping_shl(1))
                     .wrapping_add(samples[i]);
-                unsafe { ptr.add(i).write(r); }
+                unsafe {
+                    ptr.add(i).write(r);
+                }
             }
         }
         3 => {
@@ -310,7 +335,9 @@ pub fn fixed_predictor_residual(samples: &[i32], order: usize) -> Result<Vec<i32
                     .wrapping_sub(samples[i + 2].wrapping_mul(3))
                     .wrapping_add(samples[i + 1].wrapping_mul(3))
                     .wrapping_sub(samples[i]);
-                unsafe { ptr.add(i).write(r); }
+                unsafe {
+                    ptr.add(i).write(r);
+                }
             }
         }
         4 => {
@@ -321,13 +348,17 @@ pub fn fixed_predictor_residual(samples: &[i32], order: usize) -> Result<Vec<i32
                     .wrapping_add(samples[i + 2].wrapping_mul(6))
                     .wrapping_sub(samples[i + 1].wrapping_shl(2))
                     .wrapping_add(samples[i]);
-                unsafe { ptr.add(i).write(r); }
+                unsafe {
+                    ptr.add(i).write(r);
+                }
             }
         }
         _ => unreachable!(),
     }
 
-    unsafe { residuals.set_len(out_len); }
+    unsafe {
+        residuals.set_len(out_len);
+    }
     Ok(residuals)
 }
 
@@ -383,17 +414,15 @@ pub fn fixed_predictor_restore(
         3 => {
             for &r in residuals {
                 let i = samples.len();
-                let p = 3 * samples[i - 1] as i64
-                    - 3 * samples[i - 2] as i64
-                    + samples[i - 3] as i64;
+                let p =
+                    3 * samples[i - 1] as i64 - 3 * samples[i - 2] as i64 + samples[i - 3] as i64;
                 samples.push((p + r as i64) as i32);
             }
         }
         4 => {
             for &r in residuals {
                 let i = samples.len();
-                let p = 4 * samples[i - 1] as i64
-                    - 6 * samples[i - 2] as i64
+                let p = 4 * samples[i - 1] as i64 - 6 * samples[i - 2] as i64
                     + 4 * samples[i - 3] as i64
                     - samples[i - 4] as i64;
                 samples.push((p + r as i64) as i32);
@@ -450,7 +479,8 @@ pub(crate) fn fixed_predictor_restore_into(
             let mut s1 = buf[offset + 1];
             let mut s2 = buf[offset + 2];
             for r in buf.iter_mut().take(end).skip(offset + 3) {
-                let s3 = s2.wrapping_mul(3)
+                let s3 = s2
+                    .wrapping_mul(3)
                     .wrapping_sub(s1.wrapping_mul(3))
                     .wrapping_add(s0)
                     .wrapping_add(*r);
@@ -465,14 +495,18 @@ pub(crate) fn fixed_predictor_restore_into(
             let mut s1 = buf[offset + 1];
             let mut s2 = buf[offset + 2];
             let mut s3 = buf[offset + 3];
-            for r in buf.iter_mut().take(end).skip(offset + 4)  {
-                let s4 = s3.wrapping_shl(2)
+            for r in buf.iter_mut().take(end).skip(offset + 4) {
+                let s4 = s3
+                    .wrapping_shl(2)
                     .wrapping_sub(s2.wrapping_mul(6))
                     .wrapping_add(s1.wrapping_shl(2))
                     .wrapping_sub(s0)
                     .wrapping_add(*r);
                 *r = s4;
-                s0 = s1; s1 = s2; s2 = s3; s3 = s4;
+                s0 = s1;
+                s1 = s2;
+                s2 = s3;
+                s3 = s4;
             }
         }
         _ => unreachable!(),
@@ -506,18 +540,26 @@ pub(crate) fn lpc_predictor_restore_into(
     let p = unsafe { buf.as_mut_ptr().add(offset) };
 
     macro_rules! dispatch_restore_into {
-        ($N:literal) => { unsafe {
-            lpc_restore_fast_into::<$N>(p, n, c, shift);
-        }};
+        ($N:literal) => {
+            unsafe {
+                lpc_restore_fast_into::<$N>(p, n, c, shift);
+            }
+        };
     }
 
     match order {
-        1  => dispatch_restore_into!(1),  2  => dispatch_restore_into!(2),
-        3  => dispatch_restore_into!(3),  4  => dispatch_restore_into!(4),
-        5  => dispatch_restore_into!(5),  6  => dispatch_restore_into!(6),
-        7  => dispatch_restore_into!(7),  8  => dispatch_restore_into!(8),
-        9  => dispatch_restore_into!(9),  10 => dispatch_restore_into!(10),
-        11 => dispatch_restore_into!(11), 12 => dispatch_restore_into!(12),
+        1 => dispatch_restore_into!(1),
+        2 => dispatch_restore_into!(2),
+        3 => dispatch_restore_into!(3),
+        4 => dispatch_restore_into!(4),
+        5 => dispatch_restore_into!(5),
+        6 => dispatch_restore_into!(6),
+        7 => dispatch_restore_into!(7),
+        8 => dispatch_restore_into!(8),
+        9 => dispatch_restore_into!(9),
+        10 => dispatch_restore_into!(10),
+        11 => dispatch_restore_into!(11),
+        12 => dispatch_restore_into!(12),
         _ => {
             for k in 0..n {
                 let si = offset + order + k;
@@ -537,17 +579,24 @@ pub(crate) fn lpc_predictor_restore_into(
 /// In-place LPC restore; `buf` is already offset to the frame start (buf[0..order]=warmup).
 /// Reads residual at buf[ORDER+k] before computing the prediction, then overwrites.
 unsafe fn lpc_restore_fast_into<const ORDER: usize>(
-    buf: *mut i32, n: usize, c: *const i32, shift: i32,
+    buf: *mut i32,
+    n: usize,
+    c: *const i32,
+    shift: i32,
 ) {
     let mut cv = [0i32; ORDER];
     for (j, item) in cv.iter_mut().enumerate().take(ORDER) {
-        unsafe { *item = *c.add(j); }
+        unsafe {
+            *item = *c.add(j);
+        }
     }
     for k in 0..n {
         let si = ORDER + k;
         let residual = unsafe { *buf.add(si) } as i64;
         let pred = unsafe { restore_sample::<ORDER>(buf, &cv, si) } >> shift;
-        unsafe { *buf.add(si) = (pred + residual) as i32; }
+        unsafe {
+            *buf.add(si) = (pred + residual) as i32;
+        }
     }
 }
 
@@ -593,7 +642,7 @@ pub fn find_best_fixed_order(samples: &[i32]) -> usize {
     let mut d2 = r2_i3;
     let mut d3 = r3_i3;
 
-    for cur in samples.iter().take(n).skip(4)  {
+    for cur in samples.iter().take(n).skip(4) {
         let r1 = cur.wrapping_sub(prev);
         let r2 = r1.wrapping_sub(d1);
         let r3 = r2.wrapping_sub(d2);
@@ -656,7 +705,9 @@ unsafe fn autocorrelation_avx2_fma(samples: &[i32], max_order: usize) -> Vec<f64
     let n = samples.len();
     let n_lags = max_order + 1;
     let mut r = vec![0.0f64; n_lags];
-    if n == 0 { return r; }
+    if n == 0 {
+        return r;
+    }
     let s = samples.as_ptr();
     let full_groups = n_lags / 4;
 
@@ -667,12 +718,18 @@ unsafe fn autocorrelation_avx2_fma(samples: &[i32], max_order: usize) -> Vec<f64
         // Scalar warm-up: samples i in l0..l3 where lag l3 is not yet valid
         for i in l0..l3.min(n) {
             let si = *s.add(i) as f64;
-            r[l0]                          += si * *s.add(i - l0) as f64;
-            if i > l0 { r[l0 + 1] += si * *s.add(i - l0 - 1) as f64; }
-            if i >= l0 + 2 { r[l0 + 2] += si * *s.add(i - l0 - 2) as f64; }
+            r[l0] += si * *s.add(i - l0) as f64;
+            if i > l0 {
+                r[l0 + 1] += si * *s.add(i - l0 - 1) as f64;
+            }
+            if i >= l0 + 2 {
+                r[l0 + 2] += si * *s.add(i - l0 - 2) as f64;
+            }
         }
 
-        if n <= l3 { continue; }
+        if n <= l3 {
+            continue;
+        }
 
         // 4-way unrolled SIMD loop: 4 independent accumulators break the serial FMA
         // dependency chain (5-cycle latency), filling both FMA ports for ~3× throughput.
@@ -687,25 +744,25 @@ unsafe fn autocorrelation_avx2_fma(samples: &[i32], max_order: usize) -> Vec<f64
         let mut i = l3;
 
         while i < n4 {
-            let p = s.add(i - l3);  // base pointer for lagged samples this iteration
+            let p = s.add(i - l3); // base pointer for lagged samples this iteration
             a0 = _mm256_fmadd_pd(
-                _mm256_set1_pd(*s.add(i)     as f64),
-                _mm256_cvtepi32_pd(_mm_loadu_si128(p         as *const _)),
+                _mm256_set1_pd(*s.add(i) as f64),
+                _mm256_cvtepi32_pd(_mm_loadu_si128(p as *const _)),
                 a0,
             );
             a1 = _mm256_fmadd_pd(
                 _mm256_set1_pd(*s.add(i + 1) as f64),
-                _mm256_cvtepi32_pd(_mm_loadu_si128(p.add(1)  as *const _)),
+                _mm256_cvtepi32_pd(_mm_loadu_si128(p.add(1) as *const _)),
                 a1,
             );
             a2 = _mm256_fmadd_pd(
                 _mm256_set1_pd(*s.add(i + 2) as f64),
-                _mm256_cvtepi32_pd(_mm_loadu_si128(p.add(2)  as *const _)),
+                _mm256_cvtepi32_pd(_mm_loadu_si128(p.add(2) as *const _)),
                 a2,
             );
             a3 = _mm256_fmadd_pd(
                 _mm256_set1_pd(*s.add(i + 3) as f64),
-                _mm256_cvtepi32_pd(_mm_loadu_si128(p.add(3)  as *const _)),
+                _mm256_cvtepi32_pd(_mm_loadu_si128(p.add(3) as *const _)),
                 a3,
             );
             i += 4;
@@ -715,17 +772,17 @@ unsafe fn autocorrelation_avx2_fma(samples: &[i32], max_order: usize) -> Vec<f64
         let mut acc = _mm256_add_pd(_mm256_add_pd(a0, a1), _mm256_add_pd(a2, a3));
         while i < n {
             let si_f = _mm256_set1_pd(*s.add(i) as f64);
-            let s4f  = _mm256_cvtepi32_pd(_mm_loadu_si128(s.add(i - l3) as *const _));
+            let s4f = _mm256_cvtepi32_pd(_mm_loadu_si128(s.add(i - l3) as *const _));
             acc = _mm256_fmadd_pd(si_f, s4f, acc);
             i += 1;
         }
 
         let mut tmp = [0.0f64; 4];
         _mm256_storeu_pd(tmp.as_mut_ptr(), acc);
-        r[l0]     += tmp[3];  // lane 3 → lag l0
-        r[l0 + 1] += tmp[2];  // lane 2 → lag l0+1
-        r[l0 + 2] += tmp[1];  // lane 1 → lag l0+2
-        r[l0 + 3] += tmp[0];  // lane 0 → lag l0+3
+        r[l0] += tmp[3]; // lane 3 → lag l0
+        r[l0 + 1] += tmp[2]; // lane 2 → lag l0+1
+        r[l0 + 2] += tmp[1]; // lane 1 → lag l0+2
+        r[l0 + 3] += tmp[0]; // lane 0 → lag l0+3
     }
 
     // Remaining lags (0–3 lags that didn't fill a full group of 4).
@@ -744,7 +801,7 @@ unsafe fn autocorrelation_avx2_fma(samples: &[i32], max_order: usize) -> Vec<f64
         let mut i = lag;
 
         while i < n4 {
-            a0 += *s.add(i)     as f64 * *s.add(i - lag)     as f64;
+            a0 += *s.add(i) as f64 * *s.add(i - lag) as f64;
             a1 += *s.add(i + 1) as f64 * *s.add(i + 1 - lag) as f64;
             a2 += *s.add(i + 2) as f64 * *s.add(i + 2 - lag) as f64;
             a3 += *s.add(i + 3) as f64 * *s.add(i + 3 - lag) as f64;
@@ -772,7 +829,9 @@ unsafe fn autocorrelation_avx2(samples: &[i32], max_order: usize) -> Vec<f64> {
     let n = samples.len();
     let n_lags = max_order + 1;
     let mut r = vec![0.0f64; n_lags];
-    if n == 0 { return r; }
+    if n == 0 {
+        return r;
+    }
     let s = samples.as_ptr();
     let full_groups = n_lags / 4;
 
@@ -782,22 +841,26 @@ unsafe fn autocorrelation_avx2(samples: &[i32], max_order: usize) -> Vec<f64> {
 
         for i in l0..l3.min(n) {
             let si = *s.add(i) as f64;
-            r[l0]                          += si * *s.add(i - l0) as f64;
-            if i > l0 { r[l0 + 1] += si * *s.add(i - l0 - 1) as f64; }
-            if i >= l0 + 2 { r[l0 + 2] += si * *s.add(i - l0 - 2) as f64; }
+            r[l0] += si * *s.add(i - l0) as f64;
+            if i > l0 {
+                r[l0 + 1] += si * *s.add(i - l0 - 1) as f64;
+            }
+            if i >= l0 + 2 {
+                r[l0 + 2] += si * *s.add(i - l0 - 2) as f64;
+            }
         }
 
         let mut acc = _mm256_setzero_pd();
         for i in l3..n {
             let si_f = _mm256_set1_pd(*s.add(i) as f64);
-            let s4i  = _mm_loadu_si128(s.add(i - l3) as *const _);
-            let s4f  = _mm256_cvtepi32_pd(s4i);
-            acc      = _mm256_add_pd(acc, _mm256_mul_pd(si_f, s4f));
+            let s4i = _mm_loadu_si128(s.add(i - l3) as *const _);
+            let s4f = _mm256_cvtepi32_pd(s4i);
+            acc = _mm256_add_pd(acc, _mm256_mul_pd(si_f, s4f));
         }
 
         let mut tmp = [0.0f64; 4];
         _mm256_storeu_pd(tmp.as_mut_ptr(), acc);
-        r[l0]     += tmp[3];
+        r[l0] += tmp[3];
         r[l0 + 1] += tmp[2];
         r[l0 + 2] += tmp[1];
         r[l0 + 3] += tmp[0];
@@ -1011,21 +1074,31 @@ pub fn lpc_predictor_residual(
         let shift = qlp_shift as i32;
         let c = qlp_coeffs.as_ptr();
         macro_rules! dispatch {
-            ($N:literal) => { unsafe {
-                lpc_residuals4::<$N>(s, c, shift, out, n_out);
-                residuals.set_len(n_out);
-            }};
+            ($N:literal) => {
+                unsafe {
+                    lpc_residuals4::<$N>(s, c, shift, out, n_out);
+                    residuals.set_len(n_out);
+                }
+            };
         }
         match order {
-            1  => dispatch!(1),  2  => dispatch!(2),  3  => dispatch!(3),
-            4  => dispatch!(4),  5  => dispatch!(5),  6  => dispatch!(6),
-            7  => dispatch!(7),  8  => dispatch!(8),  9  => dispatch!(9),
-            10 => dispatch!(10), 11 => dispatch!(11), 12 => dispatch!(12),
+            1 => dispatch!(1),
+            2 => dispatch!(2),
+            3 => dispatch!(3),
+            4 => dispatch!(4),
+            5 => dispatch!(5),
+            6 => dispatch!(6),
+            7 => dispatch!(7),
+            8 => dispatch!(8),
+            9 => dispatch!(9),
+            10 => dispatch!(10),
+            11 => dispatch!(11),
+            12 => dispatch!(12),
             _ => {
                 for i in order..samples.len() {
                     let mut pred: i64 = 0;
                     for (j, &c) in qlp_coeffs.iter().enumerate() {
-                        pred += c as i64 * samples[i-1-j] as i64;
+                        pred += c as i64 * samples[i - 1 - j] as i64;
                     }
                     pred >>= qlp_shift;
                     residuals.push((samples[i] as i64 - pred) as i32);
@@ -1040,7 +1113,9 @@ pub fn lpc_predictor_residual(
             let c = &qlp_coeffs[..$N];
             for i in $N..samples.len() {
                 let mut pred: i64 = 0;
-                for j in 0..$N { pred += c[j] as i64 * samples[i - 1 - j] as i64; }
+                for j in 0..$N {
+                    pred += c[j] as i64 * samples[i - 1 - j] as i64;
+                }
                 pred >>= qlp_shift;
                 residuals.push((samples[i] as i64 - pred) as i32);
             }
@@ -1048,16 +1123,16 @@ pub fn lpc_predictor_residual(
     }
 
     match order {
-        1  => lpc_residuals_unrolled!(1),
-        2  => lpc_residuals_unrolled!(2),
-        3  => lpc_residuals_unrolled!(3),
-        4  => lpc_residuals_unrolled!(4),
-        5  => lpc_residuals_unrolled!(5),
-        6  => lpc_residuals_unrolled!(6),
-        7  => lpc_residuals_unrolled!(7),
-        8  => lpc_residuals_unrolled!(8),
+        1 => lpc_residuals_unrolled!(1),
+        2 => lpc_residuals_unrolled!(2),
+        3 => lpc_residuals_unrolled!(3),
+        4 => lpc_residuals_unrolled!(4),
+        5 => lpc_residuals_unrolled!(5),
+        6 => lpc_residuals_unrolled!(6),
+        7 => lpc_residuals_unrolled!(7),
+        8 => lpc_residuals_unrolled!(8),
         12 => lpc_residuals_unrolled!(12),
-        _  => {
+        _ => {
             for i in order..samples.len() {
                 let mut pred: i64 = 0;
                 for (j, &c) in qlp_coeffs.iter().enumerate() {
@@ -1120,25 +1195,33 @@ pub fn lpc_predictor_restore(
     let n = residuals.len();
 
     macro_rules! dispatch_restore {
-        ($N:literal) => { unsafe {
-            lpc_restore_fast::<$N>(buf, res_ptr, n, c, shift);
-            samples.set_len(total);
-        }};
+        ($N:literal) => {
+            unsafe {
+                lpc_restore_fast::<$N>(buf, res_ptr, n, c, shift);
+                samples.set_len(total);
+            }
+        };
     }
 
     match order {
-        1  => dispatch_restore!(1),  2  => dispatch_restore!(2),
-        3  => dispatch_restore!(3),  4  => dispatch_restore!(4),
-        5  => dispatch_restore!(5),  6  => dispatch_restore!(6),
-        7  => dispatch_restore!(7),  8  => dispatch_restore!(8),
-        9  => dispatch_restore!(9),  10 => dispatch_restore!(10),
-        11 => dispatch_restore!(11), 12 => dispatch_restore!(12),
+        1 => dispatch_restore!(1),
+        2 => dispatch_restore!(2),
+        3 => dispatch_restore!(3),
+        4 => dispatch_restore!(4),
+        5 => dispatch_restore!(5),
+        6 => dispatch_restore!(6),
+        7 => dispatch_restore!(7),
+        8 => dispatch_restore!(8),
+        9 => dispatch_restore!(9),
+        10 => dispatch_restore!(10),
+        11 => dispatch_restore!(11),
+        12 => dispatch_restore!(12),
         _ => {
             for &residual in residuals {
                 let i = samples.len();
                 let mut pred: i64 = 0;
                 for (j, &c) in qlp_coeffs.iter().enumerate() {
-                    pred += c as i64 * samples[i-1-j] as i64;
+                    pred += c as i64 * samples[i - 1 - j] as i64;
                 }
                 pred >>= qlp_shift;
                 samples.push((pred + residual as i64) as i32);
@@ -1155,9 +1238,9 @@ pub fn lpc_predictor_restore(
 /// `errors[i]` is the Burg prediction error for order `i+1`.
 /// `n` is the number of valid orders computed (≤ MAX_LPC_ORDER).
 struct LdAllCoeffs {
-    data:   [[f64; MAX_LPC_ORDER]; MAX_LPC_ORDER],
+    data: [[f64; MAX_LPC_ORDER]; MAX_LPC_ORDER],
     errors: [f64; MAX_LPC_ORDER],
-    n:      usize,
+    n: usize,
 }
 
 /// Run Levinson-Durbin up to max_order, returning all intermediate results on the stack.
@@ -1172,14 +1255,14 @@ fn levinson_durbin_all(r: &[f64], max_order: usize) -> Result<LdAllCoeffs, FlacE
 
     let order = max_order.min(r.len() - 1);
     let mut ld = LdAllCoeffs {
-        data:   [[0.0f64; MAX_LPC_ORDER]; MAX_LPC_ORDER],
+        data: [[0.0f64; MAX_LPC_ORDER]; MAX_LPC_ORDER],
         errors: [0.0f64; MAX_LPC_ORDER],
-        n:      order,
+        n: order,
     };
 
-    let mut a      = [0.0f64; MAX_LPC_ORDER];
+    let mut a = [0.0f64; MAX_LPC_ORDER];
     let mut a_prev = [0.0f64; MAX_LPC_ORDER];
-    let mut error  = r[0];
+    let mut error = r[0];
 
     for i in 0..order {
         let mut sum = r[i + 1];
@@ -1249,7 +1332,9 @@ pub fn find_best_lpc_order(
     let orders: &[usize] = if exhaustive {
         // Stack array avoids Vec<usize> allocation for exhaustive mode.
         let mut arr = [0usize; MAX_LPC_ORDER];
-        for (i, item) in arr.iter_mut().enumerate().take(max_order) { *item = i + 1; }
+        for (i, item) in arr.iter_mut().enumerate().take(max_order) {
+            *item = i + 1;
+        }
         return find_best_from_orders(qlp_precision, &r, &ld, &arr[..max_order]);
     } else {
         // Candidate orders (subset): original non-exhaustive heuristic
@@ -1266,15 +1351,25 @@ pub fn find_best_lpc_order(
             9 => &[1, 2, 4, 6, 8, 9][..],
             10 => &[1, 2, 4, 6, 8, 10][..],
             11 => &[1, 2, 4, 6, 8, 10, 11][..],
-            _ => &[1, 2, 4, 6, 8, 10, 12][..],  // max_order >= 12
+            _ => &[1, 2, 4, 6, 8, 10, 12][..], // max_order >= 12
         }
     };
 
     for &order in orders {
-        if order > ld.n { continue; }
+        if order > ld.n {
+            continue;
+        }
         let coeffs = &ld.data[order - 1][..order];
         let (qlp_coeffs, qlp_shift) = quantize_lpc_coefficients(coeffs, qlp_precision)?;
-        let cost = lpc_order_cost(&r, coeffs, &qlp_coeffs, qlp_shift, ld.errors[order - 1], qlp_precision, order);
+        let cost = lpc_order_cost(
+            &r,
+            coeffs,
+            &qlp_coeffs,
+            qlp_shift,
+            ld.errors[order - 1],
+            qlp_precision,
+            order,
+        );
         if cost < best_cost {
             best_cost = cost;
             best_order = order;
@@ -1302,7 +1397,10 @@ fn lpc_order_cost(
     order: usize,
 ) -> f64 {
     let scale = 2.0f64.powi(-(qlp_shift as i32));
-    let quant_noise: f64 = float_coeffs.iter().zip(qlp_coeffs.iter()).enumerate()
+    let quant_noise: f64 = float_coeffs
+        .iter()
+        .zip(qlp_coeffs.iter())
+        .enumerate()
         .map(|(j, (&fc, &qc))| {
             let delta = fc - qc as f64 * scale;
             delta * delta * r.get(j + 1).copied().unwrap_or(0.0)
@@ -1325,10 +1423,20 @@ fn find_best_from_orders(
     let mut best_cost = f64::MAX;
 
     for &order in orders {
-        if order > ld.n { continue; }
+        if order > ld.n {
+            continue;
+        }
         let coeffs = &ld.data[order - 1][..order];
         let (qlp_coeffs, qlp_shift) = quantize_lpc_coefficients(coeffs, qlp_precision)?;
-        let cost = lpc_order_cost(r, coeffs, &qlp_coeffs, qlp_shift, ld.errors[order - 1], qlp_precision, order);
+        let cost = lpc_order_cost(
+            r,
+            coeffs,
+            &qlp_coeffs,
+            qlp_shift,
+            ld.errors[order - 1],
+            qlp_precision,
+            order,
+        );
         if cost < best_cost {
             best_cost = cost;
             best_order = order;

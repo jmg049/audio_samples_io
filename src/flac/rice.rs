@@ -149,7 +149,9 @@ pub fn decode_residual(
                 } else {
                     reader.read_bits_signed(bits_per_sample)?
                 };
-                unsafe { ptr.add(write_idx).write(value); }
+                unsafe {
+                    ptr.add(write_idx).write(value);
+                }
                 write_idx += 1;
             }
         } else {
@@ -159,7 +161,9 @@ pub fn decode_residual(
                 for _ in 0..samples {
                     let quotient = reader.read_unary()?;
                     let signed = unsigned_to_signed(quotient);
-                    unsafe { ptr.add(write_idx).write(signed); }
+                    unsafe {
+                        ptr.add(write_idx).write(signed);
+                    }
                     write_idx += 1;
                 }
             } else {
@@ -168,7 +172,9 @@ pub fn decode_residual(
                     let remainder = reader.read_bits(param)?;
                     let unsigned = (quotient << param) | remainder;
                     let signed = unsigned_to_signed(unsigned);
-                    unsafe { ptr.add(write_idx).write(signed); }
+                    unsafe {
+                        ptr.add(write_idx).write(signed);
+                    }
                     write_idx += 1;
                 }
             }
@@ -176,7 +182,9 @@ pub fn decode_residual(
     }
 
     // Safety: write_idx == total_residuals after the loop (all partitions decoded).
-    unsafe { residuals.set_len(write_idx); }
+    unsafe {
+        residuals.set_len(write_idx);
+    }
     Ok(residuals)
 }
 
@@ -233,7 +241,9 @@ pub fn decode_residual_into(
                 } else {
                     reader.read_bits_signed(bits_per_sample)?
                 };
-                unsafe { ptr.add(write_idx).write(value); }
+                unsafe {
+                    ptr.add(write_idx).write(value);
+                }
                 write_idx += 1;
             }
         } else {
@@ -242,7 +252,9 @@ pub fn decode_residual_into(
                 for _ in 0..samples {
                     let quotient = reader.read_unary()?;
                     let signed = unsigned_to_signed(quotient);
-                    unsafe { ptr.add(write_idx).write(signed); }
+                    unsafe {
+                        ptr.add(write_idx).write(signed);
+                    }
                     write_idx += 1;
                 }
             } else {
@@ -251,14 +263,18 @@ pub fn decode_residual_into(
                     let remainder = reader.read_bits(param)?;
                     let unsigned = (quotient << param) | remainder;
                     let signed = unsigned_to_signed(unsigned);
-                    unsafe { ptr.add(write_idx).write(signed); }
+                    unsafe {
+                        ptr.add(write_idx).write(signed);
+                    }
                     write_idx += 1;
                 }
             }
         }
     }
 
-    unsafe { out.set_len(write_idx); }
+    unsafe {
+        out.set_len(write_idx);
+    }
     Ok(())
 }
 
@@ -340,7 +356,10 @@ pub fn encode_residual(
                     writer.write_bits((1u32 << param) | remainder, total_bits as u8);
                 } else {
                     let mut q = quotient;
-                    while q >= 32 { writer.write_bits(0, 32); q -= 32; }
+                    while q >= 32 {
+                        writer.write_bits(0, 32);
+                        q -= 32;
+                    }
                     writer.write_bits((1u32 << param) | remainder, (q + 1 + param as u32) as u8);
                 }
             }
@@ -355,7 +374,10 @@ pub fn encode_residual(
 /// Uses a simple heuristic based on the mean absolute value.
 pub fn find_optimal_rice_param(residuals: &[i32], method: RiceMethod) -> u8 {
     rice_param_from_sum(
-        residuals.iter().map(|&r| signed_to_unsigned(r) as u64).sum(),
+        residuals
+            .iter()
+            .map(|&r| signed_to_unsigned(r) as u64)
+            .sum(),
         residuals.len(),
         method,
     )
@@ -390,7 +412,11 @@ fn rice_param_from_sum(sum: u64, count: usize, method: RiceMethod) -> u8 {
         return 0;
     }
     let mean = sum / count as u64;
-    let param = if mean == 0 { 0u8 } else { (63 - mean.leading_zeros()) as u8 };
+    let param = if mean == 0 {
+        0u8
+    } else {
+        (63 - mean.leading_zeros()) as u8
+    };
     param.min(method.param_max())
 }
 
@@ -406,10 +432,13 @@ const fn estimate_rice_bits_from_sum(sum: u64, count: usize, param: u8) -> usize
 
 /// Exact Rice bits (used only for exhaustive search).
 fn estimate_rice_bits_exact(residuals: &[i32], param: u8) -> usize {
-    residuals.iter().map(|&r| {
-        let u = signed_to_unsigned(r);
-        (u >> param) as usize + 1 + param as usize
-    }).sum()
+    residuals
+        .iter()
+        .map(|&r| {
+            let u = signed_to_unsigned(r);
+            (u >> param) as usize + 1 + param as usize
+        })
+        .sum()
 }
 
 /// Maximum partition order we support on the stack (covers all compression levels 0-8).
@@ -421,8 +450,8 @@ const MAX_RICE_PARTITIONS: usize = 1 << MAX_RICE_PARTITION_ORDER; // 256
 #[derive(Copy, Clone)]
 struct PartitionData {
     sum_zigzag: u64,
-    max_abs:    u32,
-    count:      usize,
+    max_abs: u32,
+    count: usize,
 }
 
 /// Stack-allocated result of `plan_residual_coding`.
@@ -459,7 +488,11 @@ fn compute_leaf_data(
     for (p, leaf) in buf[..num_leaf].iter_mut().enumerate() {
         leaf.sum_zigzag = 0;
         leaf.max_abs = 0;
-        leaf.count = if p == 0 { leaf_size.saturating_sub(predictor_order) } else { leaf_size };
+        leaf.count = if p == 0 {
+            leaf_size.saturating_sub(predictor_order)
+        } else {
+            leaf_size
+        };
     }
 
     let mut pos = 0usize;
@@ -469,7 +502,9 @@ fn compute_leaf_data(
         for &r in &residuals[start..end.min(residuals.len())] {
             let u = signed_to_unsigned(r);
             leaf.sum_zigzag += u as u64;
-            if u > leaf.max_abs { leaf.max_abs = u; }
+            if u > leaf.max_abs {
+                leaf.max_abs = u;
+            }
         }
         pos = end;
     }
@@ -495,7 +530,9 @@ pub fn plan_residual_coding(
         let mut m = max_order.min(MAX_RICE_PARTITION_ORDER);
         while m > min_order {
             let leaf_size = block_size >> m;
-            if leaf_size >= predictor_order.max(1) && block_size.is_multiple_of(1 << m) { break; }
+            if leaf_size >= predictor_order.max(1) && block_size.is_multiple_of(1 << m) {
+                break;
+            }
             m -= 1;
         }
         m
@@ -503,23 +540,41 @@ pub fn plan_residual_coding(
 
     // One pass: precompute per-leaf (finest granularity) zigzag sums and max_abs.
     // Stack-allocated — eliminates a heap allocation per call.
-    let mut leaf_buf = [PartitionData { sum_zigzag: 0, max_abs: 0, count: 0 }; MAX_RICE_PARTITIONS];
-    let num_leaf = compute_leaf_data(residuals, block_size, predictor_order, max_order, &mut leaf_buf);
+    let mut leaf_buf = [PartitionData {
+        sum_zigzag: 0,
+        max_abs: 0,
+        count: 0,
+    }; MAX_RICE_PARTITIONS];
+    let num_leaf = compute_leaf_data(
+        residuals,
+        block_size,
+        predictor_order,
+        max_order,
+        &mut leaf_buf,
+    );
     let leaves = &leaf_buf[..num_leaf];
 
     let param_bits = method.param_bits() as usize;
     let escape_param_overhead = param_bits + 5;
 
-    let mut plan = RicePlan { order: min_order, est_bits: 0, params: [0u8; MAX_RICE_PARTITIONS] };
+    let mut plan = RicePlan {
+        order: min_order,
+        est_bits: 0,
+        params: [0u8; MAX_RICE_PARTITIONS],
+    };
     let mut best_bits = usize::MAX;
     // Stack buffer for per-iteration params — only 256 bytes, cheap to init.
     let mut cur_params = [0u8; MAX_RICE_PARTITIONS];
 
     for order in min_order..=max_order {
         let num_partitions = 1usize << order;
-        if !block_size.is_multiple_of(num_partitions) { continue; }
+        if !block_size.is_multiple_of(num_partitions) {
+            continue;
+        }
         let partition_size = block_size / num_partitions;
-        if partition_size < predictor_order { break; }
+        if partition_size < predictor_order {
+            break;
+        }
 
         let leaves_per = num_leaf / num_partitions;
         let mut total_bits = 0usize;
@@ -532,7 +587,9 @@ pub fn plan_residual_coding(
             let mut count = 0usize;
             for leaf in &leaves[ls..le] {
                 sum += leaf.sum_zigzag;
-                if leaf.max_abs > max_abs { max_abs = leaf.max_abs; }
+                if leaf.max_abs > max_abs {
+                    max_abs = leaf.max_abs;
+                }
                 count += leaf.count;
             }
 
@@ -545,12 +602,19 @@ pub fn plan_residual_coding(
             };
 
             let rice_bits = param_bits + estimate_rice_bits_from_sum(sum, count, param);
-            let escape_bps = if max_abs == 0 { 0u32 }
-                             else { (32 - max_abs.leading_zeros() + 1).min(31) };
+            let escape_bps = if max_abs == 0 {
+                0u32
+            } else {
+                (32 - max_abs.leading_zeros() + 1).min(31)
+            };
             let escape_bits = escape_param_overhead + count * escape_bps as usize;
 
             total_bits += rice_bits.min(escape_bits);
-            *item = if escape_bits < rice_bits { method.escape_code() } else { param };
+            *item = if escape_bits < rice_bits {
+                method.escape_code()
+            } else {
+                param
+            };
         }
 
         if total_bits < best_bits {
@@ -594,9 +658,16 @@ pub fn encode_residual_planned(
 
         if param == escape_code {
             // Escape coding: raw signed values
-            let max_abs = partition_residuals.iter().map(|&r| r.unsigned_abs()).max().unwrap_or(0);
-            let escape_bps = if max_abs == 0 { 0u32 }
-                             else { (32 - max_abs.leading_zeros() + 1).min(31) };
+            let max_abs = partition_residuals
+                .iter()
+                .map(|&r| r.unsigned_abs())
+                .max()
+                .unwrap_or(0);
+            let escape_bps = if max_abs == 0 {
+                0u32
+            } else {
+                (32 - max_abs.leading_zeros() + 1).min(31)
+            };
             writer.write_bits(escape_code as u32, param_bits);
             writer.write_bits(escape_bps, 5);
             for &residual in partition_residuals {
@@ -648,7 +719,16 @@ pub fn find_optimal_partition_order(
     max_order: u8,
     exhaustive: bool,
 ) -> u8 {
-    plan_residual_coding(residuals, block_size, predictor_order, method, min_order, max_order, exhaustive).order
+    plan_residual_coding(
+        residuals,
+        block_size,
+        predictor_order,
+        method,
+        min_order,
+        max_order,
+        exhaustive,
+    )
+    .order
 }
 
 #[cfg(test)]
@@ -765,27 +845,40 @@ mod tests {
     }
 }
 
-    #[test]
-    fn test_rice_roundtrip_17bps_residuals() {
-        use crate::flac::bitstream::{BitReader, BitWriter};
-        // First few residuals from the failing 17-bps Fixed(3) test
-        let residuals: Vec<i32> = vec![2, -3, 4, -5, 3, -1, 0, 0, 1, -2];
-        let block_size = 10 + 3; // 3 warmup + 10 residuals
-        let predictor_order = 3;
-        let partition_order = 0;
+#[test]
+fn test_rice_roundtrip_17bps_residuals() {
+    use crate::flac::bitstream::{BitReader, BitWriter};
+    // First few residuals from the failing 17-bps Fixed(3) test
+    let residuals: Vec<i32> = vec![2, -3, 4, -5, 3, -1, 0, 0, 1, -2];
+    let block_size = 10 + 3; // 3 warmup + 10 residuals
+    let predictor_order = 3;
+    let partition_order = 0;
 
-        let mut writer = BitWriter::new();
-        encode_residual(&mut writer, &residuals, RiceMethod::Rice, partition_order, block_size, predictor_order)
-            .expect("encode failed");
-        let data = writer.finish();
+    let mut writer = BitWriter::new();
+    encode_residual(
+        &mut writer,
+        &residuals,
+        RiceMethod::Rice,
+        partition_order,
+        block_size,
+        predictor_order,
+    )
+    .expect("encode failed");
+    let data = writer.finish();
 
-        eprintln!("Encoded bytes: {:?}", &data[..data.len().min(6)]);
+    eprintln!("Encoded bytes: {:?}", &data[..data.len().min(6)]);
 
-        let mut reader = BitReader::new(&data);
-        let decoded = decode_residual(&mut reader, RiceMethod::Rice, partition_order, block_size, predictor_order)
-            .expect("decode failed");
+    let mut reader = BitReader::new(&data);
+    let decoded = decode_residual(
+        &mut reader,
+        RiceMethod::Rice,
+        partition_order,
+        block_size,
+        predictor_order,
+    )
+    .expect("decode failed");
 
-        eprintln!("Encoded residuals: {:?}", residuals);
-        eprintln!("Decoded residuals: {:?}", decoded);
-        assert_eq!(decoded, residuals, "Rice roundtrip failed");
-    }
+    eprintln!("Encoded residuals: {:?}", residuals);
+    eprintln!("Decoded residuals: {:?}", decoded);
+    assert_eq!(decoded, residuals, "Rice roundtrip failed");
+}

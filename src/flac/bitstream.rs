@@ -24,7 +24,12 @@ impl<'a> BitReader<'a> {
     /// Create a new bit reader from a byte slice.
     #[inline]
     pub const fn new(data: &'a [u8]) -> Self {
-        BitReader { data, byte_pos: 0, buf: 0, buf_bits: 0 }
+        BitReader {
+            data,
+            byte_pos: 0,
+            buf: 0,
+            buf_bits: 0,
+        }
     }
 
     /// Logical stream position in bits (total bits consumed by caller).
@@ -44,7 +49,9 @@ impl<'a> BitReader<'a> {
             let to_load = ((64 - self.buf_bits) / 8) as usize; // 1–8
             // Load 8 bytes as a single u64 (single cache-line read).
             let word = u64::from_be_bytes(
-                self.data[self.byte_pos..self.byte_pos + 8].try_into().expect("slice length checked above"),
+                self.data[self.byte_pos..self.byte_pos + 8]
+                    .try_into()
+                    .expect("slice length checked above"),
             );
             // Keep only the top `to_load * 8` bits of word; mask the rest to zero
             // so phantom stream bytes don't corrupt the buffer.
@@ -385,12 +392,20 @@ pub struct BitWriter {
 impl BitWriter {
     #[inline]
     pub const fn new() -> Self {
-        BitWriter { data: Vec::new(), accum: 0, accum_bits: 0 }
+        BitWriter {
+            data: Vec::new(),
+            accum: 0,
+            accum_bits: 0,
+        }
     }
 
     #[inline]
     pub fn with_capacity(bytes: usize) -> Self {
-        BitWriter { data: Vec::with_capacity(bytes + 8), accum: 0, accum_bits: 0 }
+        BitWriter {
+            data: Vec::with_capacity(bytes + 8),
+            accum: 0,
+            accum_bits: 0,
+        }
     }
 
     /// Total bits written, including any still pending in the accumulator.
@@ -474,7 +489,9 @@ impl BitWriter {
     /// the shift `64 - accum_bits - count ≥ 1` — no underflow.
     #[inline]
     pub fn write_bits(&mut self, value: u32, count: u8) {
-        if count == 0 { return; }
+        if count == 0 {
+            return;
+        }
         let count = count as u32;
         debug_assert!(count <= 32);
         // accum_bits ≤ 31, count ≤ 32 → shift = 64 - accum_bits - count ≥ 1.
@@ -502,7 +519,11 @@ impl BitWriter {
     /// Write a signed value in two's complement.
     #[inline]
     pub fn write_bits_signed(&mut self, value: i32, count: u8) {
-        let mask = if count < 32 { (1u32 << count) - 1 } else { u32::MAX };
+        let mask = if count < 32 {
+            (1u32 << count) - 1
+        } else {
+            u32::MAX
+        };
         self.write_bits(value as u32 & mask, count);
     }
 
@@ -570,7 +591,10 @@ impl BitWriter {
     /// Write raw bytes (requires byte alignment).
     #[inline]
     pub fn write_bytes(&mut self, bytes: &[u8]) {
-        debug_assert!(self.is_byte_aligned(), "write_bytes requires byte alignment");
+        debug_assert!(
+            self.is_byte_aligned(),
+            "write_bytes requires byte alignment"
+        );
         self.data.extend_from_slice(bytes);
     }
 
@@ -611,7 +635,10 @@ impl BitWriter {
         }
 
         if remainder > 0 {
-            self.write_bits((data[full_bytes] >> (8 - remainder)) as u32, remainder as u8);
+            self.write_bits(
+                (data[full_bytes] >> (8 - remainder)) as u32,
+                remainder as u8,
+            );
         }
     }
 
@@ -632,7 +659,10 @@ impl BitWriter {
     /// always the case after byte-aligned header/footer writes or `align_to_byte()`.
     #[inline]
     pub fn data(&self) -> &[u8] {
-        debug_assert_eq!(self.accum_bits, 0, "data() called with pending bits in accumulator");
+        debug_assert_eq!(
+            self.accum_bits, 0,
+            "data() called with pending bits in accumulator"
+        );
         &self.data
     }
 

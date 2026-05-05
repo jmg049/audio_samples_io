@@ -227,10 +227,10 @@ impl<'a> FlacFile<'a> {
         // on `bits` is hoisted out of the inner loop by LLVM's LICM pass.
         let convert = |s: i32| -> T {
             match bits {
-                1..=8  => T::convert_from(((s) << (16 - bits)) as i16),
+                1..=8 => T::convert_from(((s) << (16 - bits)) as i16),
                 9..=16 => T::convert_from(s as i16),
                 17..=24 => T::convert_from(I24::wrapping_from_i32(s)),
-                _      => T::convert_from(s),
+                _ => T::convert_from(s),
             }
         };
 
@@ -506,15 +506,18 @@ impl<'a> AudioFileRead<'a> for FlacFile<'a> {
         })?;
 
         let num_channels = self.stream_info.channels as usize;
-        let flat = self.decode_all_frames_typed::<T>().map_err(AudioIOError::FlacError)?;
+        let flat = self
+            .decode_all_frames_typed::<T>()
+            .map_err(AudioIOError::FlacError)?;
 
         if num_channels == 1 {
             let arr = ndarray::Array1::from_vec(flat);
             AudioSamples::new_mono(arr, sample_rate).map_err(Into::into)
         } else {
             let spc = flat.len() / num_channels;
-            let arr = ndarray::Array2::from_shape_vec((num_channels, spc), flat)
-                .map_err(|e| AudioIOError::corrupted_data_simple("Array shape error", e.to_string()))?;
+            let arr = ndarray::Array2::from_shape_vec((num_channels, spc), flat).map_err(|e| {
+                AudioIOError::corrupted_data_simple("Array shape error", e.to_string())
+            })?;
             AudioSamples::new_multi_channel(arr, sample_rate).map_err(Into::into)
         }
     }
@@ -611,7 +614,7 @@ where
     // FLAC only supports 4-24 bits per sample
     let bits_per_sample: u8 = match T::SAMPLE_TYPE {
         SampleType::I16 => 16,
-        _ => 24,               // u8/f32/f64 → 24-bit
+        _ => 24, // u8/f32/f64 → 24-bit
     };
 
     // Write FLAC marker
@@ -646,8 +649,9 @@ where
     // [ch0[0..N], ch1[0..N], ...], so we split at `samples_per_channel` boundaries.
     // Falls back to `to_interleaved_vec()` + deinterleave for non-contiguous data.
     let n_ch = num_channels as usize;
-    let mut channel_samples: Vec<Vec<i32>> =
-        (0..n_ch).map(|_| Vec::with_capacity(samples_per_channel)).collect();
+    let mut channel_samples: Vec<Vec<i32>> = (0..n_ch)
+        .map(|_| Vec::with_capacity(samples_per_channel))
+        .collect();
 
     // Helper: fill channel_samples from a planar slice (channel-major, contiguous).
     macro_rules! fill_planar {
@@ -668,21 +672,30 @@ where
     }
 
     if TypeId::of::<T>() == TypeId::of::<i16>() {
-        let conv = |s: &T| -> i32 { let v: i16 = unsafe { std::mem::transmute_copy(s) }; v as i32 };
+        let conv = |s: &T| -> i32 {
+            let v: i16 = unsafe { std::mem::transmute_copy(s) };
+            v as i32
+        };
         if let Some(planar) = audio.as_slice() {
             fill_planar!(planar, conv);
         } else {
             fill_interleaved!(audio.to_interleaved_vec(), conv);
         }
     } else if TypeId::of::<T>() == TypeId::of::<I24>() {
-        let conv = |s: &T| -> i32 { let v: I24 = unsafe { std::mem::transmute_copy(s) }; i32::convert_from(v) };
+        let conv = |s: &T| -> i32 {
+            let v: I24 = unsafe { std::mem::transmute_copy(s) };
+            i32::convert_from(v)
+        };
         if let Some(planar) = audio.as_slice() {
             fill_planar!(planar, conv);
         } else {
             fill_interleaved!(audio.to_interleaved_vec(), conv);
         }
     } else if TypeId::of::<T>() == TypeId::of::<i32>() {
-        let conv = |s: &T| -> i32 { let v: i32 = unsafe { std::mem::transmute_copy(s) }; v >> 8 };
+        let conv = |s: &T| -> i32 {
+            let v: i32 = unsafe { std::mem::transmute_copy(s) };
+            v >> 8
+        };
         if let Some(planar) = audio.as_slice() {
             fill_planar!(planar, conv);
         } else {
@@ -693,8 +706,11 @@ where
         // positive decoded as v/8388607.0, negative as v/8388608.0
         let conv = |s: &T| -> i32 {
             let v: f32 = unsafe { std::mem::transmute_copy(s) };
-            if v >= 0.0 { (v * 8388607.0).min(8388607.0) as i32 }
-            else        { (v * 8388608.0).max(-8388608.0) as i32 }
+            if v >= 0.0 {
+                (v * 8388607.0).min(8388607.0) as i32
+            } else {
+                (v * 8388608.0).max(-8388608.0) as i32
+            }
         };
         if let Some(planar) = audio.as_slice() {
             fill_planar!(planar, conv);
@@ -704,8 +720,11 @@ where
     } else if TypeId::of::<T>() == TypeId::of::<f64>() {
         let conv = |s: &T| -> i32 {
             let v: f64 = unsafe { std::mem::transmute_copy(s) };
-            if v >= 0.0 { (v * 8388607.0).min(8388607.0) as i32 }
-            else        { (v * 8388608.0).max(-8388608.0) as i32 }
+            if v >= 0.0 {
+                (v * 8388607.0).min(8388607.0) as i32
+            } else {
+                (v * 8388608.0).max(-8388608.0) as i32
+            }
         };
         if let Some(planar) = audio.as_slice() {
             fill_planar!(planar, conv);
@@ -713,7 +732,10 @@ where
             fill_interleaved!(audio.to_interleaved_vec(), conv);
         }
     } else if TypeId::of::<T>() == TypeId::of::<u8>() {
-        let conv = |s: &T| -> i32 { let v: u8 = unsafe { std::mem::transmute_copy(s) }; ((v as i32) - 128) << 16 };
+        let conv = |s: &T| -> i32 {
+            let v: u8 = unsafe { std::mem::transmute_copy(s) };
+            ((v as i32) - 128) << 16
+        };
         if let Some(planar) = audio.as_slice() {
             fill_planar!(planar, conv);
         } else {
@@ -950,7 +972,8 @@ mod tests {
         let info = flac_file.base_info().unwrap();
         let audio = flac_file.read::<i16>().unwrap();
 
-        let expected_total = audio.num_channels().get() as usize * audio.samples_per_channel().get();
+        let expected_total =
+            audio.num_channels().get() as usize * audio.samples_per_channel().get();
         assert_eq!(
             info.total_samples, expected_total,
             "base_info total_samples should equal channels * samples_per_channel"
@@ -980,8 +1003,16 @@ mod tests {
         let back = flac.read::<i16>().unwrap();
 
         assert_eq!(back.sample_rate(), sr, "sample rate mismatch ({tag})");
-        assert_eq!(back.num_channels(), sine_i16.num_channels(), "channel count mismatch ({tag})");
-        assert_eq!(back.samples_per_channel(), sine_i16.samples_per_channel(), "sample count mismatch ({tag})");
+        assert_eq!(
+            back.num_channels(),
+            sine_i16.num_channels(),
+            "channel count mismatch ({tag})"
+        );
+        assert_eq!(
+            back.samples_per_channel(),
+            sine_i16.samples_per_channel(),
+            "sample count mismatch ({tag})"
+        );
         fs::remove_file(&out_path).ok();
     }
 
@@ -998,8 +1029,8 @@ mod tests {
     #[test]
     fn test_roundtrip_i24() {
         let sr = sample_rate!(44100);
-        let sine_i24 = sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.25), sr, 0.5)
-            .to_format::<I24>();
+        let sine_i24 =
+            sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.25), sr, 0.5).to_format::<I24>();
 
         let out_path = std::env::temp_dir().join("flac_rt_i24.flac");
         {
@@ -1018,8 +1049,8 @@ mod tests {
     #[test]
     fn test_roundtrip_i32() {
         let sr = sample_rate!(44100);
-        let sine_i32 = sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.25), sr, 0.5)
-            .to_format::<i32>();
+        let sine_i32 =
+            sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.25), sr, 0.5).to_format::<i32>();
 
         let out_path = std::env::temp_dir().join("flac_rt_i32.flac");
         {
@@ -1057,8 +1088,8 @@ mod tests {
     #[test]
     fn test_roundtrip_f64() {
         let sr = sample_rate!(44100);
-        let sine_f64 = sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.25), sr, 0.5)
-            .to_format::<f64>();
+        let sine_f64 =
+            sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.25), sr, 0.5).to_format::<f64>();
 
         let out_path = std::env::temp_dir().join("flac_rt_f64.flac");
         {
@@ -1081,8 +1112,8 @@ mod tests {
     #[ignore = "known: FIXED predictor decoder has precision issues with sine waves"]
     fn test_roundtrip_i16_content_fidelity() {
         let sr = sample_rate!(44100);
-        let sine_i16 = sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.25), sr, 0.5)
-            .to_format::<i16>();
+        let sine_i16 =
+            sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.25), sr, 0.5).to_format::<i16>();
 
         let out_path = std::env::temp_dir().join("flac_rt_i16_content.flac");
         {
@@ -1092,8 +1123,16 @@ mod tests {
         let flac = FlacFile::open_with_options(&out_path, OpenOptions::default()).unwrap();
         let back = flac.read::<i16>().unwrap();
 
-        let orig: Vec<f64> = sine_i16.to_interleaved_vec().iter().map(|&s| s as f64 / 32768.0).collect();
-        let got: Vec<f64> = back.to_interleaved_vec().iter().map(|&s| s as f64 / 32768.0).collect();
+        let orig: Vec<f64> = sine_i16
+            .to_interleaved_vec()
+            .iter()
+            .map(|&s| s as f64 / 32768.0)
+            .collect();
+        let got: Vec<f64> = back
+            .to_interleaved_vec()
+            .iter()
+            .map(|&s| s as f64 / 32768.0)
+            .collect();
         let err = mse(&orig, &got);
         assert!(err < 1e-6, "i16 content fidelity MSE: {err}");
 
@@ -1140,7 +1179,11 @@ mod tests {
         let flac = FlacFile::open_with_options(&out_path, OpenOptions::default()).unwrap();
         let back = flac.read::<i16>().expect("read stereo DEFAULT (1)");
         assert_eq!(back.num_channels().get(), 2, "should have 2 channels");
-        assert_eq!(back.samples_per_channel(), stereo.samples_per_channel(), "sample count");
+        assert_eq!(
+            back.samples_per_channel(),
+            stereo.samples_per_channel(),
+            "sample count"
+        );
         fs::remove_file(&out_path).ok();
 
         // Find minimal failing case: test with different durations
@@ -1149,14 +1192,18 @@ mod tests {
         // 4097 samples → 1 full + 1 tiny
         // 8192 samples → 2 full frames
         for n_samples in [4096usize, 4097, 8192] {
-            let ch0: Vec<i16> = (0..n_samples).map(|i| {
-                let t = i as f32 / 44100.0;
-                (11468.0 * (2.0 * std::f32::consts::PI * 110.0 * t).sin()) as i16
-            }).collect();
-            let ch1: Vec<i16> = (0..n_samples).map(|i| {
-                let t = i as f32 / 44100.0;
-                (14745.0 * (2.0 * std::f32::consts::PI * 165.0 * t).cos()) as i16
-            }).collect();
+            let ch0: Vec<i16> = (0..n_samples)
+                .map(|i| {
+                    let t = i as f32 / 44100.0;
+                    (11468.0 * (2.0 * std::f32::consts::PI * 110.0 * t).sin()) as i16
+                })
+                .collect();
+            let ch1: Vec<i16> = (0..n_samples)
+                .map(|i| {
+                    let t = i as f32 / 44100.0;
+                    (14745.0 * (2.0 * std::f32::consts::PI * 165.0 * t).cos()) as i16
+                })
+                .collect();
             let n = ch0.len();
             let mut flat = Vec::with_capacity(n * 2);
             flat.extend_from_slice(&ch0);
@@ -1172,16 +1219,25 @@ mod tests {
             }
             let flac = FlacFile::open_with_options(&path, OpenOptions::default()).unwrap();
             let result = flac.read::<i16>();
-            eprintln!("n_samples={n_samples}: read result = {:?}", result.as_ref().map(|_| "ok").map_err(|e| e.to_string()));
+            eprintln!(
+                "n_samples={n_samples}: read result = {:?}",
+                result.as_ref().map(|_| "ok").map_err(|e| e.to_string())
+            );
             result.unwrap_or_else(|e| panic!("read {n_samples} samples: {e}"));
             fs::remove_file(&path).ok();
         }
 
         let duration = StdDuration::from_millis(250);
         let ch0: Vec<i16> = sine_wave::<f32>(110.0, duration, sr, 0.35)
-            .to_format::<i16>().to_interleaved_vec().into_iter().collect();
+            .to_format::<i16>()
+            .to_interleaved_vec()
+            .into_iter()
+            .collect();
         let ch1: Vec<i16> = cosine_wave::<f32>(165.0, duration, sr, 0.45)
-            .to_format::<i16>().to_interleaved_vec().into_iter().collect();
+            .to_format::<i16>()
+            .to_interleaved_vec()
+            .into_iter()
+            .collect();
         let n = ch0.len();
         let mut flat = Vec::with_capacity(n * 2);
         flat.extend_from_slice(&ch0);
@@ -1193,12 +1249,22 @@ mod tests {
         let out_path2 = std::env::temp_dir().join("flac_rt_stereo_bench.flac");
         {
             let file = File::create(&out_path2).expect("create");
-            write_flac(BufWriter::new(file), &bench_stereo, CompressionLevel::DEFAULT).expect("write bench");
+            write_flac(
+                BufWriter::new(file),
+                &bench_stereo,
+                CompressionLevel::DEFAULT,
+            )
+            .expect("write bench");
         }
         let flac2 = FlacFile::open_with_options(&out_path2, OpenOptions::default()).unwrap();
-        let back2 = flac2.read::<i16>().expect("read stereo DEFAULT bench scenario");
+        let back2 = flac2
+            .read::<i16>()
+            .expect("read stereo DEFAULT bench scenario");
         assert_eq!(back2.num_channels().get(), 2);
-        assert_eq!(back2.samples_per_channel(), bench_stereo.samples_per_channel());
+        assert_eq!(
+            back2.samples_per_channel(),
+            bench_stereo.samples_per_channel()
+        );
         fs::remove_file(&out_path2).ok();
     }
 
@@ -1276,8 +1342,7 @@ mod tests {
             flat.extend(std::iter::repeat((ch as i16 + 1) * 1000).take(n));
         }
         let arr = ndarray::Array2::from_shape_vec((4, n), flat).unwrap();
-        let audio: AudioSamples<'static, i16> =
-            AudioSamples::new_multi_channel(arr, sr).unwrap();
+        let audio: AudioSamples<'static, i16> = AudioSamples::new_multi_channel(arr, sr).unwrap();
 
         let out_path = std::env::temp_dir().join("flac_rt_quad.flac");
         {
@@ -1308,8 +1373,8 @@ mod tests {
 
     fn roundtrip_sample_rate(hz: u32) {
         let sr = std::num::NonZeroU32::new(hz).unwrap();
-        let sine = sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.1), sr, 0.5)
-            .to_format::<i16>();
+        let sine =
+            sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.1), sr, 0.5).to_format::<i16>();
 
         let tag = format!("sr_{hz}");
         let out_path = std::env::temp_dir().join(format!("flac_rt_{tag}.flac"));
@@ -1319,7 +1384,11 @@ mod tests {
         }
         let flac = FlacFile::open_with_options(&out_path, OpenOptions::default()).unwrap();
         let back = flac.read::<i16>().unwrap();
-        assert_eq!(back.sample_rate().get(), hz, "sample rate should be preserved");
+        assert_eq!(
+            back.sample_rate().get(),
+            hz,
+            "sample rate should be preserved"
+        );
         assert_eq!(back.samples_per_channel(), sine.samples_per_channel());
         fs::remove_file(&out_path).ok();
     }
@@ -1347,8 +1416,8 @@ mod tests {
     fn test_short_file_single_block() {
         // Just a handful of samples — less than one typical block
         let sr = sample_rate!(44100);
-        let sine = sine_wave::<f32>(440.0, StdDuration::from_millis(10), sr, 0.5)
-            .to_format::<i16>();
+        let sine =
+            sine_wave::<f32>(440.0, StdDuration::from_millis(10), sr, 0.5).to_format::<i16>();
 
         let out_path = std::env::temp_dir().join("flac_edge_short.flac");
         {
@@ -1365,8 +1434,7 @@ mod tests {
     fn test_long_file_five_seconds() {
         let sr = sample_rate!(44100);
         let expected_spc = 5 * 44100usize;
-        let sine = sine_wave::<f32>(440.0, StdDuration::from_secs(5), sr, 0.5)
-            .to_format::<i16>();
+        let sine = sine_wave::<f32>(440.0, StdDuration::from_secs(5), sr, 0.5).to_format::<i16>();
 
         let out_path = std::env::temp_dir().join("flac_edge_long.flac");
         {
@@ -1388,8 +1456,7 @@ mod tests {
         use audio_samples::{AudioSamples, nzu};
 
         let sr = sample_rate!(44100);
-        let silence: AudioSamples<'static, i16> =
-            AudioSamples::zeros_mono(nzu!(4096), sr);
+        let silence: AudioSamples<'static, i16> = AudioSamples::zeros_mono(nzu!(4096), sr);
 
         let out_path = std::env::temp_dir().join("flac_edge_silence.flac");
         {
@@ -1428,7 +1495,10 @@ mod tests {
         let back = flac.read::<i16>().unwrap();
 
         let back_v: Vec<i16> = back.to_interleaved_vec().into_iter().collect();
-        assert_eq!(back_v, samples, "max-amplitude i16 values should round-trip exactly");
+        assert_eq!(
+            back_v, samples,
+            "max-amplitude i16 values should round-trip exactly"
+        );
         fs::remove_file(&out_path).ok();
     }
 
@@ -1439,8 +1509,8 @@ mod tests {
     #[test]
     fn test_compression_levels_produce_valid_files() {
         let sr = sample_rate!(44100);
-        let sine = sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.25), sr, 0.5)
-            .to_format::<i16>();
+        let sine =
+            sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.25), sr, 0.5).to_format::<i16>();
 
         for level in [
             CompressionLevel::FASTEST,
@@ -1459,15 +1529,27 @@ mod tests {
             // All levels must produce readable files with correct structure.
             // Exact content is only verified for FASTEST (level 0) since higher
             // levels engage the LPC decoder which currently has known issues.
-            let back = flac.read::<i16>().unwrap_or_else(|e| {
-                panic!("level {:?}: read failed: {e}", level)
-            });
-            assert_eq!(back.samples_per_channel(), sine.samples_per_channel(),
-                "level {:?} sample count mismatch", level);
-            assert_eq!(back.sample_rate(), sr,
-                "level {:?} sample rate mismatch", level);
-            assert_eq!(back.num_channels(), sine.num_channels(),
-                "level {:?} channel count mismatch", level);
+            let back = flac
+                .read::<i16>()
+                .unwrap_or_else(|e| panic!("level {:?}: read failed: {e}", level));
+            assert_eq!(
+                back.samples_per_channel(),
+                sine.samples_per_channel(),
+                "level {:?} sample count mismatch",
+                level
+            );
+            assert_eq!(
+                back.sample_rate(),
+                sr,
+                "level {:?} sample rate mismatch",
+                level
+            );
+            assert_eq!(
+                back.num_channels(),
+                sine.num_channels(),
+                "level {:?} channel count mismatch",
+                level
+            );
 
             // All levels: verify structure only (content fidelity has known issues)
 
@@ -1479,8 +1561,7 @@ mod tests {
     fn test_best_compression_smaller_than_fastest() {
         let sr = sample_rate!(44100);
         // Use a longer, more compressible sine to get a meaningful size difference
-        let sine = sine_wave::<f32>(440.0, StdDuration::from_secs(2), sr, 0.5)
-            .to_format::<i16>();
+        let sine = sine_wave::<f32>(440.0, StdDuration::from_secs(2), sr, 0.5).to_format::<i16>();
 
         let fast_path = std::env::temp_dir().join("flac_cmp_fastest.flac");
         let best_path = std::env::temp_dir().join("flac_cmp_best.flac");
@@ -1516,11 +1597,8 @@ mod tests {
 
     fn symphonia_decode_flac(path: &std::path::Path) -> (u32, u32, usize) {
         use symphonia::core::{
-            codecs::DecoderOptions,
-            formats::FormatOptions,
-            io::MediaSourceStream,
-            meta::MetadataOptions,
-            probe::Hint,
+            codecs::DecoderOptions, formats::FormatOptions, io::MediaSourceStream,
+            meta::MetadataOptions, probe::Hint,
         };
 
         let file = std::fs::File::open(path).expect("open for symphonia");
@@ -1528,7 +1606,12 @@ mod tests {
         let mut hint = Hint::new();
         hint.with_extension("flac");
         let mut format = symphonia::default::get_probe()
-            .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+            .format(
+                &hint,
+                mss,
+                &FormatOptions::default(),
+                &MetadataOptions::default(),
+            )
             .expect("symphonia probe")
             .format;
         let track = format.default_track().expect("track");
@@ -1559,8 +1642,8 @@ mod tests {
     #[test]
     fn test_oracle_symphonia_mono_sine() {
         let sr = sample_rate!(44100);
-        let sine = sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.1), sr, 0.5)
-            .to_format::<i16>();
+        let sine =
+            sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.1), sr, 0.5).to_format::<i16>();
         let expected_samples = sine.samples_per_channel().get();
 
         let out_path = std::env::temp_dir().join("flac_oracle_sym_mono.flac");
@@ -1594,7 +1677,10 @@ mod tests {
         assert_eq!(sym_sr, 44100, "symphonia sample rate");
         assert_eq!(sym_ch, 2, "symphonia channels");
         // symphonia reports frames (samples per channel)
-        assert_eq!(sym_samples, expected_samples_per_ch, "symphonia frame count");
+        assert_eq!(
+            sym_samples, expected_samples_per_ch,
+            "symphonia frame count"
+        );
 
         fs::remove_file(&out_path).ok();
     }
@@ -1637,8 +1723,8 @@ mod tests {
         // Use write_flac with FASTEST to get lossless i16 content verification.
         // crate::write() uses CompressionLevel::DEFAULT which engages LPC.
         let sr = sample_rate!(44100);
-        let sine = sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.1), sr, 0.5)
-            .to_format::<i16>();
+        let sine =
+            sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.1), sr, 0.5).to_format::<i16>();
 
         let out_path = std::env::temp_dir().join("flac_lib_rw.flac");
         {
@@ -1678,10 +1764,8 @@ mod tests {
     #[test]
     fn test_open_wav_as_flac_fails() {
         // Pass a WAV file to FlacFile — should fail because FLAC marker is missing
-        let result = FlacFile::open_with_options(
-            Path::new("resources/test.wav"),
-            OpenOptions::default(),
-        );
+        let result =
+            FlacFile::open_with_options(Path::new("resources/test.wav"), OpenOptions::default());
         assert!(
             result.is_err(),
             "opening a WAV as a FLAC should return an error"
@@ -1691,13 +1775,19 @@ mod tests {
     #[test]
     fn test_lib_read_nonexistent_flac_fails() {
         let result = crate::read::<_, i16>("resources/no_such_file.flac");
-        assert!(result.is_err(), "lib::read of nonexistent .flac should fail");
+        assert!(
+            result.is_err(),
+            "lib::read of nonexistent .flac should fail"
+        );
     }
 
     #[test]
     fn test_lib_read_unsupported_extension_fails() {
         let result = crate::read::<_, i16>("resources/audio.mp3");
-        assert!(result.is_err(), "lib::read of .mp3 should fail with unsupported format");
+        assert!(
+            result.is_err(),
+            "lib::read of .mp3 should fail with unsupported format"
+        );
     }
 
     // =========================================================================
@@ -1715,7 +1805,10 @@ mod tests {
             .expect("Failed to read FLAC samples as i16");
 
         assert!(audio.num_channels().get() > 0, "expected non-zero channels");
-        assert!(audio.sample_rate().get() > 0, "expected non-zero sample rate");
+        assert!(
+            audio.sample_rate().get() > 0,
+            "expected non-zero sample rate"
+        );
         assert!(
             audio.total_samples().get() > 0,
             "expected non-empty samples"

@@ -18,7 +18,6 @@ pub const MD5_SIZE: usize = 16;
 /// Fixed predictor orders (0-4 supported)
 pub const MAX_FIXED_ORDER: usize = 4;
 
-
 /// Sample rate lookup table for frame header
 /// Index 0-11 are predefined, 12-14 read from end of header
 pub const SAMPLE_RATE_TABLE: [u32; 12] = [

@@ -344,7 +344,10 @@ mod tests {
         let audio = DecodedAudio::new(vec![vec![]], 16, 44100);
         let sample_rate = NonZeroU32::new(44100).unwrap();
         let result: Result<AudioSamples<'static, i16>, _> = audio.read_samples(sample_rate);
-        assert!(result.is_err(), "zero samples_per_channel should return error");
+        assert!(
+            result.is_err(),
+            "zero samples_per_channel should return error"
+        );
     }
 
     #[test]
@@ -368,9 +371,21 @@ mod tests {
 
         let samples: AudioSamples<'static, f32> = audio.read_samples(sample_rate).unwrap();
         let iv = samples.to_interleaved_vec();
-        assert!(iv[0].abs() > 0.9, "max i16 should map to near 1.0 in f32: {}", iv[0]);
-        assert!(iv[1] < -0.9, "min i16 should map to near -1.0 in f32: {}", iv[1]);
-        assert!(iv[2].abs() < 1e-6, "zero should map to zero in f32: {}", iv[2]);
+        assert!(
+            iv[0].abs() > 0.9,
+            "max i16 should map to near 1.0 in f32: {}",
+            iv[0]
+        );
+        assert!(
+            iv[1] < -0.9,
+            "min i16 should map to near -1.0 in f32: {}",
+            iv[1]
+        );
+        assert!(
+            iv[2].abs() < 1e-6,
+            "zero should map to zero in f32: {}",
+            iv[2]
+        );
     }
 
     #[test]

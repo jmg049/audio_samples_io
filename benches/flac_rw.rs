@@ -9,10 +9,6 @@ use audio_samples::{
     square_wave,
     traits::{ConvertFrom, StandardSample},
 };
-use symphonia::core::{
-    codecs::DecoderOptions, formats::FormatOptions, io::MediaSourceStream,
-    meta::MetadataOptions, probe::Hint,
-};
 use audio_samples_io::{
     flac::{CompressionLevel, FlacFile, write_flac},
     traits::{AudioFile, AudioFileRead},
@@ -20,6 +16,10 @@ use audio_samples_io::{
 };
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use ndarray::Array2;
+use symphonia::core::{
+    codecs::DecoderOptions, formats::FormatOptions, io::MediaSourceStream, meta::MetadataOptions,
+    probe::Hint,
+};
 
 const SAMPLE_RATES: &[u32] = &[44_100, 96_000];
 const CHANNEL_OPTIONS: &[usize] = &[1, 2, 6];
@@ -133,7 +133,12 @@ fn bench_symphonia_read(
                 let mut hint = Hint::new();
                 hint.with_extension("flac");
                 let mut format = symphonia::default::get_probe()
-                    .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+                    .format(
+                        &hint,
+                        mss,
+                        &FormatOptions::default(),
+                        &MetadataOptions::default(),
+                    )
                     .expect("probe flac")
                     .format;
                 let track_id = format.default_track().expect("track").id;
@@ -244,7 +249,12 @@ where
 
 fn flac_asset_path<T: AudioSample>(sample_rate: u32, channels: usize) -> PathBuf {
     let mut dir = flac_assets_dir();
-    dir.push(format!("{}_{}hz_{}ch.flac", T::LABEL, sample_rate, channels));
+    dir.push(format!(
+        "{}_{}hz_{}ch.flac",
+        T::LABEL,
+        sample_rate,
+        channels
+    ));
     dir
 }
 
