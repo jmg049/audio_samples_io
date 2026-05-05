@@ -217,8 +217,14 @@ impl<'a> FmtChunk<'a> {
         match self {
             FmtChunk::Base(_) => Ok(None),
             FmtChunk::Extensible(bytes) => {
+                // WAVEFORMATEXTENSIBLE layout (40 bytes total):
+                //   [0..16]  base WAVEFORMATEX fields
+                //   [16..18] cbSize (= 22)
+                //   [18..20] wValidBitsPerSample
+                //   [20..24] dwChannelMask
+                //   [24..40] SubFormat GUID — bytes 24..26 hold the actual format code
                 let format_code =
-                    FormatCode::const_from(u16::from_le_bytes([bytes[18], bytes[19]]));
+                    FormatCode::const_from(u16::from_le_bytes([bytes[24], bytes[25]]));
                 let bits_per_sample = self.bits_per_sample();
                 let sample_type = SampleType::from_bits(bits_per_sample);
 
@@ -453,5 +459,59 @@ mod tests {
             .validate_format_consistency()
             .expect_err("Expected validation to fail");
         assert!(err.to_string().contains("Too many channels"));
+    }
+
+    fn make_extensible_fmt_bytes(
+        sub_format_code: u16,
+        channels: u16,
+        sample_rate: u32,
+        bits_per_sample: u16,
+    ) -> [u8; 40] {
+        let bytes_per_sample = bits_per_sample / 8;
+        let block_align = channels * bytes_per_sample;
+        let byte_rate = sample_rate * block_align as u32;
+
+        let mut bytes = [0u8; 40];
+        bytes[0..2].copy_from_slice(&0xFFFEu16.to_le_bytes()); // WAVE_FORMAT_EXTENSIBLE
+        bytes[2..4].copy_from_slice(&channels.to_le_bytes());
+        bytes[4..8].copy_from_slice(&sample_rate.to_le_bytes());
+        bytes[8..12].copy_from_slice(&byte_rate.to_le_bytes());
+        bytes[12..14].copy_from_slice(&block_align.to_le_bytes());
+        bytes[14..16].copy_from_slice(&bits_per_sample.to_le_bytes());
+        bytes[16..18].copy_from_slice(&22u16.to_le_bytes()); // cbSize
+        bytes[18..20].copy_from_slice(&bits_per_sample.to_le_bytes()); // wValidBitsPerSample
+        bytes[20..24].copy_from_slice(&0u32.to_le_bytes()); // dwChannelMask
+        // SubFormat GUID: sub_format_code as u32 LE at bytes [24..28]
+        bytes[24..28].copy_from_slice(&(sub_format_code as u32).to_le_bytes());
+        bytes[28..30].copy_from_slice(&0u16.to_le_bytes()); // Data2
+        bytes[30..32].copy_from_slice(&0x0010u16.to_le_bytes()); // Data3
+        bytes[32..40].copy_from_slice(&[0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71]); // Data4
+        bytes
+    }
+
+    #[test]
+    fn test_subformat_extensible_pcm_identified_correctly() {
+        let bytes = make_extensible_fmt_bytes(0x0001, 1, 48000, 32);
+        let fmt = FmtChunk::from_bytes(&bytes).expect("Failed to create extensible FmtChunk");
+        let actual = fmt.actual_sample_type().expect("actual_sample_type failed");
+        assert_eq!(actual, ValidatedSampleType::I32);
+    }
+
+    #[test]
+    fn test_subformat_extensible_ieee_float_identified_correctly() {
+        // Regression: previously read bytes[18..20] (valid-bits = 32) → treated as format code
+        // 32 = Unknown(32) which fell through to I32. Fix: read bytes[24..26] (sub-format code).
+        let bytes = make_extensible_fmt_bytes(0x0003, 1, 44100, 32);
+        let fmt = FmtChunk::from_bytes(&bytes).expect("Failed to create extensible FmtChunk");
+        let actual = fmt.actual_sample_type().expect("actual_sample_type failed");
+        assert_eq!(actual, ValidatedSampleType::F32);
+    }
+
+    #[test]
+    fn test_subformat_extensible_24bit_pcm_identified_correctly() {
+        let bytes = make_extensible_fmt_bytes(0x0001, 1, 192_000, 24);
+        let fmt = FmtChunk::from_bytes(&bytes).expect("Failed to create extensible FmtChunk");
+        let actual = fmt.actual_sample_type().expect("actual_sample_type failed");
+        assert_eq!(actual, ValidatedSampleType::I24);
     }
 }
