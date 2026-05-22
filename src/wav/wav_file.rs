@@ -21,7 +21,9 @@ use crate::{
     MAX_MMAP_SIZE, MAX_WAV_SIZE,
     error::{AudioIOError, AudioIOResult, ErrorPosition},
     traits::{AudioFile, AudioFileMetadata, AudioFileRead, AudioFileWrite, AudioInfoMarker},
-    types::{AudioDataSource, BaseAudioInfo, FileType, OpenOptions, ValidatedSampleType, WriteOptions},
+    types::{
+        AudioDataSource, BaseAudioInfo, FileType, OpenOptions, ValidatedSampleType, WriteOptions,
+    },
     wav::{
         FormatCode,
         bext::BextChunk,
@@ -1174,7 +1176,11 @@ where
 }
 
 // Write complete WAV file to a writer
-pub(crate) fn write_wav<T, W>(writer: W, audio: &AudioSamples<T>, opts: WriteOptions) -> AudioIOResult<()>
+pub(crate) fn write_wav<T, W>(
+    writer: W,
+    audio: &AudioSamples<T>,
+    opts: WriteOptions,
+) -> AudioIOResult<()>
 where
     T: StandardSample + 'static,
     W: Write,

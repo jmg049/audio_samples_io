@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- Streaming: `AudioStreamReader` now exposes `num_channels()`, allowing `Box<dyn AudioStreamReader>` callers to allocate read buffers without a separate `info()` call (eliminating the probe → drop → reopen two-pass latency)
+
 ### Added
 - WAV: read LIST/INFO metadata tags (title, artist, album, date, genre, software, copyright, and more) via `WavFile::list()` and `ListChunk::info_metadata()`; also read FACT chunk sample count via `WavFile::fact()`; both are surfaced in `WavFileInfo` returned by `specific_info()`
 - WAV: read CUE chunk (named markers) via `WavFile::cue()` returning `CueChunk` with `cue_points()`

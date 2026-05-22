@@ -63,13 +63,17 @@ use std::{
     any::TypeId,
     fs::File,
     io::{BufReader, BufWriter, Read, Seek, Write},
-    num::NonZeroU32,
     path::Path,
 };
 
-use audio_samples::{
-    AudioSamples, operations::ResamplingQuality, resample, traits::StandardSample,
-};
+use audio_samples::{AudioSamples, traits::StandardSample};
+#[cfg(feature = "resampling")]
+use std::num::NonZeroU32;
+
+#[cfg(feature = "resampling")]
+pub use audio_samples::operations::ResamplingQuality;
+#[cfg(feature = "resampling")]
+pub use audio_samples::operations::resample;
 
 pub use crate::{
     error::{AudioIOError, AudioIOResult},
@@ -233,6 +237,7 @@ where
     }
 }
 
+#[cfg(feature = "resampling")]
 pub fn read_and_resample<P, T>(
     fp: P,
     target_sr: NonZeroU32,
@@ -407,7 +412,8 @@ where
 /// use audio_samples_io::traits::AudioStreamReader;
 ///
 /// fn process_any_stream(mut stream: Box<dyn AudioStreamReader>) -> Result<(), Box<dyn std::error::Error>> {
-///     println!("Total frames: {}", stream.total_frames());
+///     println!("channels={} sample_rate={} total_frames={}",
+///         stream.num_channels(), stream.sample_rate(), stream.total_frames());
 ///     stream.seek_to_frame(1000)?;
 ///     Ok(())
 /// }
@@ -603,10 +609,18 @@ where
         id if id == TypeId::of::<u8>() || id == TypeId::of::<i16>() => {
             StreamedWavWriter::new_i16(writer, channels, sample_rate)
         }
-        id if id == TypeId::of::<I24>() => StreamedWavWriter::new_i24(writer, channels, sample_rate),
-        id if id == TypeId::of::<i32>() => StreamedWavWriter::new_i32(writer, channels, sample_rate),
-        id if id == TypeId::of::<f32>() => StreamedWavWriter::new_f32(writer, channels, sample_rate),
-        id if id == TypeId::of::<f64>() => StreamedWavWriter::new_f64(writer, channels, sample_rate),
+        id if id == TypeId::of::<I24>() => {
+            StreamedWavWriter::new_i24(writer, channels, sample_rate)
+        }
+        id if id == TypeId::of::<i32>() => {
+            StreamedWavWriter::new_i32(writer, channels, sample_rate)
+        }
+        id if id == TypeId::of::<f32>() => {
+            StreamedWavWriter::new_f32(writer, channels, sample_rate)
+        }
+        id if id == TypeId::of::<f64>() => {
+            StreamedWavWriter::new_f64(writer, channels, sample_rate)
+        }
         _ => Err(AudioIOError::unsupported_format(format!(
             "No WAV encoding for sample type (TypeId: {type_id:?})"
         ))),
@@ -680,7 +694,11 @@ where
 /// write_with_options("long.wav", &audio, WriteOptions { write_buf_capacity: 16 * 1024 * 1024 })?;
 /// # Ok::<(), audio_samples_io::error::AudioIOError>(())
 /// ```
-pub fn write_with_options<P, T>(fp: P, audio: &AudioSamples<T>, opts: WriteOptions) -> AudioIOResult<()>
+pub fn write_with_options<P, T>(
+    fp: P,
+    audio: &AudioSamples<T>,
+    opts: WriteOptions,
+) -> AudioIOResult<()>
 where
     P: AsRef<Path>,
     T: StandardSample + 'static,

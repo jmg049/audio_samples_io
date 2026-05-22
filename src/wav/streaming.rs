@@ -395,6 +395,12 @@ where
         self.block_align as usize
     }
 
+    /// Get the number of channels.
+    #[inline]
+    pub const fn num_channels(&self) -> u16 {
+        self.channels
+    }
+
     /// Seek to a specific frame position.
     ///
     /// # Arguments
@@ -729,6 +735,11 @@ where
     #[inline]
     fn bytes_per_frame(&self) -> usize {
         self.block_align as usize
+    }
+
+    #[inline]
+    fn num_channels(&self) -> u16 {
+        self.channels
     }
 
     fn seek_to_frame(&mut self, frame: usize) -> AudioIOResult<()> {

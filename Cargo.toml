@@ -14,27 +14,28 @@ categories = ["encoding", "multimedia", "science"]
 exclude = ["/examples/*", "/tests/*", "/target/*", "/benches/*", "*.wav", "*.flac"]
 
 [dependencies]
-audio_samples = { version = "1.0.6", default-features = false, features = ["editing", "random-generation", "resampling"]}
+audio_samples = { version = "1.0.9" }
 colored = { version = "3.0.0", optional = true }
 memmap2 = "0.9.10"
 thiserror = "2.0.18"
 bytemuck = "1.25.0"
 ndarray = "0.17.2"
 chrono = { version = "0.4.44", features = ["serde"], optional = true }
-sysinfo = { version = "0.38.4", optional = true }
+sysinfo = { version = "0.39.2", optional = true }
 serde = { version = "1.0.228", features = ["derive"], optional = true }
-serde_json = { version = "1.0.149", optional = true }
+serde_json = { version = "1.0.15", optional = true }
 walkdir = { version = "2.5.0", optional = true }
 numpy = { version = "0.28", optional = true }
 pyo3 = { version = "0.28.3", optional = true, default-features = false }
-non-empty-slice = "0.5.1"
-non-empty-iter = "0.2.0"
+non-empty-slice = "0.6.1"
+non-empty-iter = "0.3.1"
 rayon = { version = "1", optional = true }
 
 [dev-dependencies]
+audio_samples = { version = "1.0.10", features = ["editing", "resampling"] }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 hound = "3.5.0"
-symphonia = { version = "0.5", default-features = false, features = ["flac"] }
+symphonia = { version = "0.6", default-features = false, features = ["flac"] }
 
 [features]
 default = ["wav"]
@@ -54,7 +55,7 @@ numpy = ["dep:numpy", "dep:pyo3"]
 
 wav = []
 flac = []
-
+resampling = ["audio_samples/resampling"]
 [[bench]]
 name = "wav_rw"
 harness = false

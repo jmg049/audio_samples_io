@@ -11,10 +11,7 @@ use std::{
     time::Duration,
 };
 
-use audio_samples::{
-    AudioSamples, ConvertFrom, ConvertTo, I24,
-    traits::StandardSample,
-};
+use audio_samples::{AudioSamples, ConvertFrom, ConvertTo, I24, traits::StandardSample};
 use non_empty_slice::NonEmptyVec;
 
 use crate::{
@@ -94,6 +91,12 @@ impl<R: ReadSeek> StreamedFlacFile<R> {
         Self::new_with_path(reader, PathBuf::from("<stream>"))
     }
 
+    /// Get the number of channels in the stream.
+    #[inline]
+    pub const fn num_channels(&self) -> u16 {
+        self.stream_info.channels as u16
+    }
+
     /// Create a new streaming FLAC reader with an associated path.
     pub fn new_with_path(mut reader: R, file_path: PathBuf) -> AudioIOResult<Self> {
         // Read and validate the 4-byte FLAC marker.
@@ -126,8 +129,7 @@ impl<R: ReadSeek> StreamedFlacFile<R> {
 
             is_last = (header[0] & 0x80) != 0;
             let block_type_byte = header[0] & 0x7F;
-            let block_size =
-                u32::from_be_bytes([0, header[1], header[2], header[3]]) as usize;
+            let block_size = u32::from_be_bytes([0, header[1], header[2], header[3]]) as usize;
 
             let block_type = MetadataBlockType::from_byte(block_type_byte);
 
@@ -145,8 +147,7 @@ impl<R: ReadSeek> StreamedFlacFile<R> {
 
             // Parse STREAMINFO (block type 0).
             if block_type == MetadataBlockType::StreamInfo {
-                stream_info =
-                    Some(StreamInfo::from_bytes(&body).map_err(AudioIOError::FlacError)?);
+                stream_info = Some(StreamInfo::from_bytes(&body).map_err(AudioIOError::FlacError)?);
             }
         }
 
@@ -340,10 +341,7 @@ impl<R: ReadSeek> AudioFileMetadata for StreamedFlacFile<R> {
         let bytes_per_sample = bits_per_sample.div_ceil(8);
         let block_align = channels * bytes_per_sample;
         let sample_rate = NonZeroU32::new(si.sample_rate).ok_or_else(|| {
-            AudioIOError::corrupted_data_simple(
-                "Invalid sample rate",
-                "sample rate cannot be zero",
-            )
+            AudioIOError::corrupted_data_simple("Invalid sample rate", "sample rate cannot be zero")
         })?;
         let byte_rate = sample_rate.get() * block_align as u32;
 
@@ -431,8 +429,12 @@ impl<R: ReadSeek> AudioStreamReader for StreamedFlacFile<R> {
     /// Nominal uncompressed bytes per inter-channel sample (frame).
     #[inline]
     fn bytes_per_frame(&self) -> usize {
-        self.stream_info.channels as usize
-            * self.stream_info.bits_per_sample.div_ceil(8) as usize
+        self.stream_info.channels as usize * self.stream_info.bits_per_sample.div_ceil(8) as usize
+    }
+
+    #[inline]
+    fn num_channels(&self) -> u16 {
+        self.stream_info.channels as u16
     }
 
     fn seek_to_frame(&mut self, frame: usize) -> AudioIOResult<()> {
@@ -533,9 +535,9 @@ impl<R: ReadSeek> AudioStreamRead for StreamedFlacFile<R> {
                 let take = available.min(frames_to_read - filled);
                 let start = self.pending_start;
                 let end = start + take;
-                for ch in 0..num_channels {
-                    for &s in &self.pending[ch][start..end] {
-                        out[ch].push(convert(s));
+                for (pending_ch, out_ch) in self.pending.iter().zip(out.iter_mut()) {
+                    for &s in &pending_ch[start..end] {
+                        out_ch.push(convert(s));
                     }
                 }
                 self.pending_start += take;
@@ -589,7 +591,10 @@ mod tests {
         StreamedFlacFile::new(file).expect("open StreamedFlacFile")
     }
 
-    fn make_buf(s: &StreamedFlacFile<BufReader<File>>, frames: usize) -> AudioSamples<'static, f32> {
+    fn make_buf(
+        s: &StreamedFlacFile<BufReader<File>>,
+        frames: usize,
+    ) -> AudioSamples<'static, f32> {
         let sr = NonZeroU32::new(s.sample_rate()).unwrap();
         if s.num_channels() == 1 {
             AudioSamples::<f32>::zeros_mono(NonZeroUsize::new(frames).unwrap(), sr)
@@ -674,14 +679,13 @@ mod tests {
 
     #[test]
     fn test_streamed_flac_matches_bulk_read() {
-        use audio_samples::AudioTypeConversion;
-        use crate::flac::{FlacFile, write_flac, CompressionLevel};
+        use crate::flac::{CompressionLevel, FlacFile, write_flac};
         use crate::traits::{AudioFile, AudioFileRead};
+        use audio_samples::AudioTypeConversion;
         use std::io::BufWriter;
 
         let sr = sample_rate!(44100);
-        let sine = sine_wave::<f32>(440.0, Duration::from_millis(200), sr, 0.5)
-            .to_format::<i16>();
+        let sine = sine_wave::<f32>(440.0, Duration::from_millis(200), sr, 0.5).to_format::<i16>();
 
         // Write a test FLAC to a temp file
         let path = std::env::temp_dir().join("streamed_flac_cmp.flac");
@@ -691,7 +695,8 @@ mod tests {
         }
 
         // Bulk read via FlacFile
-        let flac = FlacFile::open_with_options(&path, crate::types::OpenOptions::default()).unwrap();
+        let flac =
+            FlacFile::open_with_options(&path, crate::types::OpenOptions::default()).unwrap();
         let bulk = flac.read::<i16>().unwrap();
 
         // Streaming read via StreamedFlacFile (sine_wave is mono)
@@ -703,7 +708,9 @@ mod tests {
         let mut frames_read = 0usize;
 
         while streamed.remaining_frames() > 0 {
-            let n = streamed.read_frames_into(&mut buf, nzu!(1024)).expect("read");
+            let n = streamed
+                .read_frames_into(&mut buf, nzu!(1024))
+                .expect("read");
             if n == 0 {
                 break;
             }
@@ -711,7 +718,8 @@ mod tests {
         }
 
         assert_eq!(
-            bulk.samples_per_channel().get(), frames_read,
+            bulk.samples_per_channel().get(),
+            frames_read,
             "streamed and bulk should read the same number of frames"
         );
 

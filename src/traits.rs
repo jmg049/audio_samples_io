@@ -161,6 +161,9 @@ pub trait AudioStreamReader {
     /// Get the number of bytes per frame (block align).
     fn bytes_per_frame(&self) -> usize;
 
+    /// Get the number of channels in the stream.
+    fn num_channels(&self) -> u16;
+
     /// Seek to a specific frame position.
     ///
     /// # Arguments
