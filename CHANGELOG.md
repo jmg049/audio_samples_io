@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 - Streaming: `AudioStreamReader` now exposes `num_channels()`, allowing `Box<dyn AudioStreamReader>` callers to allocate read buffers without a separate `info()` call (eliminating the probe → drop → reopen two-pass latency)
 
 ### Added
+- FLAC: streaming writer (`create_streamed_flac`/`create_streamed_flac_writer`) for incremental, low-memory encoding, plus a format-agnostic `StreamedAudioWriter` so `create_streamed` selects WAV or FLAC by file extension (`create_streamed_with` for an explicit format)
 - WAV: decode mu-law/a-law (G.711) and Microsoft/IMA ADPCM to 16-bit linear PCM; reader also accepts 18-byte PCM `fmt ` headers
 - WAV: write LIST/INFO tags and cue markers via `WavMetadata` and `write_with_metadata`/`write_with_metadata_to`
 - WAV: `WavSink` — a non-seekable streaming writer (`create_streamed_sink`) for stdout, pipes, and sockets that needs only `Write`, not `Seek`

@@ -92,7 +92,6 @@ fn i16_data(samples: &[i16]) -> Vec<u8> {
     samples.iter().flat_map(|s| s.to_le_bytes()).collect()
 }
 
-
 #[test]
 fn streaming_max_size_fields_are_clamped() {
     // ffmpeg/live-capture writes 0xFFFFFFFF when the final length is unknown.

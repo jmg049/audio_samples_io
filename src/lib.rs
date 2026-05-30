@@ -51,7 +51,12 @@ pub use crate::wav::{
 pub mod flac;
 
 #[cfg(feature = "flac")]
-pub use crate::flac::{CompressionLevel, StreamedFlacFile};
+pub use crate::flac::{CompressionLevel, StreamedFlacFile, StreamedFlacWriter};
+
+#[cfg(any(feature = "wav", feature = "flac"))]
+pub mod streaming;
+#[cfg(any(feature = "wav", feature = "flac"))]
+pub use crate::streaming::StreamedAudioWriter;
 
 #[cfg(feature = "numpy")]
 pub mod python;
@@ -466,7 +471,10 @@ where
     }
 }
 
-/// Create a streaming WAV writer to a file path.
+/// Create a streaming writer to a file path, choosing WAV or FLAC from the extension.
+///
+/// Returns a format-agnostic [`StreamedAudioWriter`]; for the concrete per-format writer
+/// use [`create_streamed_writer`] (WAV) or [`create_streamed_flac`] (FLAC).
 ///
 /// The sample type is inferred from the generic parameter `T`. Use the turbofish
 /// syntax when the type cannot be inferred: `create_streamed::<f32>(...)`.
@@ -486,34 +494,29 @@ where
 /// writer.finalize()?;
 /// # Ok::<(), audio_samples_io::error::AudioIOError>(())
 /// ```
-#[cfg(feature = "wav")]
+#[cfg(any(feature = "wav", feature = "flac"))]
 pub fn create_streamed<P, T>(
     fp: P,
     channels: u16,
     sample_rate: u32,
-) -> AudioIOResult<StreamedWavWriter<BufWriter<File>>>
+) -> AudioIOResult<StreamedAudioWriter<BufWriter<File>>>
 where
     P: AsRef<Path>,
     T: StandardSample + 'static,
 {
     let path = fp.as_ref();
-    match FileType::from_path(path) {
-        FileType::WAV => {
-            let file = File::create(path)?;
-            // 256 KiB: buffers ~8 typical streaming chunks (4096-frame stereo f32 = 32 KiB)
-            // before issuing a write syscall, reducing syscall count ~8× vs the 8 KiB default.
-            let writer = BufWriter::with_capacity(256 * 1024, file);
-            wav_writer_for_type::<T, _>(writer, channels, sample_rate)
-        }
-        other => Err(crate::error::AudioIOError::unsupported_format(format!(
-            "Unsupported output format for streaming write: {other:?}"
-        ))),
-    }
+    let format = FileType::from_path(path);
+    let file = File::create(path)?;
+    // 256 KiB: buffers ~8 typical streaming chunks (4096-frame stereo f32 = 32 KiB)
+    // before issuing a write syscall, reducing syscall count ~8× vs the 8 KiB default.
+    let writer = BufWriter::with_capacity(256 * 1024, file);
+    create_streamed_with::<_, T>(writer, channels, sample_rate, format)
 }
 
-/// Create a streaming WAV writer to a file path with explicit [`WriteOptions`].
+/// Create a streaming writer to a file path with explicit [`WriteOptions`].
 ///
-/// Identical to [`create_streamed`] but lets you control the write-buffer size.
+/// Identical to [`create_streamed`] (format chosen by extension) but lets you control the
+/// write-buffer size.
 ///
 /// # Example
 ///
@@ -532,54 +535,185 @@ where
 /// writer.finalize()?;
 /// # Ok::<(), audio_samples_io::error::AudioIOError>(())
 /// ```
-#[cfg(feature = "wav")]
+#[cfg(any(feature = "wav", feature = "flac"))]
 pub fn create_streamed_with_options<P, T>(
     fp: P,
     channels: u16,
     sample_rate: u32,
     opts: WriteOptions,
-) -> AudioIOResult<StreamedWavWriter<BufWriter<File>>>
+) -> AudioIOResult<StreamedAudioWriter<BufWriter<File>>>
+where
+    P: AsRef<Path>,
+    T: StandardSample + 'static,
+{
+    let path = fp.as_ref();
+    let format = FileType::from_path(path);
+    let file = File::create(path)?;
+    let writer = BufWriter::with_capacity(opts.write_buf_capacity, file);
+    create_streamed_with::<_, T>(writer, channels, sample_rate, format)
+}
+
+/// Create a streaming writer to any [`WriteSeek`] destination with an explicit format.
+///
+/// The format-agnostic, bring-your-own-writer counterpart of [`write_with`]: returns a
+/// [`StreamedAudioWriter`] that encodes as WAV or FLAC according to `format`. The output
+/// sample type / bit depth is derived from `T`.
+///
+/// ```no_run
+/// use audio_samples_io::{create_streamed_with, types::FileType};
+/// use audio_samples_io::traits::{AudioStreamWrite, AudioStreamWriter};
+/// use audio_samples::{AudioSamples, nzu, sample_rate};
+/// use std::io::Cursor;
+///
+/// let mut buf = Vec::new();
+/// let mut writer = create_streamed_with::<_, i16>(Cursor::new(&mut buf), 1, 44100, FileType::FLAC)?;
+/// writer.write_frames(&AudioSamples::<i16>::zeros_mono(nzu!(1024), sample_rate!(44100)))?;
+/// writer.finalize()?;
+/// # Ok::<(), audio_samples_io::error::AudioIOError>(())
+/// ```
+#[cfg(any(feature = "wav", feature = "flac"))]
+pub fn create_streamed_with<W, T>(
+    writer: W,
+    channels: u16,
+    sample_rate: u32,
+    format: FileType,
+) -> AudioIOResult<StreamedAudioWriter<W>>
+where
+    W: WriteSeek,
+    T: StandardSample + 'static,
+{
+    match format {
+        FileType::WAV => {
+            #[cfg(not(feature = "wav"))]
+            {
+                let _ = (writer, channels, sample_rate);
+                Err(AudioIOError::missing_feature(
+                    "'wav' feature must be enabled for WAV streaming writes",
+                ))
+            }
+            #[cfg(feature = "wav")]
+            {
+                Ok(StreamedAudioWriter::Wav(wav_writer_for_type::<T, W>(
+                    writer,
+                    channels,
+                    sample_rate,
+                )?))
+            }
+        }
+        FileType::FLAC => {
+            #[cfg(not(feature = "flac"))]
+            {
+                let _ = (writer, channels, sample_rate);
+                Err(AudioIOError::missing_feature(
+                    "'flac' feature must be enabled for FLAC streaming writes",
+                ))
+            }
+            #[cfg(feature = "flac")]
+            {
+                Ok(StreamedAudioWriter::Flac(flac_writer_for_type::<T, W>(
+                    writer,
+                    channels,
+                    sample_rate,
+                )?))
+            }
+        }
+        other => Err(AudioIOError::unsupported_format(format!(
+            "Unsupported output format for streaming write: {other:?}"
+        ))),
+    }
+}
+
+/// Create a streaming FLAC writer to a file path.
+///
+/// FLAC is a block-based codec, so this writer buffers each block and encodes it
+/// incrementally as frames are written, using the same encoder as the bulk [`write`]
+/// path. The STREAMINFO header's total sample count is back-patched on
+/// [`finalize`](crate::traits::AudioStreamWriter::finalize), which is why a seekable
+/// destination is required. The output bit depth is derived from `T` (16-bit for `i16`,
+/// 24-bit otherwise), matching [`write`].
+///
+/// FLAC's concrete return type can't be folded into [`create_streamed`] (which is
+/// WAV-only); this mirrors the [`open_streamed`]/[`open_streamed_flac`] split.
+///
+/// # Example
+///
+/// ```no_run
+/// use audio_samples_io::create_streamed_flac;
+/// use audio_samples_io::traits::{AudioStreamWrite, AudioStreamWriter};
+/// use audio_samples::{AudioSamples, channels, nzu, sample_rate};
+///
+/// let mut writer = create_streamed_flac::<_, i16>("output.flac", 2, 44100)?;
+///
+/// let chunk = AudioSamples::<i16>::zeros_multi(channels!(2), nzu!(4096), sample_rate!(44100));
+/// writer.write_frames(&chunk)?;
+/// writer.finalize()?;
+/// # Ok::<(), audio_samples_io::error::AudioIOError>(())
+/// ```
+#[cfg(feature = "flac")]
+pub fn create_streamed_flac<P, T>(
+    fp: P,
+    channels: u16,
+    sample_rate: u32,
+) -> AudioIOResult<StreamedFlacWriter<BufWriter<File>>>
 where
     P: AsRef<Path>,
     T: StandardSample + 'static,
 {
     let path = fp.as_ref();
     match FileType::from_path(path) {
-        FileType::WAV => {
+        FileType::FLAC => {
             let file = File::create(path)?;
-            let writer = BufWriter::with_capacity(opts.write_buf_capacity, file);
-            wav_writer_for_type::<T, _>(writer, channels, sample_rate)
+            let writer = BufWriter::with_capacity(256 * 1024, file);
+            flac_writer_for_type::<T, _>(writer, channels, sample_rate)
         }
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
-            "Unsupported output format for streaming write: {other:?}"
+            "Unsupported output format for streaming FLAC write: {other:?}"
         ))),
     }
+}
+
+/// Create a streaming FLAC writer to any [`WriteSeek`] destination (e.g. an in-memory
+/// cursor). See [`create_streamed_flac`] for behaviour and bit-depth rules.
+#[cfg(feature = "flac")]
+pub fn create_streamed_flac_writer<W, T>(
+    writer: W,
+    channels: u16,
+    sample_rate: u32,
+) -> AudioIOResult<StreamedFlacWriter<W>>
+where
+    W: WriteSeek,
+    T: StandardSample + 'static,
+{
+    flac_writer_for_type::<T, W>(writer, channels, sample_rate)
+}
+
+/// Construct a [`StreamedFlacWriter`] for sample type `T` at the default compression level.
+///
+/// Shared by [`create_streamed_flac`] and [`create_streamed_flac_writer`].
+#[cfg(feature = "flac")]
+fn flac_writer_for_type<T, W>(
+    writer: W,
+    channels: u16,
+    sample_rate: u32,
+) -> AudioIOResult<StreamedFlacWriter<W>>
+where
+    T: StandardSample + 'static,
+    W: WriteSeek,
+{
+    let sample_type = validated_sample_type_of::<T>()?;
+    StreamedFlacWriter::new(
+        writer,
+        channels,
+        sample_rate,
+        sample_type,
+        CompressionLevel::default(),
+    )
 }
 
 /// Create a streaming WAV writer to any `WriteSeek` destination.
 ///
 /// The sample type is inferred from the generic parameter `T`. Allows streaming to
 /// in-memory buffers, network streams, or any custom `WriteSeek` implementation.
-///
-/// # Example
-///
-/// ```no_run
-/// use audio_samples_io::create_streamed_writer;
-/// use audio_samples_io::traits::{AudioStreamWrite, AudioStreamWriter};
-/// use audio_samples::{AudioSamples, nzu, sample_rate};
-/// use std::io::Cursor;
-///
-/// let mut buffer = Vec::new();
-/// let cursor = Cursor::new(&mut buffer);
-///
-/// let mut writer = create_streamed_writer::<_, i16>(cursor, 1, 22050)?;
-///
-/// let sr = sample_rate!(22050);
-/// let audio = AudioSamples::<f32>::zeros_mono(nzu!(1024), sr);
-/// writer.write_frames(&audio)?;
-/// writer.finalize()?;
-/// # Ok::<(), audio_samples_io::error::AudioIOError>(())
-/// ```
 #[cfg(feature = "wav")]
 pub fn create_streamed_writer<W, T>(
     writer: W,
@@ -630,8 +764,8 @@ where
     }
 }
 
-/// Map a Rust sample type to its WAV [`ValidatedSampleType`].
-#[cfg(feature = "wav")]
+/// Map a Rust sample type to its [`ValidatedSampleType`].
+#[cfg(any(feature = "wav", feature = "flac"))]
 fn validated_sample_type_of<T>() -> AudioIOResult<ValidatedSampleType>
 where
     T: StandardSample + 'static,

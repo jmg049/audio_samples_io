@@ -596,8 +596,6 @@ pub fn write_flac<W: Write, T>(
 where
     T: StandardSample + 'static,
 {
-    use std::any::TypeId;
-
     let sample_rate = audio.sample_rate();
     let num_channels = audio.num_channels().get() as u8;
     let samples_per_channel = audio.samples_per_channel().get();
@@ -643,12 +641,68 @@ where
     writer.write_all(&[streaminfo_bytes.len() as u8])?;
     writer.write_all(&streaminfo_bytes)?;
 
-    // Convert AudioSamples to per-channel i32 vectors.
-    // Uses `as_slice()` for the zero-copy planar path when data is contiguous
-    // (standard ndarray layout). For AudioData::Multi the flat slice is planar:
-    // [ch0[0..N], ch1[0..N], ...], so we split at `samples_per_channel` boundaries.
-    // Falls back to `to_interleaved_vec()` + deinterleave for non-contiguous data.
-    let n_ch = num_channels as usize;
+    // Convert AudioSamples to per-channel i32 vectors at FLAC's target bit depth
+    // (shared with the streaming writer so bulk and streaming encode identically).
+    let channel_samples = audio_to_planar_i32(audio)?;
+
+    // Get compression parameters from level
+    let max_lpc_order = level.max_lpc_order() as usize;
+    let qlp_precision = level.qlp_precision();
+    let (min_partition_order, max_partition_order) = level.rice_partition_order_range();
+    let try_mid_side = level.try_mid_side();
+    let exhaustive_rice = level.exhaustive_rice_search();
+
+    // Encode frames — pass per-channel slices directly, avoiding re-interleave.
+    let mut frame_number = 0u64;
+    let mut sample_offset = 0usize;
+
+    while sample_offset < samples_per_channel {
+        let frame_samples = (samples_per_channel - sample_offset).min(block_size as usize);
+
+        // Build slice references into each channel's data for this frame
+        let ch_slices: Vec<&[i32]> = channel_samples
+            .iter()
+            .map(|ch| &ch[sample_offset..sample_offset + frame_samples])
+            .collect();
+
+        let frame_bytes = encode_frame_from_channels(
+            &ch_slices,
+            bits_per_sample,
+            sample_rate_u32,
+            frame_number,
+            max_lpc_order,
+            qlp_precision,
+            min_partition_order,
+            max_partition_order,
+            try_mid_side,
+            exhaustive_rice,
+        )
+        .map_err(AudioIOError::FlacError)?;
+
+        writer.write_all(&frame_bytes)?;
+
+        frame_number += 1;
+        sample_offset += frame_samples;
+    }
+
+    writer.flush()?;
+    Ok(())
+}
+
+/// Convert an [`AudioSamples`] buffer into per-channel `i32` sample vectors at FLAC's
+/// target bit depth (16-bit for `i16`, 24-bit for every other supported type), applying
+/// the same scaling as [`write_flac`]. Shared with the streaming writer
+/// ([`StreamedFlacWriter`](crate::flac::StreamedFlacWriter)) so bulk and streaming
+/// encoders produce identical samples.
+pub(crate) fn audio_to_planar_i32<T>(audio: &AudioSamples<T>) -> AudioIOResult<Vec<Vec<i32>>>
+where
+    T: StandardSample + 'static,
+{
+    use std::any::TypeId;
+
+    let num_channels = audio.num_channels().get() as usize;
+    let samples_per_channel = audio.samples_per_channel().get();
+    let n_ch = num_channels;
     let mut channel_samples: Vec<Vec<i32>> = (0..n_ch)
         .map(|_| Vec::with_capacity(samples_per_channel))
         .collect();
@@ -748,48 +802,7 @@ where
         ));
     }
 
-    // Get compression parameters from level
-    let max_lpc_order = level.max_lpc_order() as usize;
-    let qlp_precision = level.qlp_precision();
-    let (min_partition_order, max_partition_order) = level.rice_partition_order_range();
-    let try_mid_side = level.try_mid_side();
-    let exhaustive_rice = level.exhaustive_rice_search();
-
-    // Encode frames — pass per-channel slices directly, avoiding re-interleave.
-    let mut frame_number = 0u64;
-    let mut sample_offset = 0usize;
-
-    while sample_offset < samples_per_channel {
-        let frame_samples = (samples_per_channel - sample_offset).min(block_size as usize);
-
-        // Build slice references into each channel's data for this frame
-        let ch_slices: Vec<&[i32]> = channel_samples
-            .iter()
-            .map(|ch| &ch[sample_offset..sample_offset + frame_samples])
-            .collect();
-
-        let frame_bytes = encode_frame_from_channels(
-            &ch_slices,
-            bits_per_sample,
-            sample_rate_u32,
-            frame_number,
-            max_lpc_order,
-            qlp_precision,
-            min_partition_order,
-            max_partition_order,
-            try_mid_side,
-            exhaustive_rice,
-        )
-        .map_err(AudioIOError::FlacError)?;
-
-        writer.write_all(&frame_bytes)?;
-
-        frame_number += 1;
-        sample_offset += frame_samples;
-    }
-
-    writer.flush()?;
-    Ok(())
+    Ok(channel_samples)
 }
 
 impl Display for FlacFile<'_> {
@@ -1596,42 +1609,50 @@ mod tests {
     // =========================================================================
 
     fn symphonia_decode_flac(path: &std::path::Path) -> (u32, u32, usize) {
-        use symphonia::core::{
-            codecs::DecoderOptions, formats::FormatOptions, io::MediaSourceStream,
-            meta::MetadataOptions, probe::Hint,
-        };
+        use symphonia::core::audio::GenericAudioBufferRef;
+        use symphonia::core::codecs::CodecParameters;
+        use symphonia::core::codecs::audio::AudioDecoderOptions;
+        use symphonia::core::formats::probe::Hint;
+        use symphonia::core::formats::{FormatOptions, TrackType};
+        use symphonia::core::io::MediaSourceStream;
+        use symphonia::core::meta::MetadataOptions;
 
         let file = std::fs::File::open(path).expect("open for symphonia");
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
-        let mut hint = Hint::new();
-        hint.with_extension("flac");
+
+        let hint = Hint::new();
+        // symphonia 0.6: `probe()` returns the `FormatReader` directly (no `ProbeResult`),
+        // and takes the options by value.
         let mut format = symphonia::default::get_probe()
-            .format(
+            .probe(
                 &hint,
                 mss,
-                &FormatOptions::default(),
-                &MetadataOptions::default(),
+                FormatOptions::default(),
+                MetadataOptions::default(),
             )
-            .expect("symphonia probe")
-            .format;
-        let track = format.default_track().expect("track");
-        let params = &track.codec_params;
-        let sr = params.sample_rate.unwrap_or(0);
-        let ch = params.channels.map(|c| c.count() as u32).unwrap_or(0);
-        let track_id = track.id;
+            .expect("symphonia probe");
 
+        // symphonia 0.6: `default_track` takes a `TrackType`; codec params are a typed enum.
+        let track = format
+            .default_track(TrackType::Audio)
+            .expect("default audio track")
+            .clone();
+        let audio_params = match track.codec_params.as_ref().expect("codec params") {
+            CodecParameters::Audio(p) => p.clone(),
+            _ => unreachable!("expected audio codec parameters for a FLAC track"),
+        };
+        let sr = audio_params.sample_rate.expect("sample rate");
+        let ch = audio_params.channels.as_ref().expect("channels").count() as u32;
+
+        // symphonia 0.6: media-typed decoder constructor (`make` is gone).
         let mut decoder = symphonia::default::get_codecs()
-            .make(params, &DecoderOptions::default())
+            .make_audio_decoder(&audio_params, &AudioDecoderOptions::default())
             .expect("make decoder");
 
+        // symphonia 0.6: `next_packet()` yields `Option<Packet>` (None = clean EOF).
         let mut total_samples_decoded = 0usize;
-        loop {
-            let packet = match format.next_packet() {
-                Ok(p) if p.track_id() == track_id => p,
-                Ok(_) => continue,
-                Err(_) => break,
-            };
-            let decoded = decoder.decode(&packet).expect("decode packet");
+        while let Ok(Some(packet)) = format.next_packet() {
+            let decoded: GenericAudioBufferRef = decoder.decode(&packet).expect("decode packet");
             total_samples_decoded += decoded.frames();
         }
 

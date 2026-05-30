@@ -45,6 +45,7 @@ mod bitstream;
 mod constants;
 mod flac_file;
 mod streaming;
+mod streaming_writer;
 
 // Re-exports
 pub use error::FlacError;
@@ -53,6 +54,7 @@ pub use metadata::{
     MetadataBlock, MetadataBlockType, SeekPoint, SeekTable, StreamInfo, VorbisComment,
 };
 pub use streaming::StreamedFlacFile;
+pub use streaming_writer::StreamedFlacWriter;
 
 use core::fmt::{Display, Formatter, Result as FmtResult};
 
