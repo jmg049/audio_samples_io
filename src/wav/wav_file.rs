@@ -25,13 +25,13 @@ use crate::{
         AudioDataSource, BaseAudioInfo, FileType, OpenOptions, ValidatedSampleType, WriteOptions,
     },
     wav::{
-        FormatCode,
+        Companding, FormatCode,
         bext::BextChunk,
         chunks::{
             BEXT_CHUNK, CUE_CHUNK, ChunkDesc, ChunkID, DATA_CHUNK, FACT_CHUNK, FMT_CHUNK,
             LIST_CHUNK, RIFF_CHUNK, SMPL_CHUNK, WAVE_CHUNK,
         },
-        cue::CueChunk,
+        cue::{CueChunk, CuePoint, cue_chunk_bytes},
         data::DataChunk,
         error::WavError,
         fact::FactChunk,
@@ -84,6 +84,8 @@ pub struct WavFile<'a> {
     data_range: Range<usize>,
     /// Validated sample type
     sample_type: ValidatedSampleType,
+    /// Companding scheme (mu-law / a-law) when the data is 8-bit companded, else None.
+    companding: Option<Companding>,
     total_samples: usize,
 }
 
@@ -365,23 +367,17 @@ impl<'a> AudioFile for WavFile<'a> {
             ));
         }
 
-        let file_size = u32::from_le_bytes(
+        let declared_file_size = u32::from_le_bytes(
             bytes[4..8]
                 .try_into()
                 .expect("Guaranteed to be at least 12 bytes now"),
-        );
+        ) as usize;
 
-        if file_size as usize + 8 > bytes.len() {
-            return Err(AudioIOError::corrupted_data(
-                "File size in RIFF header does not match actual file size",
-                format!(
-                    "Header size: {}, Actual size: {}",
-                    file_size + 8,
-                    bytes.len()
-                ),
-                ErrorPosition::new(4).with_description("file size field in RIFF header"),
-            ));
-        }
+        // Streaming producers (ffmpeg, live capture) cannot know the final length up front and
+        // write a placeholder RIFF size — commonly 0xFFFFFFFF — that overruns the real byte count.
+        // Such files play fine everywhere else, so we tolerate them: clamp the declared size to the
+        // bytes actually present rather than rejecting the file outright.
+        let file_size = declared_file_size.min(bytes.len().saturating_sub(8));
 
         let wave = ChunkID::new(
             bytes[8..12]
@@ -429,43 +425,33 @@ impl<'a> AudioFile for WavFile<'a> {
                     ErrorPosition::new(offset + 4).with_description("chunk size bytes"),
                 )
             })?;
-            let size = u32::from_le_bytes(size_bytes) as usize;
-            let padded = size.checked_add(size & 1).ok_or_else(|| {
-                AudioIOError::corrupted_data(
-                    "Integer overflow in chunk size calculation",
-                    format!("Chunk size: {size}"),
-                    ErrorPosition::new(offset + 4).with_description("chunk size field"),
-                )
-            })?;
-            let header_and_data_size = 8_usize.checked_add(padded).ok_or_else(|| {
-                AudioIOError::corrupted_data(
-                    "Integer overflow in chunk total size calculation",
-                    format!("Header size: 8, Data size: {padded}"),
-                    ErrorPosition::new(offset).with_description("chunk header"),
-                )
-            })?;
-            let end = offset.checked_add(header_and_data_size).ok_or_else(|| {
-                AudioIOError::corrupted_data(
-                    "Integer overflow in chunk end position calculation",
-                    format!("Offset: {offset}, Size: {header_and_data_size}"),
-                    ErrorPosition::new(offset).with_description("chunk position"),
-                )
-            })?;
+            let declared_size = u32::from_le_bytes(size_bytes) as usize;
 
-            if end > bytes.len() {
-                return Err(AudioIOError::corrupted_data(
-                    "Chunk extends beyond end of file",
-                    format!("Chunk {id:?} at offset {offset}"),
-                    ErrorPosition::new(offset).with_description(format!("chunk {id:?}")),
-                ));
-            }
+            // Bytes physically available for this chunk's body (after its 8-byte header).
+            let avail = bytes.len() - (offset + 8);
+
+            // Tolerate over-declared chunk sizes the same way we tolerate over-declared RIFF
+            // sizes: a `data` chunk written by a streaming encoder often carries 0xFFFFFFFF (or
+            // any value larger than what was ultimately produced).  Clamp to the bytes actually
+            // present and treat such a chunk as the final one in the file.
+            let size = declared_size.min(avail);
+            let was_clamped = size < declared_size;
+
+            let padded = size + (size & 1); // RIFF chunks are word-aligned; size + size&1 <= avail+1
+            // The trailing pad byte may itself run one past EOF on an unpadded final chunk; cap it.
+            let end = (offset + 8 + padded).min(bytes.len());
 
             chunks.push(ChunkDesc {
                 id,
                 offset,
-                logical_size: size, // Original chunk size without padding
-                total_size: header_and_data_size, // Header + data + padding for file positioning
+                logical_size: size,       // Original chunk size without padding
+                total_size: end - offset, // Header + data + padding for file positioning
             });
+
+            if was_clamped {
+                // Declared size overran the file: there is nothing valid after this chunk.
+                break;
+            }
 
             offset = end;
         }
@@ -474,14 +460,16 @@ impl<'a> AudioFile for WavFile<'a> {
         let fmt_chunk_desc = chunks.iter().find(|c| c.id == FMT_CHUNK);
         let data_chunk_desc = chunks.iter().find(|c| c.id == DATA_CHUNK);
 
-        let (fmt_range, sample_type) = match fmt_chunk_desc {
+        let (fmt_range, sample_type, companding, is_adpcm) = match fmt_chunk_desc {
             Some(fmt_chunk) => {
                 let start = fmt_chunk.offset + 8; // skip 8-byte header
                 let end = start + fmt_chunk.logical_size; // exclude padding if any
                 let fmt_chunk = FmtChunk::from_bytes_validated(&bytes[start..end])
                     .map_err(AudioIOError::WavError)?;
                 let sample_type = fmt_chunk.actual_sample_type()?;
-                (start..end, sample_type)
+                let companding = fmt_chunk.companding();
+                let is_adpcm = fmt_chunk.format_code().is_adpcm();
+                (start..end, sample_type, companding, is_adpcm)
             }
             None => {
                 return Err(AudioIOError::corrupted_data(
@@ -515,7 +503,17 @@ impl<'a> AudioFile for WavFile<'a> {
 
         let total_samples = {
             let data_chunk = DataChunk::from_bytes(&bytes[data_range.clone()]);
-            data_chunk.total_samples(sample_type)
+            if is_adpcm {
+                // ADPCM expands a variable number of samples per block.
+                let fmt_chunk = FmtChunk::from_bytes(&bytes[fmt_range.clone()])
+                    .expect("fmt chunk validated during open");
+                crate::wav::adpcm::decoded_sample_count(&fmt_chunk, data_chunk.len())
+            } else if companding.is_some() {
+                // Companded data is one byte per (decoded) sample.
+                data_chunk.len()
+            } else {
+                data_chunk.total_samples(sample_type)
+            }
         };
 
         let wav_file = WavFile {
@@ -525,6 +523,7 @@ impl<'a> AudioFile for WavFile<'a> {
             fmt_range,
             data_range,
             sample_type,
+            companding,
             total_samples,
         };
 
@@ -608,8 +607,14 @@ pub fn parse_wav_header_streaming<R: Read + Seek>(
             have_fmt = true;
         } else if id == b"data" {
             // Current stream position is now at the first byte of audio data.
-            data_byte_offset = Some(reader.stream_position().map_err(AudioIOError::from)?);
-            data_byte_count = Some(size);
+            let offset = reader.stream_position().map_err(AudioIOError::from)?;
+            // Streaming encoders write a placeholder data size (often 0xFFFFFFFF) when the final
+            // length is unknown. Clamp the declared size to the bytes actually present so the
+            // reported sample count stays accurate instead of astronomically large.
+            let stream_end = reader.seek(SeekFrom::End(0)).map_err(AudioIOError::from)?;
+            let avail = stream_end.saturating_sub(offset) as usize;
+            data_byte_offset = Some(offset);
+            data_byte_count = Some(size.min(avail));
             break; // we have everything we need
         } else {
             // Skip this chunk (including any padding byte).
@@ -696,6 +701,16 @@ impl<'a> AudioFileRead<'a> for WavFile<'a> {
             NonZeroU32::new_unchecked(num_channels) // WAV spec requires channels > 0
         };
 
+        // ADPCM blocks are decoded to 16-bit linear PCM before conversion.
+        if fmt_chunk.format_code().is_adpcm() {
+            return read_adpcm::<T>(&fmt_chunk, &data_chunk, num_channels, sample_rate);
+        }
+
+        // Companded (mu-law / a-law) data is expanded to 16-bit linear PCM before conversion.
+        if let Some(comp) = self.companding {
+            return read_companded::<T>(&data_chunk, comp, num_channels, sample_rate);
+        }
+
         match sample_type {
             ValidatedSampleType::U8 => {
                 read_typed_internal::<u8, T>(&data_chunk, num_channels, sample_rate)
@@ -723,6 +738,14 @@ impl<'a> AudioFileRead<'a> for WavFile<'a> {
         T: StandardSample + 'static,
     {
         let data_chunk = self.data();
+
+        if self.fmt_chunk().format_code().is_adpcm() {
+            return read_adpcm_into::<T>(&self.fmt_chunk(), &data_chunk, audio);
+        }
+
+        if let Some(comp) = self.companding {
+            return read_companded_into::<T>(&data_chunk, comp, audio);
+        }
 
         match self.sample_type {
             ValidatedSampleType::U8 => read_into_typed_internal::<u8, T>(&data_chunk, audio), // technicaly not part of the wav spec, but it does not disallow it either, so we support it
@@ -788,34 +811,15 @@ where
     T: StandardSample + ConvertFrom<S> + 'static,
 {
     let bytes_per_sample = S::BITS as usize / 8;
-    if !data_chunk.len().is_multiple_of(bytes_per_sample) {
-        return Err(AudioIOError::corrupted_data_simple(
-            "Data chunk size not aligned to sample size",
-            format!(
-                "Data chunk size {} not divisible by sample size {}",
-                data_chunk.len(),
-                bytes_per_sample
-            ),
-        ));
-    }
+    let num_channels = audio.num_channels();
+    let frame_bytes = bytes_per_sample * num_channels.get() as usize;
+
+    // Decode only whole frames: a trailing partial frame (ragged data chunk, odd trailing byte,
+    // or a clamped streaming size) is dropped rather than rejected, matching ffmpeg/VLC behaviour.
+    let usable = (data_chunk.len() / frame_bytes) * frame_bytes;
+    let data_chunk = DataChunk::from_bytes(&data_chunk.as_bytes()[..usable]);
 
     let converted = data_chunk.read_samples::<S, T>()?;
-    let num_channels = audio.num_channels();
-
-    if !converted
-        .len()
-        .get()
-        .is_multiple_of(num_channels.get() as usize)
-    {
-        return Err(AudioIOError::corrupted_data_simple(
-            "Channel alignment error",
-            format!(
-                "Sample count {} not divisible by channel count {}",
-                converted.len(),
-                num_channels,
-            ),
-        ));
-    }
 
     if converted.len() != audio.total_samples() {
         return Err(AudioIOError::corrupted_data_simple(
@@ -852,36 +856,165 @@ where
     S: StandardSample + 'static,
     T: StandardSample + ConvertFrom<S> + 'static,
 {
-    let bytes_per_sample = S::BYTES as usize;
-    if !data_chunk.len().is_multiple_of(bytes_per_sample) {
-        return Err(AudioIOError::corrupted_data_simple(
-            "Data chunk size not aligned to sample size",
-            format!(
-                "Data chunk size {} not divisible by sample size {}",
-                data_chunk.len(),
-                bytes_per_sample
-            ),
-        ));
-    }
+    let bytes_per_sample = S::BITS as usize / 8;
+    let frame_bytes = bytes_per_sample * num_channels.get() as usize;
+
+    // Decode only whole frames; drop a ragged trailing partial frame rather than rejecting the
+    // file, matching ffmpeg/VLC.
+    let usable = (data_chunk.len() / frame_bytes) * frame_bytes;
+    let data_chunk = DataChunk::from_bytes(&data_chunk.as_bytes()[..usable]);
 
     let converted = data_chunk.read_samples::<S, T>()?;
 
-    if !converted
-        .len()
-        .get()
-        .is_multiple_of(num_channels.get() as usize)
-    {
+    build_samples_from_interleaved_vec(converted, num_channels, sample_rate)
+}
+
+/// Decode 8-bit companded (mu-law / a-law) data to linear PCM and build an `AudioSamples<T>`.
+///
+/// Each byte expands to one 16-bit linear sample which is then converted to `T`. Only whole
+/// frames are decoded; a ragged trailing partial frame is dropped.
+fn read_companded<'a, T>(
+    data_chunk: &DataChunk<'a>,
+    companding: Companding,
+    num_channels: NonZeroU32,
+    sample_rate: NonZeroU32,
+) -> AudioIOResult<AudioSamples<'a, T>>
+where
+    T: StandardSample + ConvertFrom<i16> + 'static,
+{
+    let decoded = decode_companded::<T>(data_chunk, companding, num_channels)?;
+    build_samples_from_interleaved_vec(decoded, num_channels, sample_rate)
+}
+
+/// `read_companded` for the `read_into` path: decode into an existing buffer.
+fn read_companded_into<'a, T>(
+    data_chunk: &DataChunk<'a>,
+    companding: Companding,
+    audio: &mut AudioSamples<'a, T>,
+) -> AudioIOResult<()>
+where
+    T: StandardSample + ConvertFrom<i16> + 'static,
+{
+    let num_channels = audio.num_channels();
+    let decoded = decode_companded::<T>(data_chunk, companding, num_channels)?;
+
+    if decoded.len() != audio.total_samples() {
         return Err(AudioIOError::corrupted_data_simple(
-            "Channel alignment error",
+            "Sample count mismatch",
             format!(
-                "Sample count {} not divisible by channel count {}",
-                converted.len(),
-                num_channels,
+                "Decoded sample count {} does not match target audio sample count {}",
+                decoded.len(),
+                audio.total_samples(),
             ),
         ));
     }
 
-    build_samples_from_interleaved_vec(converted, num_channels, sample_rate)
+    if audio.is_mono() {
+        audio.replace_with_vec(&decoded).map_err(|e| e.into())
+    } else {
+        let planar_data =
+            audio_samples::simd_conversions::deinterleave_multi_vec(&decoded, num_channels)
+                .map_err(|e| {
+                    AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string())
+                })?;
+        audio.replace_with_vec(&planar_data).map_err(|e| e.into())
+    }
+}
+
+/// Shared mu-law/a-law expansion: one companded byte → one `T` sample, whole frames only.
+fn decode_companded<T>(
+    data_chunk: &DataChunk<'_>,
+    companding: Companding,
+    num_channels: NonZeroU32,
+) -> AudioIOResult<NonEmptyVec<T>>
+where
+    T: StandardSample + ConvertFrom<i16> + 'static,
+{
+    let bytes = data_chunk.as_bytes();
+    let channels = num_channels.get() as usize;
+    // Companded data is one byte per sample; keep only whole frames.
+    let usable = (bytes.len() / channels) * channels;
+    if usable == 0 {
+        return Err(AudioIOError::corrupted_data_simple(
+            "No frames in companded audio data",
+            format!("{} bytes, {channels} channels", bytes.len()),
+        ));
+    }
+    let decoded: Vec<T> = bytes[..usable]
+        .iter()
+        .map(|&b| T::convert_from(companding.decode(b)))
+        .collect();
+    // SAFETY: usable > 0 guarantees at least one decoded sample.
+    Ok(unsafe { NonEmptyVec::new_unchecked(decoded) })
+}
+
+/// Decode an ADPCM `data` chunk to linear PCM and build an `AudioSamples<T>`.
+fn read_adpcm<'a, T>(
+    fmt_chunk: &FmtChunk<'_>,
+    data_chunk: &DataChunk<'a>,
+    num_channels: NonZeroU32,
+    sample_rate: NonZeroU32,
+) -> AudioIOResult<AudioSamples<'a, T>>
+where
+    T: StandardSample + ConvertFrom<i16> + 'static,
+{
+    let decoded = decode_adpcm::<T>(fmt_chunk, data_chunk)?;
+    build_samples_from_interleaved_vec(decoded, num_channels, sample_rate)
+}
+
+/// `read_adpcm` for the `read_into` path: decode into an existing buffer.
+fn read_adpcm_into<'a, T>(
+    fmt_chunk: &FmtChunk<'_>,
+    data_chunk: &DataChunk<'a>,
+    audio: &mut AudioSamples<'a, T>,
+) -> AudioIOResult<()>
+where
+    T: StandardSample + ConvertFrom<i16> + 'static,
+{
+    let num_channels = audio.num_channels();
+    let decoded = decode_adpcm::<T>(fmt_chunk, data_chunk)?;
+
+    if decoded.len() != audio.total_samples() {
+        return Err(AudioIOError::corrupted_data_simple(
+            "Sample count mismatch",
+            format!(
+                "Decoded ADPCM sample count {} does not match target audio sample count {}",
+                decoded.len(),
+                audio.total_samples(),
+            ),
+        ));
+    }
+
+    if audio.is_mono() {
+        audio.replace_with_vec(&decoded).map_err(|e| e.into())
+    } else {
+        let planar_data =
+            audio_samples::simd_conversions::deinterleave_multi_vec(&decoded, num_channels)
+                .map_err(|e| {
+                    AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string())
+                })?;
+        audio.replace_with_vec(&planar_data).map_err(|e| e.into())
+    }
+}
+
+/// Shared ADPCM expansion: decode blocks to 16-bit linear PCM, then convert to `T`.
+fn decode_adpcm<T>(
+    fmt_chunk: &FmtChunk<'_>,
+    data_chunk: &DataChunk<'_>,
+) -> AudioIOResult<NonEmptyVec<T>>
+where
+    T: StandardSample + ConvertFrom<i16> + 'static,
+{
+    let decoded_i16 = crate::wav::adpcm::decode(fmt_chunk, data_chunk.as_bytes())?;
+    if decoded_i16.is_empty() {
+        return Err(AudioIOError::corrupted_data_simple(
+            "No samples decoded from ADPCM data",
+            format!("{} data bytes", data_chunk.len()),
+        ));
+    }
+    let converted: Vec<T> = decoded_i16.into_iter().map(T::convert_from).collect();
+    // SAFETY: non-empty checked above.
+    Ok(unsafe { NonEmptyVec::new_unchecked(converted) })
 }
 
 // Helper functions for WAV writing
@@ -1175,11 +1308,62 @@ where
     Ok(())
 }
 
+/// Optional metadata chunks written after the audio `data` chunk.
+///
+/// Lets callers persist tags and markers that would otherwise be lost on a read→write round-trip.
+/// Build one and pass it to [`write_wav_with_metadata`] / [`crate::write_with_metadata`].
+#[derive(Debug, Default, Clone)]
+pub struct WavMetadata {
+    /// LIST/INFO tags (title, artist, …).
+    pub info: Option<InfoMetadata>,
+    /// Cue points / markers.
+    pub cue_points: Vec<CuePoint>,
+}
+
+impl WavMetadata {
+    /// True if there is nothing to write.
+    pub fn is_empty(&self) -> bool {
+        self.cue_points.is_empty()
+            && self
+                .info
+                .as_ref()
+                .is_none_or(|i| i.to_list_chunk().is_none())
+    }
+
+    /// Serialise all present metadata into one contiguous, word-aligned buffer of complete chunks.
+    fn to_chunk_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if let Some(ref info) = self.info {
+            if let Some(list) = info.to_list_chunk() {
+                out.extend_from_slice(&list);
+            }
+        }
+        if let Some(cue) = cue_chunk_bytes(&self.cue_points) {
+            out.extend_from_slice(&cue);
+        }
+        out
+    }
+}
+
 // Write complete WAV file to a writer
 pub(crate) fn write_wav<T, W>(
     writer: W,
     audio: &AudioSamples<T>,
     opts: WriteOptions,
+) -> AudioIOResult<()>
+where
+    T: StandardSample + 'static,
+    W: Write,
+{
+    write_wav_with_metadata(writer, audio, opts, &WavMetadata::default())
+}
+
+/// Write a complete WAV file, appending optional metadata chunks (LIST/INFO, cue) after the data.
+pub(crate) fn write_wav_with_metadata<T, W>(
+    writer: W,
+    audio: &AudioSamples<T>,
+    opts: WriteOptions,
+    metadata: &WavMetadata,
 ) -> AudioIOResult<()>
 where
     T: StandardSample + 'static,
@@ -1224,8 +1408,11 @@ where
     };
     let fmt_total_size = 8 + fmt_chunk_size; // chunk header + data
 
+    // Serialise trailing metadata chunks up front so their bytes are counted in the RIFF size.
+    let metadata_bytes = metadata.to_chunk_bytes();
+
     // Calculate total file size
-    let file_size = 4 + fmt_total_size + 8 + padded_data_size; // WAVE + FMT + DATA
+    let file_size = 4 + fmt_total_size + 8 + padded_data_size + metadata_bytes.len(); // WAVE + FMT + DATA + metadata
 
     let mut writer = BufWriter::with_capacity(opts.write_buf_capacity, writer);
 
@@ -1251,6 +1438,11 @@ where
     // Add padding byte if needed
     if data_size % 2 == 1 {
         writer.write_all(&[0])?;
+    }
+
+    // Append metadata chunks (LIST/INFO, cue) after the data chunk.
+    if !metadata_bytes.is_empty() {
+        writer.write_all(&metadata_bytes)?;
     }
 
     writer.flush()?;

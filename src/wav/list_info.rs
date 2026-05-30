@@ -76,7 +76,68 @@ impl Display for InfoMetadata {
     }
 }
 
+/// Append one INFO subchunk (`id` + size + NUL-terminated value, word-aligned) to `body`.
+fn append_info_subchunk(body: &mut Vec<u8>, id: &[u8; 4], value: &str) {
+    body.extend_from_slice(id);
+    let value_bytes = value.as_bytes();
+    let size = value_bytes.len() + 1; // include the NUL terminator
+    body.extend_from_slice(&(size as u32).to_le_bytes());
+    body.extend_from_slice(value_bytes);
+    body.push(0); // NUL terminator
+    if size % 2 == 1 {
+        body.push(0); // word-align the subchunk
+    }
+}
+
 impl InfoMetadata {
+    /// Serialise to a complete `LIST`/`INFO` chunk (chunk header + `INFO` tag + subchunks,
+    /// word-aligned). Returns `None` when there is no metadata to write, so callers can skip
+    /// emitting an empty chunk. This is the write-side counterpart of [`InfoMetadata::parse`].
+    pub fn to_list_chunk(&self) -> Option<Vec<u8>> {
+        let mut body = Vec::new();
+        body.extend_from_slice(INFO_TYPE.as_bytes());
+
+        // Known tags, in canonical order.
+        for (id, field) in [
+            (b"INAM", &self.title),
+            (b"IART", &self.artist),
+            (b"IPRD", &self.album),
+            (b"ICRD", &self.date),
+            (b"ICMT", &self.comment),
+            (b"IGNR", &self.genre),
+            (b"ISFT", &self.software),
+            (b"ICOP", &self.copyright),
+            (b"IENG", &self.engineer),
+            (b"ISBJ", &self.subject),
+            (b"ISRC", &self.source),
+            (b"IKEY", &self.keywords),
+        ] {
+            if let Some(value) = field {
+                append_info_subchunk(&mut body, id, value);
+            }
+        }
+        // Preserve any unrecognised tags captured on read.
+        for (id, value) in &self.extra {
+            append_info_subchunk(&mut body, id.as_bytes(), value);
+        }
+
+        // Only the 4-byte "INFO" tag and no subchunks → nothing worth writing.
+        if body.len() <= 4 {
+            return None;
+        }
+
+        let mut chunk = Vec::with_capacity(8 + body.len());
+        chunk.extend_from_slice(b"LIST");
+        chunk.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        chunk.extend_from_slice(&body);
+        // body is always even (each subchunk is word-aligned and "INFO" is 4 bytes), but pad
+        // defensively to keep the invariant explicit.
+        if body.len() % 2 == 1 {
+            chunk.push(0);
+        }
+        Some(chunk)
+    }
+
     fn parse(bytes: &[u8]) -> Result<Self, WavError> {
         let mut metadata = InfoMetadata::new();
         let mut offset = 0;

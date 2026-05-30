@@ -80,6 +80,33 @@ impl<'a> CueChunk<'a> {
     }
 }
 
+/// Serialise cue points to a complete `cue ` chunk (header + size + point records).
+///
+/// Returns `None` when there are no points, so callers can skip emitting an empty chunk. Each
+/// point record is 24 bytes, so the chunk body is always word-aligned.
+pub fn cue_chunk_bytes(points: &[CuePoint]) -> Option<Vec<u8>> {
+    if points.is_empty() {
+        return None;
+    }
+    let mut body =
+        Vec::with_capacity(CueChunk::HEADER_BYTES + points.len() * CueChunk::POINT_BYTES);
+    body.extend_from_slice(&(points.len() as u32).to_le_bytes());
+    for p in points {
+        body.extend_from_slice(&p.id.to_le_bytes());
+        body.extend_from_slice(&p.position.to_le_bytes());
+        body.extend_from_slice(p.data_chunk_id.as_bytes());
+        body.extend_from_slice(&p.chunk_start.to_le_bytes());
+        body.extend_from_slice(&p.block_start.to_le_bytes());
+        body.extend_from_slice(&p.sample_offset.to_le_bytes());
+    }
+
+    let mut chunk = Vec::with_capacity(8 + body.len());
+    chunk.extend_from_slice(b"cue ");
+    chunk.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    chunk.extend_from_slice(&body);
+    Some(chunk)
+}
+
 #[inline]
 fn u32_at(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes([

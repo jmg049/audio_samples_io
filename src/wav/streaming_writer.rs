@@ -423,15 +423,12 @@ where
         // Get interleaved samples and convert to target format
         let interleaved = samples.data.as_interleaved_vec();
 
-        // Convert and write based on target sample type
-        let bytes_written = match self.sample_type {
-            ValidatedSampleType::U8 => self.write_samples_as::<T, u8>(&interleaved)?,
-            ValidatedSampleType::I16 => self.write_samples_as::<T, i16>(&interleaved)?,
-            ValidatedSampleType::I24 => self.write_samples_as::<T, I24>(&interleaved)?,
-            ValidatedSampleType::I32 => self.write_samples_as::<T, i32>(&interleaved)?,
-            ValidatedSampleType::F32 => self.write_samples_as::<T, f32>(&interleaved)?,
-            ValidatedSampleType::F64 => self.write_samples_as::<T, f64>(&interleaved)?,
-        };
+        let bytes_written = write_frames_converted::<T, W>(
+            &mut self.writer,
+            &interleaved,
+            self.sample_type,
+            self.channels,
+        )?;
 
         self.frames_written += frames_per_channel.get();
         self.data_bytes_written += bytes_written as u64;
@@ -440,45 +437,80 @@ where
     }
 }
 
-impl<W> StreamedWavWriter<W>
+/// Convert interleaved `T` samples to the WAV target type and stream them to `writer` in
+/// chunks, returning the number of bytes written. Shared by the seekable [`StreamedWavWriter`]
+/// and the non-seekable [`WavSink`](crate::wav::WavSink) so both encode identically.
+pub(crate) fn write_frames_converted<T, W>(
+    writer: &mut W,
+    interleaved: &[T],
+    target: ValidatedSampleType,
+    channels: u16,
+) -> AudioIOResult<usize>
 where
-    W: WriteSeek,
+    T: StandardSample + 'static,
+    W: std::io::Write,
 {
-    /// Convert samples from type T to type U and write to the underlying writer.
-    fn write_samples_as<T, U>(&mut self, samples: &[T]) -> AudioIOResult<usize>
-    where
-        T: StandardSample + ConvertTo<U> + 'static,
-        U: StandardSample + 'static,
-    {
-        // Stream in chunks to avoid large allocations
-        const TARGET_CHUNK_BYTES: usize = 256 * 1024; // 256 KiB
-        let bytes_per_sample = U::BYTES as usize;
-        // safety: bytes_per_sample is guaranteed > 0 for valid sample types
-        let bytes_per_sample = unsafe { NonZeroUsize::new_unchecked(bytes_per_sample) };
-        let samples_per_chunk = TARGET_CHUNK_BYTES / bytes_per_sample;
-        let samples_per_chunk = samples_per_chunk.max(self.channels as usize);
-        // safety: We ensure samples_per_chunk > 0 and is a valid chunk size for processing
-        let samples_per_chunk = unsafe { NonZeroUsize::new_unchecked(samples_per_chunk) };
+    match target {
+        ValidatedSampleType::U8 => {
+            write_converted_samples::<T, u8, W>(writer, interleaved, channels)
+        }
+        ValidatedSampleType::I16 => {
+            write_converted_samples::<T, i16, W>(writer, interleaved, channels)
+        }
+        ValidatedSampleType::I24 => {
+            write_converted_samples::<T, I24, W>(writer, interleaved, channels)
+        }
+        ValidatedSampleType::I32 => {
+            write_converted_samples::<T, i32, W>(writer, interleaved, channels)
+        }
+        ValidatedSampleType::F32 => {
+            write_converted_samples::<T, f32, W>(writer, interleaved, channels)
+        }
+        ValidatedSampleType::F64 => {
+            write_converted_samples::<T, f64, W>(writer, interleaved, channels)
+        }
+    }
+}
 
-        let mut buf = non_empty_vec![0u8; samples_per_chunk.checked_mul(bytes_per_sample).expect("Should not overflow")];
-        let mut total_bytes = 0usize;
+/// Convert samples from type `T` to type `U` and write them to `writer`, streaming in ~256 KiB
+/// chunks to avoid large intermediate allocations.
+pub(crate) fn write_converted_samples<T, U, W>(
+    writer: &mut W,
+    samples: &[T],
+    channels: u16,
+) -> AudioIOResult<usize>
+where
+    T: StandardSample + ConvertTo<U> + 'static,
+    U: StandardSample + 'static,
+    W: std::io::Write,
+{
+    const TARGET_CHUNK_BYTES: usize = 256 * 1024; // 256 KiB
+    let bytes_per_sample = U::BYTES as usize;
+    // safety: bytes_per_sample is guaranteed > 0 for valid sample types
+    let bytes_per_sample = unsafe { NonZeroUsize::new_unchecked(bytes_per_sample) };
+    let samples_per_chunk = TARGET_CHUNK_BYTES / bytes_per_sample;
+    let samples_per_chunk = samples_per_chunk.max(channels as usize);
+    // safety: samples_per_chunk > 0 (channels >= 1)
+    let samples_per_chunk = unsafe { NonZeroUsize::new_unchecked(samples_per_chunk) };
 
-        for chunk in samples.chunks(samples_per_chunk.get()) {
-            let mut write_idx = 0;
-            for sample in chunk {
-                let converted: U = (*sample).convert_to();
-                let bytes = converted.to_le_bytes();
-                let dst = &mut buf[write_idx..write_idx + bytes_per_sample.get()];
-                dst.copy_from_slice(bytes.as_ref());
-                write_idx += bytes_per_sample.get();
-            }
+    let mut buf = non_empty_vec![0u8; samples_per_chunk.checked_mul(bytes_per_sample).expect("Should not overflow")];
+    let mut total_bytes = 0usize;
 
-            self.writer.write_all(&buf[..write_idx])?;
-            total_bytes += write_idx;
+    for chunk in samples.chunks(samples_per_chunk.get()) {
+        let mut write_idx = 0;
+        for sample in chunk {
+            let converted: U = (*sample).convert_to();
+            let bytes = converted.to_le_bytes();
+            let dst = &mut buf[write_idx..write_idx + bytes_per_sample.get()];
+            dst.copy_from_slice(bytes.as_ref());
+            write_idx += bytes_per_sample.get();
         }
 
-        Ok(total_bytes)
+        writer.write_all(&buf[..write_idx])?;
+        total_bytes += write_idx;
     }
+
+    Ok(total_bytes)
 }
 
 /// Drop implementation to warn if not finalized.

@@ -11,6 +11,10 @@ use crate::{
 pub enum FmtChunk<'a> {
     Base(&'a [u8; 16]),
     Extensible(&'a [u8; 40]),
+    /// Any other valid fmt chunk length (≥ 18 bytes): a base chunk with a `cbSize`/extension
+    /// field. Covers 18-byte PCM headers (cbSize = 0, written by many tools) and compressed
+    /// formats such as ADPCM whose extension carries codec parameters.
+    Extended(&'a [u8]),
 }
 
 impl<'a> FmtChunk<'a> {
@@ -39,6 +43,9 @@ impl<'a> FmtChunk<'a> {
                     .map_err(|_| WavError::InvalidFmtChunkSize(bytes.len()))?;
                 Ok(FmtChunk::Extensible(b))
             }
+            // A base chunk plus a `cbSize` extension field: 18-byte PCM headers and compressed
+            // codec headers (ADPCM, etc.). The first 16 bytes are the standard WAVEFORMATEX.
+            len if len >= 18 => Ok(FmtChunk::Extended(bytes)),
             len => Err(WavError::InvalidFmtChunkSize(len)),
         }
     }
@@ -59,6 +66,7 @@ impl<'a> FmtChunk<'a> {
         match self {
             FmtChunk::Base(slice) => *slice,
             FmtChunk::Extensible(slice) => *slice,
+            FmtChunk::Extended(slice) => slice,
         }
     }
 
@@ -70,7 +78,7 @@ impl<'a> FmtChunk<'a> {
     pub const fn try_into_base(&'a self) -> Option<&'a [u8; 16]> {
         match self {
             FmtChunk::Base(bytes) => Some(bytes),
-            FmtChunk::Extensible(_) => None,
+            FmtChunk::Extensible(_) | FmtChunk::Extended(_) => None,
         }
     }
 
@@ -81,7 +89,7 @@ impl<'a> FmtChunk<'a> {
     /// Some(&[u8; 40]) if extensible FMT chunk, None if base FMT chunk
     pub const fn try_into_extensible(&'a self) -> Option<&'a [u8; 40]> {
         match self {
-            FmtChunk::Base(_) => None,
+            FmtChunk::Base(_) | FmtChunk::Extended(_) => None,
             FmtChunk::Extensible(bytes) => Some(bytes),
         }
     }
@@ -92,10 +100,8 @@ impl<'a> FmtChunk<'a> {
     ///
     /// FormatCode representing the audio format
     pub const fn format_code(&self) -> FormatCode {
-        FormatCode::const_from(match self {
-            FmtChunk::Base(bytes) => u16::from_le_bytes([bytes[0], bytes[1]]),
-            FmtChunk::Extensible(bytes) => u16::from_le_bytes([bytes[0], bytes[1]]),
-        })
+        let bytes = self.as_bytes();
+        FormatCode::const_from(u16::from_le_bytes([bytes[0], bytes[1]]))
     }
 
     /// Get the number of channels from the FMT chunk
@@ -104,10 +110,8 @@ impl<'a> FmtChunk<'a> {
     ///
     /// Number of audio channels
     pub const fn channels(&self) -> u16 {
-        match self {
-            FmtChunk::Base(bytes) => u16::from_le_bytes([bytes[2], bytes[3]]),
-            FmtChunk::Extensible(bytes) => u16::from_le_bytes([bytes[2], bytes[3]]),
-        }
+        let bytes = self.as_bytes();
+        u16::from_le_bytes([bytes[2], bytes[3]])
     }
 
     /// Get the sample rate from the FMT chunk
@@ -116,12 +120,8 @@ impl<'a> FmtChunk<'a> {
     ///
     /// Sample rate in Hz
     pub const fn sample_rate(&self) -> u32 {
-        match self {
-            FmtChunk::Base(bytes) => u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
-            FmtChunk::Extensible(bytes) => {
-                u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]])
-            }
-        }
+        let bytes = self.as_bytes();
+        u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]])
     }
 
     /// Get the byte rate from the FMT chunk
@@ -130,12 +130,8 @@ impl<'a> FmtChunk<'a> {
     ///
     /// Number of bytes per second of audio data
     pub const fn byte_rate(&self) -> u32 {
-        match self {
-            FmtChunk::Base(bytes) => u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
-            FmtChunk::Extensible(bytes) => {
-                u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]])
-            }
-        }
+        let bytes = self.as_bytes();
+        u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]])
     }
 
     /// Get the block align from the FMT chunk
@@ -144,10 +140,8 @@ impl<'a> FmtChunk<'a> {
     ///
     /// Number of bytes per sample frame (all channels)
     pub const fn block_align(&self) -> u16 {
-        match self {
-            FmtChunk::Base(bytes) => u16::from_le_bytes([bytes[12], bytes[13]]),
-            FmtChunk::Extensible(bytes) => u16::from_le_bytes([bytes[12], bytes[13]]),
-        }
+        let bytes = self.as_bytes();
+        u16::from_le_bytes([bytes[12], bytes[13]])
     }
 
     /// Get the bits per sample from the FMT chunk
@@ -156,10 +150,8 @@ impl<'a> FmtChunk<'a> {
     ///
     /// Number of bits per sample
     pub const fn bits_per_sample(&self) -> u16 {
-        match self {
-            FmtChunk::Base(bytes) => u16::from_le_bytes([bytes[14], bytes[15]]),
-            FmtChunk::Extensible(bytes) => u16::from_le_bytes([bytes[14], bytes[15]]),
-        }
+        let bytes = self.as_bytes();
+        u16::from_le_bytes([bytes[14], bytes[15]])
     }
 
     /// Get the bytes per sample from the FMT chunk
@@ -198,7 +190,7 @@ impl<'a> FmtChunk<'a> {
     /// This function will never panic provided the FmtChunk enum is constructed via ``from_bytes``
     pub fn extended_bytes(&'a self) -> Option<&'a [u8; 24]> {
         match self {
-            FmtChunk::Base(_) => None,
+            FmtChunk::Base(_) | FmtChunk::Extended(_) => None,
             FmtChunk::Extensible(bytes) => {
                 let b: &[u8; 24] = bytes[16..40]
                     .try_into()
@@ -215,7 +207,7 @@ impl<'a> FmtChunk<'a> {
     /// Some((FormatCode, SampleType)) if extensible, None if base FMT
     pub const fn subformat(&'a self) -> Result<Option<(FormatCode, SampleType)>, WavError> {
         match self {
-            FmtChunk::Base(_) => Ok(None),
+            FmtChunk::Base(_) | FmtChunk::Extended(_) => Ok(None),
             FmtChunk::Extensible(bytes) => {
                 // WAVEFORMATEXTENSIBLE layout (40 bytes total):
                 //   [0..16]  base WAVEFORMATEX fields
@@ -253,6 +245,11 @@ impl<'a> FmtChunk<'a> {
                     64 => Ok(ValidatedSampleType::F64),
                     _ => Err(WavError::UnsupportedSampleType),
                 },
+                // Companded 8-bit codes and ADPCM blocks both decode to 16-bit linear PCM.
+                FormatCode::ALaw
+                | FormatCode::MuLaw
+                | FormatCode::MsAdpcm
+                | FormatCode::ImaAdpcm => Ok(ValidatedSampleType::I16),
                 _ => ValidatedSampleType::try_from(SampleType::from_bits(bits_per_sample))
                     .map_err(|_| WavError::UnsupportedSampleType),
             };
@@ -265,9 +262,25 @@ impl<'a> FmtChunk<'a> {
                 64 => Ok(ValidatedSampleType::F64),
                 _ => Err(WavError::UnsupportedSampleType),
             },
+            // mu-law/a-law (#78) and ADPCM (#45) decode to 16-bit linear PCM.
+            FormatCode::ALaw | FormatCode::MuLaw | FormatCode::MsAdpcm | FormatCode::ImaAdpcm => {
+                Ok(ValidatedSampleType::I16)
+            }
             _ => ValidatedSampleType::try_from(SampleType::from_bits(bits_per_sample))
                 .map_err(|_| WavError::UnsupportedSampleType),
         }
+    }
+
+    /// Returns the companding scheme (mu-law / a-law) if this chunk describes companded audio.
+    ///
+    /// Companded samples are stored as 8-bit codes and must be expanded to 16-bit linear PCM
+    /// on read; callers should branch on this before treating the data as raw PCM.
+    pub fn companding(&'a self) -> Option<crate::wav::Companding> {
+        let format_code = match self.subformat() {
+            Ok(Some((sub_format, _))) => sub_format,
+            _ => self.format_code(),
+        };
+        crate::wav::Companding::from_format(format_code)
     }
 
     /// Validate the consistency of FMT chunk fields
@@ -278,6 +291,22 @@ impl<'a> FmtChunk<'a> {
     /// - bits_per_sample is byte-aligned
     /// - All fields are within reasonable ranges
     pub fn validate_format_consistency(&self) -> Result<(), WavError> {
+        // Block-compressed formats (ADPCM) deliberately break the PCM relationships
+        // (block_align ≠ channels × bytes_per_sample, sub-byte bit depths), so only sanity-check
+        // the fields the block decoder relies on.
+        if self.format_code().is_adpcm() {
+            if self.channels() == 0 {
+                return Err(WavError::invalid_format("Channels cannot be zero"));
+            }
+            if self.sample_rate() == 0 {
+                return Err(WavError::invalid_format("Sample rate cannot be zero"));
+            }
+            if self.block_align() == 0 {
+                return Err(WavError::invalid_format("Block align cannot be zero"));
+            }
+            return Ok(());
+        }
+
         let channels = self.channels();
         let sample_rate = self.sample_rate();
         let byte_rate = self.byte_rate();

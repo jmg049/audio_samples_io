@@ -292,7 +292,7 @@ where
             frames_per_channel = Some(len);
             planar.reserve(len * channels);
         }
-        planar.extend(arr.into_iter());
+        planar.extend(arr);
     }
 
     let frames = frames_per_channel.expect("at least one channel");

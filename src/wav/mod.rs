@@ -1,24 +1,35 @@
+pub mod adpcm;
 pub mod bext;
 pub mod chunks;
+pub mod companding;
 pub mod cue;
 pub mod data;
 pub mod error;
 pub mod fact;
 pub mod fmt;
+pub mod header;
 pub mod list_info;
 pub mod smpl;
 pub mod streaming;
+pub mod streaming_sink;
 pub mod streaming_writer;
 pub mod wav_file;
 pub use bext::BextChunk;
+pub use companding::Companding;
 use core::fmt::{Display, Formatter, Result as FmtResult};
+pub use cue::cue_chunk_bytes;
 pub use cue::{CueChunk, CuePoint};
 pub use fact::FactChunk;
+pub use header::{
+    build_wav_header, build_wav_header_infinite, needs_extensible, wav_data_len, wav_file_len,
+    wav_header_len,
+};
 pub use list_info::{InfoMetadata, ListChunk};
 pub use smpl::{LoopType, SampleLoop, SmplChunk};
 pub use streaming::{StreamedFrameIter, StreamedSampleIter, StreamedWavFile, StreamedWindowIter};
+pub use streaming_sink::WavSink;
 pub use streaming_writer::StreamedWavWriter;
-pub use wav_file::WavFile;
+pub use wav_file::{WavFile, WavMetadata};
 
 use crate::{
     error::{AudioIOError, AudioIOResult},
@@ -31,12 +42,16 @@ use crate::{
 pub enum FormatCode {
     /// PCM (uncompressed)
     Pcm,
+    /// Microsoft ADPCM (WAVE_FORMAT_ADPCM, 0x0002)
+    MsAdpcm,
     /// IEEE Float
     IeeeFloat,
     /// A-law
     ALaw,
     /// Mu-law
     MuLaw,
+    /// IMA / DVI ADPCM (WAVE_FORMAT_DVI_ADPCM, 0x0011)
+    ImaAdpcm,
     /// WAVE_FORMAT_EXTENSIBLE
     Extensible,
     /// Unknown or unsupported format
@@ -48,9 +63,11 @@ impl FormatCode {
     pub const fn as_u16(self) -> u16 {
         match self {
             FormatCode::Pcm => 0x0001,
+            FormatCode::MsAdpcm => 0x0002,
             FormatCode::IeeeFloat => 0x0003,
             FormatCode::ALaw => 0x0006,
             FormatCode::MuLaw => 0x0007,
+            FormatCode::ImaAdpcm => 0x0011,
             FormatCode::Extensible => 0xFFFE,
             FormatCode::Unknown(code) => code,
         }
@@ -59,9 +76,11 @@ impl FormatCode {
     pub const fn const_from(code: u16) -> Self {
         match code {
             0x0001 => FormatCode::Pcm,
+            0x0002 => FormatCode::MsAdpcm,
             0x0003 => FormatCode::IeeeFloat,
             0x0006 => FormatCode::ALaw,
             0x0007 => FormatCode::MuLaw,
+            0x0011 => FormatCode::ImaAdpcm,
             0xFFFE => FormatCode::Extensible,
             other => FormatCode::Unknown(other),
         }
@@ -71,9 +90,11 @@ impl FormatCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             FormatCode::Pcm => "PCM",
+            FormatCode::MsAdpcm => "MS_ADPCM",
             FormatCode::IeeeFloat => "IEEE_FLOAT",
             FormatCode::ALaw => "A_LAW",
             FormatCode::MuLaw => "MU_LAW",
+            FormatCode::ImaAdpcm => "IMA_ADPCM",
             FormatCode::Extensible => "EXTENSIBLE",
             FormatCode::Unknown(_) => "UNKNOWN",
         }
@@ -83,9 +104,11 @@ impl FormatCode {
     pub const fn description(self) -> &'static str {
         match self {
             FormatCode::Pcm => "Uncompressed PCM",
+            FormatCode::MsAdpcm => "Microsoft ADPCM",
             FormatCode::IeeeFloat => "IEEE 32-bit or 64-bit floating point",
             FormatCode::ALaw => "A-law companded PCM",
             FormatCode::MuLaw => "Mu-law companded PCM",
+            FormatCode::ImaAdpcm => "IMA/DVI ADPCM",
             FormatCode::Extensible => "WAVE_FORMAT_EXTENSIBLE container",
             FormatCode::Unknown(_) => "Unknown or unsupported WAV format",
         }
@@ -94,6 +117,11 @@ impl FormatCode {
     /// True if this format uses companding
     pub const fn is_companded(self) -> bool {
         matches!(self, FormatCode::ALaw | FormatCode::MuLaw)
+    }
+
+    /// True if this format is block-based ADPCM (compressed, decodes to 16-bit PCM)
+    pub const fn is_adpcm(self) -> bool {
+        matches!(self, FormatCode::MsAdpcm | FormatCode::ImaAdpcm)
     }
 
     /// True if this format represents floating-point samples
@@ -109,14 +137,7 @@ impl FormatCode {
 
 impl From<u16> for FormatCode {
     fn from(code: u16) -> Self {
-        match code {
-            0x0001 => FormatCode::Pcm,
-            0x0003 => FormatCode::IeeeFloat,
-            0x0006 => FormatCode::ALaw,
-            0x0007 => FormatCode::MuLaw,
-            0xFFFE => FormatCode::Extensible,
-            other => FormatCode::Unknown(other),
-        }
+        FormatCode::const_from(code)
     }
 }
 

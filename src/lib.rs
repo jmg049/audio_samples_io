@@ -42,7 +42,10 @@ pub mod types;
 pub mod wav;
 
 #[cfg(feature = "wav")]
-pub use crate::wav::{StreamedWavFile, StreamedWavWriter, wav_file::WavFile};
+pub use crate::wav::{
+    StreamedWavFile, StreamedWavWriter, build_wav_header, wav_data_len, wav_file::WavFile,
+    wav_file_len, wav_header_len,
+};
 
 #[cfg(feature = "flac")]
 pub mod flac;
@@ -627,6 +630,70 @@ where
     }
 }
 
+/// Map a Rust sample type to its WAV [`ValidatedSampleType`].
+#[cfg(feature = "wav")]
+fn validated_sample_type_of<T>() -> AudioIOResult<ValidatedSampleType>
+where
+    T: StandardSample + 'static,
+{
+    use audio_samples::I24;
+    let id = TypeId::of::<T>();
+    if id == TypeId::of::<u8>() {
+        Ok(ValidatedSampleType::U8)
+    } else if id == TypeId::of::<i16>() {
+        Ok(ValidatedSampleType::I16)
+    } else if id == TypeId::of::<I24>() {
+        Ok(ValidatedSampleType::I24)
+    } else if id == TypeId::of::<i32>() {
+        Ok(ValidatedSampleType::I32)
+    } else if id == TypeId::of::<f32>() {
+        Ok(ValidatedSampleType::F32)
+    } else if id == TypeId::of::<f64>() {
+        Ok(ValidatedSampleType::F64)
+    } else {
+        Err(AudioIOError::unsupported_format(format!(
+            "No WAV encoding for sample type (TypeId: {id:?})"
+        )))
+    }
+}
+
+/// Create a non-seekable streaming WAV writer ([`WavSink`](crate::wav::WavSink)) over any
+/// `Write` destination — stdout, a pipe, a socket, etc.
+///
+/// Because a `!Seek` sink cannot backpatch size fields, the header is written with final sizes
+/// up front. Pass `total_frames = Some(n)` when the frame count is known (recommended; produces
+/// a fully standard file and verifies the count on `finalize`), or `None` for an open-ended
+/// stream (uses the `0xFFFFFFFF` streaming-size convention).
+///
+/// # Example
+///
+/// ```no_run
+/// use audio_samples_io::create_streamed_sink;
+/// use audio_samples_io::traits::{AudioStreamWrite, AudioStreamWriter};
+/// use audio_samples::{AudioSamples, nzu, sample_rate};
+///
+/// let stdout = std::io::stdout();
+/// let mut sink = create_streamed_sink::<_, i16>(stdout.lock(), 1, 44100, Some(1024))?;
+/// let audio = AudioSamples::<f32>::zeros_mono(nzu!(1024), sample_rate!(44100));
+/// sink.write_frames(&audio)?;
+/// sink.finalize()?;
+/// # Ok::<(), audio_samples_io::error::AudioIOError>(())
+/// ```
+#[cfg(feature = "wav")]
+pub fn create_streamed_sink<W, T>(
+    writer: W,
+    channels: u16,
+    sample_rate: u32,
+    total_frames: Option<usize>,
+) -> AudioIOResult<wav::WavSink<W>>
+where
+    W: Write,
+    T: StandardSample + 'static,
+{
+    let sample_type = validated_sample_type_of::<T>()?;
+    wav::WavSink::new(writer, channels, sample_rate, sample_type, total_frames)
+}
+
 /// Open an audio file for reading/writing operations
 ///
 /// Returns a trait object that can be used for low-level file operations.
@@ -735,6 +802,53 @@ where
             "Unsupported format: {other:?}"
         ))),
     }
+}
+
+/// Write a WAV file with trailing metadata chunks (LIST/INFO tags, cue points).
+///
+/// Like [`write`], but also serialises the given [`WavMetadata`](crate::wav::WavMetadata) after
+/// the audio data — letting you persist tags/markers that a plain read→write round-trip would
+/// drop. WAV only.
+///
+/// ```no_run
+/// use audio_samples_io::write_with_metadata;
+/// use audio_samples_io::wav::WavMetadata;
+/// use audio_samples_io::wav::list_info::InfoMetadata;
+/// use audio_samples::{AudioSamples, sine_wave, sample_rate};
+/// use std::time::Duration;
+///
+/// let audio = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(44100), 0.5);
+/// let mut meta = WavMetadata::default();
+/// meta.info = Some(InfoMetadata { title: Some("My Track".into()), ..Default::default() });
+/// write_with_metadata("tagged.wav", &audio, &meta)?;
+/// # Ok::<(), audio_samples_io::error::AudioIOError>(())
+/// ```
+#[cfg(feature = "wav")]
+pub fn write_with_metadata<P, T>(
+    fp: P,
+    audio: &AudioSamples<T>,
+    metadata: &crate::wav::WavMetadata,
+) -> AudioIOResult<()>
+where
+    P: AsRef<Path>,
+    T: StandardSample + 'static,
+{
+    let file = std::fs::File::create(fp)?;
+    crate::wav::wav_file::write_wav_with_metadata(file, audio, WriteOptions::default(), metadata)
+}
+
+/// Write a WAV file with trailing metadata to any `Write` destination (e.g. an in-memory buffer).
+#[cfg(feature = "wav")]
+pub fn write_with_metadata_to<T, W>(
+    writer: W,
+    audio: &AudioSamples<T>,
+    metadata: &crate::wav::WavMetadata,
+) -> AudioIOResult<()>
+where
+    T: StandardSample + 'static,
+    W: Write,
+{
+    crate::wav::wav_file::write_wav_with_metadata(writer, audio, WriteOptions::default(), metadata)
 }
 
 /// Write audio data to any `Write` destination with explicit format specification.

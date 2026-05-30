@@ -196,8 +196,9 @@ pub trait AudioStreamReader {
 /// use std::num::NonZeroU32;
 ///
 /// fn read_all<S: AudioStreamRead + AudioFileMetadata>(stream: &mut S) -> Result<(), Box<dyn std::error::Error>> {
-///     let channels = NonZeroU32::new(stream.num_channels() as u32).ok_or("channels must be non-zero")?;
-///     let sample_rate = NonZeroU32::new(stream.sample_rate()).ok_or("sample_rate must be non-zero")?;
+///     // `num_channels`/`sample_rate` are declared on more than one supertrait; qualify them.
+///     let channels = NonZeroU32::new(AudioStreamReader::num_channels(stream) as u32).ok_or("channels must be non-zero")?;
+///     let sample_rate = NonZeroU32::new(AudioStreamReader::sample_rate(stream)).ok_or("sample_rate must be non-zero")?;
 ///     let mut buffer = AudioSamples::<f32>::zeros_multi(channels, nzu!(1024), sample_rate);
 ///
 ///     while stream.remaining_frames() > 0 {
