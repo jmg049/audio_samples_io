@@ -1,12 +1,9 @@
 #![cfg(feature = "flac")]
 
-use std::{
-    fs, hint::black_box, io::Cursor, num::NonZeroU32, path::PathBuf, sync::Arc, time::Duration,
-};
+use std::{fs, hint::black_box, io::Cursor, num::NonZeroU32, path::PathBuf, sync::Arc, time::Duration};
 
 use audio_samples::{
-    AudioSample, AudioSamples, ConvertTo, chirp, cosine_wave, sawtooth_wave, sine_wave,
-    square_wave,
+    AudioSample, AudioSamples, ConvertTo, chirp, cosine_wave, sawtooth_wave, sine_wave, square_wave,
     traits::{ConvertFrom, StandardSample},
 };
 use audio_samples_io::{
@@ -17,8 +14,7 @@ use audio_samples_io::{
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use ndarray::Array2;
 use symphonia::core::{
-    codecs::DecoderOptions, formats::FormatOptions, io::MediaSourceStream, meta::MetadataOptions,
-    probe::Hint,
+    codecs::DecoderOptions, formats::FormatOptions, io::MediaSourceStream, meta::MetadataOptions, probe::Hint,
 };
 
 const SAMPLE_RATES: &[u32] = &[44_100, 96_000];
@@ -133,12 +129,7 @@ fn bench_symphonia_read(
                 let mut hint = Hint::new();
                 hint.with_extension("flac");
                 let mut format = symphonia::default::get_probe()
-                    .format(
-                        &hint,
-                        mss,
-                        &FormatOptions::default(),
-                        &MetadataOptions::default(),
-                    )
+                    .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
                     .expect("probe flac")
                     .format;
                 let track_id = format.default_track().expect("track").id;
@@ -179,8 +170,7 @@ fn bench_audio_samples_io_write<T>(
         b.iter_batched(
             || Cursor::new(Vec::with_capacity(capacity)),
             move |writer| {
-                write_flac(writer, samples.as_ref(), CompressionLevel::DEFAULT)
-                    .expect("write flac");
+                write_flac(writer, samples.as_ref(), CompressionLevel::DEFAULT).expect("write flac");
             },
             BatchSize::SmallInput,
         );
@@ -210,8 +200,7 @@ where
     }
 
     let frames = frames_per_channel.expect("at least one channel");
-    let data = Array2::from_shape_vec((channels, frames), planar)
-        .expect("channel stacking should succeed");
+    let data = Array2::from_shape_vec((channels, frames), planar).expect("channel stacking should succeed");
     AudioSamples::new_multi_channel(
         data,
         NonZeroU32::new(sample_rate).expect("sample rate must be non-zero"),
@@ -219,11 +208,7 @@ where
     .unwrap()
 }
 
-fn channel_signal<T>(
-    channel_idx: usize,
-    duration: Duration,
-    sample_rate: u32,
-) -> AudioSamples<'static, T>
+fn channel_signal<T>(channel_idx: usize, duration: Duration, sample_rate: u32) -> AudioSamples<'static, T>
 where
     T: StandardSample + 'static,
     f64: ConvertTo<T> + ConvertFrom<T>,
@@ -237,24 +222,13 @@ where
         1 => cosine_wave::<T>(base_freq * 1.5, duration, sample_rate, amplitude * 0.9),
         2 => square_wave::<T>(base_freq * 0.75, duration, sample_rate, amplitude * 0.8),
         3 => sawtooth_wave::<T>(base_freq * 1.2, duration, sample_rate, amplitude * 0.7),
-        _ => chirp::<T>(
-            base_freq,
-            base_freq * 3.0,
-            duration,
-            sample_rate,
-            amplitude * 0.85,
-        ),
+        _ => chirp::<T>(base_freq, base_freq * 3.0, duration, sample_rate, amplitude * 0.85),
     }
 }
 
 fn flac_asset_path<T: AudioSample>(sample_rate: u32, channels: usize) -> PathBuf {
     let mut dir = flac_assets_dir();
-    dir.push(format!(
-        "{}_{}hz_{}ch.flac",
-        T::LABEL,
-        sample_rate,
-        channels
-    ));
+    dir.push(format!("{}_{}hz_{}ch.flac", T::LABEL, sample_rate, channels));
     dir
 }
 

@@ -1,0 +1,17 @@
+edition = "2024"
+max_width = 120
+hard_tabs = false
+tab_spaces = 4
+indent_style = "Block"
+use_small_heuristics = "Default"
+reorder_imports = true
+reorder_modules = true
+use_field_init_shorthand = true
+force_explicit_abi = true
+normalize_comments = true
+wrap_comments = true
+comment_width = 120
+imports_indent = "Block"
+group_imports = "StdExternalCrate"
+fn_single_line = false
+match_block_trailing_comma = true

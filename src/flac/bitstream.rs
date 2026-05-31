@@ -310,7 +310,7 @@ impl<'a> BitReader<'a> {
                 }
 
                 Ok(value)
-            }
+            },
             7 => {
                 let mut value = 0u64;
                 for _ in 0..6 {
@@ -321,7 +321,7 @@ impl<'a> BitReader<'a> {
                     value = (value << 6) | (cont & 0x3F) as u64;
                 }
                 Ok(value)
-            }
+            },
             _ => Err(FlacError::InvalidUtf8CodedNumber),
         }
     }
@@ -519,11 +519,7 @@ impl BitWriter {
     /// Write a signed value in two's complement.
     #[inline]
     pub fn write_bits_signed(&mut self, value: i32, count: u8) {
-        let mask = if count < 32 {
-            (1u32 << count) - 1
-        } else {
-            u32::MAX
-        };
+        let mask = if count < 32 { (1u32 << count) - 1 } else { u32::MAX };
         self.write_bits(value as u32 & mask, count);
     }
 
@@ -591,10 +587,7 @@ impl BitWriter {
     /// Write raw bytes (requires byte alignment).
     #[inline]
     pub fn write_bytes(&mut self, bytes: &[u8]) {
-        debug_assert!(
-            self.is_byte_aligned(),
-            "write_bytes requires byte alignment"
-        );
+        debug_assert!(self.is_byte_aligned(), "write_bytes requires byte alignment");
         self.data.extend_from_slice(bytes);
     }
 
@@ -635,10 +628,7 @@ impl BitWriter {
         }
 
         if remainder > 0 {
-            self.write_bits(
-                (data[full_bytes] >> (8 - remainder)) as u32,
-                remainder as u8,
-            );
+            self.write_bits((data[full_bytes] >> (8 - remainder)) as u32, remainder as u8);
         }
     }
 
@@ -659,10 +649,7 @@ impl BitWriter {
     /// always the case after byte-aligned header/footer writes or `align_to_byte()`.
     #[inline]
     pub fn data(&self) -> &[u8] {
-        debug_assert_eq!(
-            self.accum_bits, 0,
-            "data() called with pending bits in accumulator"
-        );
+        debug_assert_eq!(self.accum_bits, 0, "data() called with pending bits in accumulator");
         &self.data
     }
 
@@ -812,12 +799,7 @@ mod tests {
             let data = writer.finish();
 
             let mut reader = BitReader::new(&data);
-            assert_eq!(
-                reader.read_utf8_coded().unwrap(),
-                value,
-                "Failed for value {}",
-                value
-            );
+            assert_eq!(reader.read_utf8_coded().unwrap(), value, "Failed for value {}", value);
         }
     }
 

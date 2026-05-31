@@ -23,16 +23,15 @@ use std::io::{SeekFrom, Write};
 
 use audio_samples::{AudioSamples, SampleType, traits::StandardSample};
 
+use super::{
+    CompressionLevel, constants::FLAC_MARKER, flac_file::audio_to_planar_i32, frame::encode_frame_from_channels,
+    metadata::StreamInfo,
+};
 use crate::{
     WriteSeek,
     error::{AudioIOError, AudioIOResult},
     traits::{AudioStreamWrite, AudioStreamWriter},
     types::ValidatedSampleType,
-};
-
-use super::{
-    CompressionLevel, constants::FLAC_MARKER, flac_file::audio_to_planar_i32,
-    frame::encode_frame_from_channels, metadata::StreamInfo,
 };
 
 /// Encoder parameters derived once from a [`CompressionLevel`], reused for every frame.

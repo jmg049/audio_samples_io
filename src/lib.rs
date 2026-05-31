@@ -1,39 +1,3 @@
-// Correctness and logic
-#![warn(clippy::unit_cmp)] // Detects comparing unit types
-#![warn(clippy::match_same_arms)] // Duplicate match arms
-#![allow(clippy::result_large_err)] // Allow large error types for comprehensive error handling
-#![allow(clippy::missing_const_for_fn)] // Functions may need mutations in the future
-#![allow(clippy::collapsible_if)] // Sometimes clearer to have separate conditions
-#![allow(clippy::missing_panics_doc)] // Panics are converted to proper errors where needed
-#![allow(clippy::needless_borrows_for_generic_args)] // Sometimes clearer with explicit borrows
-#![allow(clippy::if_same_then_else)] // Similar blocks may diverge in the future
-#![allow(clippy::unnecessary_cast)] // Explicit casts for clarity
-#![allow(clippy::identity_op)] // Explicit operations for clarity
-
-// Performance-focused
-#![warn(clippy::inefficient_to_string)] // `format!("{}", x)` vs `x.to_string()`
-#![warn(clippy::map_clone)] // Cloning inside `map()` unnecessarily
-#![warn(clippy::unnecessary_to_owned)] // Detects redundant `.to_owned()` or `.clone()`
-#![warn(clippy::large_stack_arrays)] // Helps avoid stack overflows
-#![warn(clippy::box_collection)] // Warns on boxed `Vec`, `String`, etc.
-#![warn(clippy::vec_box)] // Avoids using `Vec<Box<T>>` when unnecessary
-#![warn(clippy::needless_collect)] // Avoids `.collect().iter()` chains
-
-// Style and idiomatic Rust
-#![warn(clippy::redundant_clone)] // Detects unnecessary `.clone()`
-#![warn(clippy::identity_op)] // e.g., `x + 0`, `x * 1`
-#![warn(clippy::needless_return)] // Avoids `return` at the end of functions
-#![warn(clippy::let_unit_value)] // Avoids binding `()` to variables
-#![warn(clippy::manual_map)] // Use `.map()` instead of manual `match`
-#![warn(clippy::unwrap_used)] // Avoids using `unwrap()`
-#![warn(clippy::panic)] // Avoids using `panic!` in production code
-
-// Maintainability
-#![warn(clippy::missing_panics_doc)] // Docs for functions that might panic
-#![warn(clippy::missing_safety_doc)] // Docs for `unsafe` functions
-#![warn(clippy::missing_const_for_fn)] // Suggests making eligible functions `const`
-#![allow(clippy::too_many_arguments)] // Allow functions with many parameters (very few and far between)
-
 pub mod error;
 pub mod traits;
 pub mod types;
@@ -43,8 +7,7 @@ pub mod wav;
 
 #[cfg(feature = "wav")]
 pub use crate::wav::{
-    StreamedWavFile, StreamedWavWriter, build_wav_header, wav_data_len, wav_file::WavFile,
-    wav_file_len, wav_header_len,
+    StreamedWavFile, StreamedWavWriter, build_wav_header, wav_data_len, wav_file::WavFile, wav_file_len, wav_header_len,
 };
 
 #[cfg(feature = "flac")]
@@ -61,12 +24,8 @@ pub use crate::streaming::StreamedAudioWriter;
 #[cfg(feature = "numpy")]
 pub mod python;
 
-#[cfg(feature = "numpy")]
-pub use crate::python::read_pyarray;
-
-#[cfg(all(feature = "numpy", target_endian = "little"))]
-pub use crate::python::{NativeAudioArray, read_pyarray_native};
-
+#[cfg(feature = "resampling")]
+use std::num::NonZeroU32;
 use std::{
     any::TypeId,
     fs::File,
@@ -74,15 +33,16 @@ use std::{
     path::Path,
 };
 
-use audio_samples::{AudioSamples, traits::StandardSample};
-#[cfg(feature = "resampling")]
-use std::num::NonZeroU32;
-
 #[cfg(feature = "resampling")]
 pub use audio_samples::operations::ResamplingQuality;
 #[cfg(feature = "resampling")]
 pub use audio_samples::operations::resample;
+use audio_samples::{AudioSamples, traits::StandardSample};
 
+#[cfg(feature = "numpy")]
+pub use crate::python::read_pyarray;
+#[cfg(all(feature = "numpy", target_endian = "little"))]
+pub use crate::python::{NativeAudioArray, read_pyarray_native};
 pub use crate::{
     error::{AudioIOError, AudioIOResult},
     traits::{AudioFile, AudioFileMetadata, AudioFileRead, AudioStreamReader},
@@ -125,13 +85,10 @@ pub fn peek_native_type<P: AsRef<Path>>(fp: P) -> AudioIOResult<ValidatedSampleT
                 let mut reader = BufReader::with_capacity(65536, file);
                 let (info, _) = parse_wav_header_streaming(&mut reader)?;
                 ValidatedSampleType::try_from(info.sample_type).map_err(|_| {
-                    AudioIOError::unsupported_format(format!(
-                        "Unsupported native sample type: {:?}",
-                        info.sample_type
-                    ))
+                    AudioIOError::unsupported_format(format!("Unsupported native sample type: {:?}", info.sample_type))
                 })
             }
-        }
+        },
         FileType::FLAC => {
             #[cfg(not(feature = "flac"))]
             return Err(crate::error::AudioIOError::missing_feature(
@@ -145,13 +102,10 @@ pub fn peek_native_type<P: AsRef<Path>>(fp: P) -> AudioIOResult<ValidatedSampleT
                 let flac_file = FlacFile::open_with_options(path, OpenOptions::default())?;
                 let info = flac_file.base_info()?;
                 ValidatedSampleType::try_from(info.sample_type).map_err(|_| {
-                    AudioIOError::unsupported_format(format!(
-                        "Unsupported native sample type: {:?}",
-                        info.sample_type
-                    ))
+                    AudioIOError::unsupported_format(format!("Unsupported native sample type: {:?}", info.sample_type))
                 })
             }
-        }
+        },
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
             "peek_native_type does not support: {other:?}"
         ))),
@@ -177,7 +131,7 @@ pub fn info<P: AsRef<Path>>(fp: P) -> AudioIOResult<BaseAudioInfo> {
                 let wav_file = WavFile::open_metadata(path)?;
                 wav_file.base_info()
             }
-        }
+        },
         FileType::FLAC => {
             #[cfg(not(feature = "flac"))]
             return Err(crate::error::AudioIOError::missing_feature(
@@ -191,7 +145,7 @@ pub fn info<P: AsRef<Path>>(fp: P) -> AudioIOResult<BaseAudioInfo> {
                 let flac_file = FlacFile::open_metadata(path)?;
                 flac_file.base_info()
             }
-        }
+        },
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
             "Unsupported file format: {other:?}"
         ))),
@@ -223,7 +177,7 @@ where
                 let samples = wav_file.read::<T>()?;
                 Ok(samples.into_owned())
             }
-        }
+        },
         FileType::FLAC => {
             #[cfg(not(feature = "flac"))]
             return Err(crate::error::AudioIOError::missing_feature(
@@ -238,7 +192,7 @@ where
                 let samples = flac_file.read::<T>()?;
                 Ok(samples.into_owned())
             }
-        }
+        },
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
             "Unsupported file format: {other:?}"
         ))),
@@ -256,12 +210,7 @@ where
     T: StandardSample,
 {
     let signal = read(fp)?;
-    resample::<T>(
-        &signal,
-        target_sr,
-        quality.unwrap_or(ResamplingQuality::Fast),
-    )
-    .map_err(AudioIOError::AudioSamples)
+    resample::<T>(&signal, target_sr, quality.unwrap_or(ResamplingQuality::Fast)).map_err(AudioIOError::AudioSamples)
 }
 
 /// Open a WAV file for streaming reads.
@@ -302,7 +251,7 @@ where
             let file = File::open(path)?;
             let reader = BufReader::new(file);
             StreamedWavFile::new_with_path(reader, path.to_path_buf())
-        }
+        },
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
             "Unsupported file format for streaming: {other:?}"
         ))),
@@ -372,7 +321,7 @@ where
             let file = File::open(path)?;
             let reader = BufReader::new(file);
             StreamedFlacFile::new_with_path(reader, path.to_path_buf())
-        }
+        },
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
             "Unsupported file format for FLAC streaming: {other:?}"
         ))),
@@ -450,7 +399,7 @@ where
                 let streamed = StreamedWavFile::new_with_path(reader, path.to_path_buf())?;
                 Ok(Box::new(streamed))
             }
-        }
+        },
         FileType::FLAC => {
             #[cfg(not(feature = "flac"))]
             return Err(crate::error::AudioIOError::missing_feature(
@@ -464,7 +413,7 @@ where
                 let streamed = StreamedFlacFile::new_with_path(reader, path.to_path_buf())?;
                 Ok(Box::new(streamed))
             }
-        }
+        },
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
             "Unsupported file format for streaming: {other:?}"
         ))),
@@ -599,7 +548,7 @@ where
                     sample_rate,
                 )?))
             }
-        }
+        },
         FileType::FLAC => {
             #[cfg(not(feature = "flac"))]
             {
@@ -616,7 +565,7 @@ where
                     sample_rate,
                 )?))
             }
-        }
+        },
         other => Err(AudioIOError::unsupported_format(format!(
             "Unsupported output format for streaming write: {other:?}"
         ))),
@@ -665,7 +614,7 @@ where
             let file = File::create(path)?;
             let writer = BufWriter::with_capacity(256 * 1024, file);
             flac_writer_for_type::<T, _>(writer, channels, sample_rate)
-        }
+        },
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
             "Unsupported output format for streaming FLAC write: {other:?}"
         ))),
@@ -691,23 +640,13 @@ where
 ///
 /// Shared by [`create_streamed_flac`] and [`create_streamed_flac_writer`].
 #[cfg(feature = "flac")]
-fn flac_writer_for_type<T, W>(
-    writer: W,
-    channels: u16,
-    sample_rate: u32,
-) -> AudioIOResult<StreamedFlacWriter<W>>
+fn flac_writer_for_type<T, W>(writer: W, channels: u16, sample_rate: u32) -> AudioIOResult<StreamedFlacWriter<W>>
 where
     T: StandardSample + 'static,
     W: WriteSeek,
 {
     let sample_type = validated_sample_type_of::<T>()?;
-    StreamedFlacWriter::new(
-        writer,
-        channels,
-        sample_rate,
-        sample_type,
-        CompressionLevel::default(),
-    )
+    StreamedFlacWriter::new(writer, channels, sample_rate, sample_type, CompressionLevel::default())
 }
 
 /// Create a streaming WAV writer to any `WriteSeek` destination.
@@ -715,11 +654,7 @@ where
 /// The sample type is inferred from the generic parameter `T`. Allows streaming to
 /// in-memory buffers, network streams, or any custom `WriteSeek` implementation.
 #[cfg(feature = "wav")]
-pub fn create_streamed_writer<W, T>(
-    writer: W,
-    channels: u16,
-    sample_rate: u32,
-) -> AudioIOResult<StreamedWavWriter<W>>
+pub fn create_streamed_writer<W, T>(writer: W, channels: u16, sample_rate: u32) -> AudioIOResult<StreamedWavWriter<W>>
 where
     W: WriteSeek,
     T: StandardSample + 'static,
@@ -731,11 +666,7 @@ where
 ///
 /// Shared by `create_streamed` and `create_streamed_writer` to avoid duplication.
 #[cfg(feature = "wav")]
-fn wav_writer_for_type<T, W>(
-    writer: W,
-    channels: u16,
-    sample_rate: u32,
-) -> AudioIOResult<StreamedWavWriter<W>>
+fn wav_writer_for_type<T, W>(writer: W, channels: u16, sample_rate: u32) -> AudioIOResult<StreamedWavWriter<W>>
 where
     T: StandardSample + 'static,
     W: WriteSeek,
@@ -745,19 +676,11 @@ where
     match type_id {
         id if id == TypeId::of::<u8>() || id == TypeId::of::<i16>() => {
             StreamedWavWriter::new_i16(writer, channels, sample_rate)
-        }
-        id if id == TypeId::of::<I24>() => {
-            StreamedWavWriter::new_i24(writer, channels, sample_rate)
-        }
-        id if id == TypeId::of::<i32>() => {
-            StreamedWavWriter::new_i32(writer, channels, sample_rate)
-        }
-        id if id == TypeId::of::<f32>() => {
-            StreamedWavWriter::new_f32(writer, channels, sample_rate)
-        }
-        id if id == TypeId::of::<f64>() => {
-            StreamedWavWriter::new_f64(writer, channels, sample_rate)
-        }
+        },
+        id if id == TypeId::of::<I24>() => StreamedWavWriter::new_i24(writer, channels, sample_rate),
+        id if id == TypeId::of::<i32>() => StreamedWavWriter::new_i32(writer, channels, sample_rate),
+        id if id == TypeId::of::<f32>() => StreamedWavWriter::new_f32(writer, channels, sample_rate),
+        id if id == TypeId::of::<f64>() => StreamedWavWriter::new_f64(writer, channels, sample_rate),
         _ => Err(AudioIOError::unsupported_format(format!(
             "No WAV encoding for sample type (TypeId: {type_id:?})"
         ))),
@@ -851,7 +774,7 @@ where
                 let wav_file = WavFile::open_with_options(path, OpenOptions::default())?;
                 Ok(Box::new(wav_file))
             }
-        }
+        },
         FileType::FLAC => {
             #[cfg(not(feature = "flac"))]
             return Err(crate::error::AudioIOError::missing_feature(
@@ -865,7 +788,7 @@ where
                 let flac_file = FlacFile::open_with_options(path, OpenOptions::default())?;
                 Ok(Box::new(flac_file))
             }
-        }
+        },
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
             "Unsupported file format: {other:?}"
         ))),
@@ -895,11 +818,7 @@ where
 /// write_with_options("long.wav", &audio, WriteOptions { write_buf_capacity: 16 * 1024 * 1024 })?;
 /// # Ok::<(), audio_samples_io::error::AudioIOError>(())
 /// ```
-pub fn write_with_options<P, T>(
-    fp: P,
-    audio: &AudioSamples<T>,
-    opts: WriteOptions,
-) -> AudioIOResult<()>
+pub fn write_with_options<P, T>(fp: P, audio: &AudioSamples<T>, opts: WriteOptions) -> AudioIOResult<()>
 where
     P: AsRef<Path>,
     T: StandardSample + 'static,
@@ -918,7 +837,7 @@ where
                 let file = std::fs::File::create(path)?;
                 crate::wav::wav_file::write_wav(file, audio, opts)
             }
-        }
+        },
         FileType::FLAC => {
             #[cfg(not(feature = "flac"))]
             return Err(crate::error::AudioIOError::missing_feature(
@@ -931,7 +850,7 @@ where
                 let buf_writer = std::io::BufWriter::with_capacity(opts.write_buf_capacity, file);
                 crate::flac::write_flac(buf_writer, audio, CompressionLevel::default())
             }
-        }
+        },
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
             "Unsupported format: {other:?}"
         ))),
@@ -1045,7 +964,7 @@ where
             {
                 crate::wav::wav_file::write_wav(writer, audio, opts)
             }
-        }
+        },
         FileType::FLAC => {
             #[cfg(not(feature = "flac"))]
             return Err(crate::error::AudioIOError::missing_feature(
@@ -1056,7 +975,7 @@ where
             {
                 crate::flac::write_flac(writer, audio, CompressionLevel::default())
             }
-        }
+        },
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
             "Unsupported format for write_with: {other:?}"
         ))),
@@ -1078,10 +997,7 @@ mod lib_tests {
 
         let audio_info = info_result.expect("Expected successful info retrieval");
         assert_eq!(audio_info.file_type, FileType::WAV);
-        assert!(
-            audio_info.sample_rate.get() > 0,
-            "Sample rate should be positive"
-        );
+        assert!(audio_info.sample_rate.get() > 0, "Sample rate should be positive");
         assert!(audio_info.channels > 0, "Channel count should be positive");
         println!("Audio info: {audio_info:#}");
     }
@@ -1107,8 +1023,9 @@ mod lib_tests {
 
     #[test]
     fn test_write_function() {
-        use audio_samples::sine_wave;
         use std::fs;
+
+        use audio_samples::sine_wave;
 
         // Generate test audio
         let sample_rate = sample_rate!(44100);
@@ -1119,10 +1036,7 @@ mod lib_tests {
         write(&output_path, &sine_samples).expect("Failed to write WAV file");
 
         // Verify file exists and can be read back
-        assert!(
-            fs::metadata(&output_path).is_ok(),
-            "Output file should exist"
-        );
+        assert!(fs::metadata(&output_path).is_ok(), "Output file should exist");
 
         let read_back = read::<_, f32>(&output_path).expect("Failed to read back WAV file");
         assert_eq!(read_back.sample_rate(), sample_rate);
@@ -1156,8 +1070,9 @@ mod lib_tests {
 
     #[test]
     fn test_write_with_function() {
-        use audio_samples::sine_wave;
         use std::io::Cursor;
+
+        use audio_samples::sine_wave;
 
         // Generate test audio
         let sample_rate = sample_rate!(22050);
@@ -1169,10 +1084,7 @@ mod lib_tests {
         write_with(cursor, &sine_samples, FileType::WAV).expect("Failed to write with cursor");
 
         // Verify buffer has WAV data
-        assert!(
-            buffer.len() > 44,
-            "Buffer should contain WAV header and data"
-        );
+        assert!(buffer.len() > 44, "Buffer should contain WAV header and data");
         assert_eq!(&buffer[0..4], b"RIFF", "Should start with RIFF header");
         assert_eq!(&buffer[8..12], b"WAVE", "Should contain WAVE identifier");
 
@@ -1200,8 +1112,9 @@ mod lib_tests {
 
     #[test]
     fn test_write_with_format_parameter() {
-        use audio_samples::sine_wave;
         use std::io::Cursor;
+
+        use audio_samples::sine_wave;
 
         // Generate test audio
         let sample_rate = sample_rate!(44100);
@@ -1213,25 +1126,15 @@ mod lib_tests {
         write_with(wav_cursor, &sine_samples, FileType::WAV).expect("Failed to write WAV format");
 
         // Verify WAV buffer has data and proper WAV header
-        assert!(
-            wav_buffer.len() > 44,
-            "WAV buffer should contain header and data"
-        );
+        assert!(wav_buffer.len() > 44, "WAV buffer should contain header and data");
         assert_eq!(&wav_buffer[0..4], b"RIFF", "Should start with RIFF header");
-        assert_eq!(
-            &wav_buffer[8..12],
-            b"WAVE",
-            "Should contain WAVE identifier"
-        );
+        assert_eq!(&wav_buffer[8..12], b"WAVE", "Should contain WAVE identifier");
 
         // Test error for unsupported format
         let mut buffer = Vec::new();
         let cursor = Cursor::new(&mut buffer);
         let result = write_with(cursor, &sine_samples, FileType::MP3);
-        assert!(
-            result.is_err(),
-            "Should return error for unsupported format"
-        );
+        assert!(result.is_err(), "Should return error for unsupported format");
 
         let error_msg = format!("{}", result.expect_err("Expected error"));
         assert!(
@@ -1242,8 +1145,9 @@ mod lib_tests {
 
     #[test]
     fn test_write_different_formats() {
-        use audio_samples::{AudioTypeConversion, sine_wave};
         use std::fs;
+
+        use audio_samples::{AudioTypeConversion, sine_wave};
 
         let sample_rate = sample_rate!(48000);
         let sine_base = sine_wave::<f32>(1000.0, Duration::from_secs_f64(0.02), sample_rate, 0.3);
@@ -1261,13 +1165,8 @@ mod lib_tests {
                     write(&output_path, &samples_i16).expect("Failed to write i16 WAV");
 
                     // Verify the written file can be read back as i16
-                    let read_back =
-                        read::<_, i16>(&output_path).expect("Failed to read back i16 WAV");
-                    assert_eq!(
-                        read_back.sample_rate(),
-                        sample_rate,
-                        "Sample rate mismatch for i16"
-                    );
+                    let read_back = read::<_, i16>(&output_path).expect("Failed to read back i16 WAV");
+                    assert_eq!(read_back.sample_rate(), sample_rate, "Sample rate mismatch for i16");
                     assert_eq!(
                         read_back.total_samples(),
                         samples_i16.total_samples(),
@@ -1276,27 +1175,19 @@ mod lib_tests {
 
                     // Verify WAV file properties using info function
                     let wav_info = info(&output_path).expect("Failed to get WAV info for i16");
-                    assert_eq!(
-                        wav_info.bits_per_sample, 16,
-                        "Bits per sample should be 16 for i16"
-                    );
+                    assert_eq!(wav_info.bits_per_sample, 16, "Bits per sample should be 16 for i16");
                     assert_eq!(
                         wav_info.sample_type,
                         audio_samples::SampleType::I16,
                         "Sample type should be I16"
                     );
-                }
+                },
                 "f32" => {
                     write(&output_path, &sine_base).expect("Failed to write f32 WAV");
 
                     // Verify the written file can be read back as f32
-                    let read_back =
-                        read::<_, f32>(&output_path).expect("Failed to read back f32 WAV");
-                    assert_eq!(
-                        read_back.sample_rate(),
-                        sample_rate,
-                        "Sample rate mismatch for f32"
-                    );
+                    let read_back = read::<_, f32>(&output_path).expect("Failed to read back f32 WAV");
+                    assert_eq!(read_back.sample_rate(), sample_rate, "Sample rate mismatch for f32");
                     assert_eq!(
                         read_back.total_samples(),
                         sine_base.total_samples(),
@@ -1305,16 +1196,13 @@ mod lib_tests {
 
                     // Verify WAV file properties using info function
                     let wav_info = info(&output_path).expect("Failed to get WAV info for f32");
-                    assert_eq!(
-                        wav_info.bits_per_sample, 32,
-                        "Bits per sample should be 32 for f32"
-                    );
+                    assert_eq!(wav_info.bits_per_sample, 32, "Bits per sample should be 32 for f32");
                     assert_eq!(
                         wav_info.sample_type,
                         audio_samples::SampleType::F32,
                         "Sample type should be F32"
                     );
-                }
+                },
                 _ => unreachable!("Unknown format"),
             }
 

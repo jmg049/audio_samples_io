@@ -1,11 +1,12 @@
+use core::fmt::{Display, Formatter, Result as FmtResult};
+use std::io;
+
+use thiserror::Error;
+
 #[cfg(feature = "flac")]
 use crate::flac::error::FlacError;
 #[cfg(feature = "wav")]
 use crate::wav::error::WavError;
-
-use core::fmt::{Display, Formatter, Result as FmtResult};
-use std::io;
-use thiserror::Error;
 
 /// Result type for audio_samples_io operations
 #[allow(clippy::result_large_err)]
@@ -83,11 +84,7 @@ impl Display for ErrorPosition {
 
 impl AudioIOError {
     /// Create a CorruptedData error with position information
-    pub fn corrupted_data(
-        description: impl Into<String>,
-        details: impl Into<String>,
-        position: ErrorPosition,
-    ) -> Self {
+    pub fn corrupted_data(description: impl Into<String>, details: impl Into<String>, position: ErrorPosition) -> Self {
         AudioIOError::CorruptedData {
             description: description.into(),
             details: details.into(),
@@ -96,10 +93,7 @@ impl AudioIOError {
     }
 
     /// Create a CorruptedData error without position information (uses default position)
-    pub fn corrupted_data_simple(
-        description: impl Into<String>,
-        details: impl Into<String>,
-    ) -> Self {
+    pub fn corrupted_data_simple(description: impl Into<String>, details: impl Into<String>) -> Self {
         AudioIOError::CorruptedData {
             description: description.into(),
             details: details.into(),

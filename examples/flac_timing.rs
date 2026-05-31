@@ -6,7 +6,6 @@ use std::{hint::black_box, io::Cursor, num::NonZeroU32, time::Instant};
 
 #[cfg(feature = "flac")]
 use audio_samples::sine_wave;
-
 #[cfg(feature = "flac")]
 use audio_samples_io::flac::{CompressionLevel, write_flac};
 
@@ -32,9 +31,7 @@ fn main() {
     let elapsed = t0.elapsed();
 
     let avg_us = elapsed.as_micros() as f64 / iters as f64;
-    println!(
-        "flac_write 44100hz 1ch i16 250ms: {avg_us:.1} µs/iter  ({iters} iters, {elapsed:.2?} total)"
-    );
+    println!("flac_write 44100hz 1ch i16 250ms: {avg_us:.1} µs/iter  ({iters} iters, {elapsed:.2?} total)");
 }
 
 #[cfg(not(feature = "flac"))]

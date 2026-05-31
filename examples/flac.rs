@@ -8,12 +8,7 @@ pub fn main() -> AudioIOResult<()> {
     use audio_samples::{AudioSamples, sample_rate, sine_wave};
 
     // create and write a basic signal and read it back
-    let sine_wave: AudioSamples<f32> = sine_wave::<f32>(
-        440.0,
-        Duration::from_secs_f64(10.0),
-        sample_rate!(44100),
-        1.0,
-    );
+    let sine_wave: AudioSamples<f32> = sine_wave::<f32>(440.0, Duration::from_secs_f64(10.0), sample_rate!(44100), 1.0);
     println!("Original: {sine_wave:#}");
     audio_samples_io::write("./sine_test.flac", &sine_wave)?;
     let read_sine_wave: AudioSamples<f32> = audio_samples_io::read("./sine_test.flac")?;

@@ -6,11 +6,12 @@
 //! stdout, pipes, and network sockets.
 //!
 //! Two modes:
-//! * **Known length** — pass `Some(total_frames)`; the header carries exact sizes and the sink
-//!   verifies on `finalize()` that exactly that many frames were written.
-//! * **Unknown length** — pass `None`; the header uses the `0xFFFFFFFF` streaming convention.
-//!   The resulting file is non-standard but widely readable (this crate's reader clamps such
-//!   sizes to the bytes actually present).
+//! * **Known length** — pass `Some(total_frames)`; the header carries exact sizes and the sink verifies on `finalize()`
+//!   that exactly that many frames were written.
+//! * **Unknown length** — pass `None`; the header uses the `0xFFFFFFFF` streaming convention. The resulting file is
+//!   non-standard but widely readable (this crate's reader clamps such sizes to the bytes actually present).
+
+use std::io::Write;
 
 use audio_samples::{AudioSamples, StandardSample};
 
@@ -23,7 +24,6 @@ use crate::{
         streaming_writer::write_frames_converted,
     },
 };
-use std::io::Write;
 
 /// A streaming WAV writer for `!Seek` destinations. See the [module docs](self).
 #[derive(Debug)]
@@ -117,25 +117,21 @@ where
         let frames_per_channel = samples.samples_per_channel().get();
 
         // With a known length, refuse to overrun the header's declared data size.
-        if let Some(declared) = self.declared_frames {
-            if self.frames_written + frames_per_channel > declared {
-                return Err(AudioIOError::corrupted_data_simple(
-                    "Too many frames for declared length",
-                    format!(
-                        "Sink declared {declared} frames; writing {} more would exceed it (already {})",
-                        frames_per_channel, self.frames_written
-                    ),
-                ));
-            }
+        if let Some(declared) = self.declared_frames
+            && self.frames_written + frames_per_channel > declared
+        {
+            return Err(AudioIOError::corrupted_data_simple(
+                "Too many frames for declared length",
+                format!(
+                    "Sink declared {declared} frames; writing {} more would exceed it (already {})",
+                    frames_per_channel, self.frames_written
+                ),
+            ));
         }
 
         let interleaved = samples.data.as_interleaved_vec();
-        let bytes_written = write_frames_converted::<T, W>(
-            &mut self.writer,
-            &interleaved,
-            self.sample_type,
-            self.channels,
-        )?;
+        let bytes_written =
+            write_frames_converted::<T, W>(&mut self.writer, &interleaved, self.sample_type, self.channels)?;
 
         self.frames_written += frames_per_channel;
         self.data_bytes_written += bytes_written as u64;
@@ -159,16 +155,16 @@ where
 
         // For a known length, the header already declared the exact sizes; writing a different
         // number of frames would leave those sizes wrong, so reject the mismatch.
-        if let Some(declared) = self.declared_frames {
-            if self.frames_written != declared {
-                return Err(AudioIOError::corrupted_data_simple(
-                    "Frame count does not match declared length",
-                    format!(
-                        "Sink declared {declared} frames but {} were written",
-                        self.frames_written
-                    ),
-                ));
-            }
+        if let Some(declared) = self.declared_frames
+            && self.frames_written != declared
+        {
+            return Err(AudioIOError::corrupted_data_simple(
+                "Frame count does not match declared length",
+                format!(
+                    "Sink declared {declared} frames but {} were written",
+                    self.frames_written
+                ),
+            ));
         }
 
         // Word-align the data chunk. The header's size fields already account for this pad byte
@@ -201,21 +197,21 @@ where
 
 #[cfg(test)]
 mod tests {
+    use audio_samples::{AudioSamples, nzu, sample_rate};
+
     use super::*;
     use crate::wav::{WavFile, wav_file_len};
     use crate::{
         OpenOptions,
         traits::{AudioFile, AudioFileRead},
     };
-    use audio_samples::{AudioSamples, nzu, sample_rate};
 
     #[test]
     fn known_length_sink_produces_exact_standard_file() {
         // A plain Vec is Write but not Seek — exactly the target use case.
         let mut buf: Vec<u8> = Vec::new();
         {
-            let mut sink = WavSink::new(&mut buf, 1, 44_100, ValidatedSampleType::I16, Some(256))
-                .expect("create sink");
+            let mut sink = WavSink::new(&mut buf, 1, 44_100, ValidatedSampleType::I16, Some(256)).expect("create sink");
             let audio = AudioSamples::<f32>::zeros_mono(nzu!(256), sample_rate!(44_100));
             sink.write_frames(&audio).expect("write");
             sink.finalize().expect("finalize");
@@ -226,8 +222,7 @@ mod tests {
 
         let path = std::env::temp_dir().join(format!("wavsink_{}.wav", std::process::id()));
         std::fs::write(&path, &buf).expect("write temp file");
-        let wav = <WavFile as AudioFile>::open_with_options(&path, OpenOptions::default())
-            .expect("open temp wav");
+        let wav = <WavFile as AudioFile>::open_with_options(&path, OpenOptions::default()).expect("open temp wav");
         let read = <WavFile as AudioFileRead>::read::<i16>(&wav).expect("read wav");
         assert_eq!(read.samples_per_channel().get(), 256);
         std::fs::remove_file(&path).ok();
@@ -237,8 +232,7 @@ mod tests {
     fn unknown_length_sink_is_readable_after_clamping() {
         let mut buf: Vec<u8> = Vec::new();
         {
-            let mut sink =
-                WavSink::new(&mut buf, 1, 8_000, ValidatedSampleType::I16, None).expect("create");
+            let mut sink = WavSink::new(&mut buf, 1, 8_000, ValidatedSampleType::I16, None).expect("create");
             let audio = AudioSamples::<f32>::zeros_mono(nzu!(100), sample_rate!(8_000));
             sink.write_frames(&audio).expect("write");
             sink.finalize().expect("finalize");
@@ -246,8 +240,7 @@ mod tests {
         // 0xFFFFFFFF size fields, but our reader clamps and reads the real 100 frames.
         let path = std::env::temp_dir().join(format!("wavsink_inf_{}.wav", std::process::id()));
         std::fs::write(&path, &buf).expect("write temp file");
-        let wav = <WavFile as AudioFile>::open_with_options(&path, OpenOptions::default())
-            .expect("open temp wav");
+        let wav = <WavFile as AudioFile>::open_with_options(&path, OpenOptions::default()).expect("open temp wav");
         let read = <WavFile as AudioFileRead>::read::<i16>(&wav).expect("read wav");
         assert_eq!(read.samples_per_channel().get(), 100);
         std::fs::remove_file(&path).ok();
@@ -256,8 +249,7 @@ mod tests {
     #[test]
     fn declared_length_overrun_is_rejected() {
         let mut buf: Vec<u8> = Vec::new();
-        let mut sink =
-            WavSink::new(&mut buf, 1, 44_100, ValidatedSampleType::I16, Some(10)).expect("create");
+        let mut sink = WavSink::new(&mut buf, 1, 44_100, ValidatedSampleType::I16, Some(10)).expect("create");
         let audio = AudioSamples::<f32>::zeros_mono(nzu!(20), sample_rate!(44_100));
         assert!(sink.write_frames(&audio).is_err());
     }

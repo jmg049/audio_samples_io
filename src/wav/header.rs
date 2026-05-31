@@ -7,27 +7,21 @@
 //! The bytes produced here are byte-for-byte identical to the header [`crate::wav::wav_file`]
 //! writes, so a precomputed size always matches the file that is ultimately written.
 
-use crate::types::ValidatedSampleType;
-use crate::wav::FormatCode;
 use std::io::Write;
 
 use crate::error::AudioIOResult;
+use crate::types::ValidatedSampleType;
+use crate::wav::FormatCode;
 
 /// Standard WAVE extensible sub-format GUID tail (`...-0000-0010-8000-00AA00389B71`).
-const SUBFORMAT_GUID_TAIL: [u8; 12] = [
-    0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71,
-];
+const SUBFORMAT_GUID_TAIL: [u8; 12] = [0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71];
 
 /// True if the given format requires a `WAVE_FORMAT_EXTENSIBLE` fmt chunk.
 ///
 /// Matches the write path: extensible is used for more than two channels, or for sample
 /// formats whose container size is non-standard for a base fmt chunk (24-bit, 64-bit float).
 pub const fn needs_extensible(channels: u16, sample_type: ValidatedSampleType) -> bool {
-    channels > 2
-        || matches!(
-            sample_type,
-            ValidatedSampleType::I24 | ValidatedSampleType::F64
-        )
+    channels > 2 || matches!(sample_type, ValidatedSampleType::I24 | ValidatedSampleType::F64)
 }
 
 /// Length in bytes of the fmt chunk *body* (16 base, or 40 extensible).
@@ -47,21 +41,13 @@ pub const fn wav_header_len(channels: u16, sample_type: ValidatedSampleType) -> 
 }
 
 /// Byte length of the raw audio payload for `total_frames` frames (excludes word-alignment pad).
-pub const fn wav_data_len(
-    channels: u16,
-    sample_type: ValidatedSampleType,
-    total_frames: usize,
-) -> usize {
+pub const fn wav_data_len(channels: u16, sample_type: ValidatedSampleType, total_frames: usize) -> usize {
     total_frames * channels as usize * sample_type.bytes_per_sample().get()
 }
 
 /// Exact total size of the finished WAV file in bytes, including header and the word-alignment
 /// pad byte appended after an odd-length data chunk.
-pub const fn wav_file_len(
-    channels: u16,
-    sample_type: ValidatedSampleType,
-    total_frames: usize,
-) -> usize {
+pub const fn wav_file_len(channels: u16, sample_type: ValidatedSampleType, total_frames: usize) -> usize {
     let data = wav_data_len(channels, sample_type, total_frames);
     let padded = data + (data & 1);
     wav_header_len(channels, sample_type) + padded
@@ -84,7 +70,7 @@ const fn channel_mask(channels: u16) -> u32 {
             } else {
                 0xFFFFFFFF
             }
-        }
+        },
     }
 }
 
@@ -214,17 +200,9 @@ mod tests {
     fn header_declares_expected_sizes() {
         let h = build_wav_header(2, 48_000, ValidatedSampleType::I16, 10).expect("build header");
         // data size = 10 frames * 2 ch * 2 bytes = 40
-        let data_size = u32::from_le_bytes([
-            h[h.len() - 4],
-            h[h.len() - 3],
-            h[h.len() - 2],
-            h[h.len() - 1],
-        ]);
+        let data_size = u32::from_le_bytes([h[h.len() - 4], h[h.len() - 3], h[h.len() - 2], h[h.len() - 1]]);
         assert_eq!(data_size, 40);
         let riff_size = u32::from_le_bytes([h[4], h[5], h[6], h[7]]);
-        assert_eq!(
-            riff_size as usize,
-            wav_file_len(2, ValidatedSampleType::I16, 10) - 8
-        );
+        assert_eq!(riff_size as usize, wav_file_len(2, ValidatedSampleType::I16, 10) - 8);
     }
 }

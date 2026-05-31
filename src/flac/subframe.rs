@@ -9,12 +9,10 @@
 use crate::flac::bitstream::{BitReader, BitWriter};
 use crate::flac::error::FlacError;
 use crate::flac::lpc::{
-    fixed_predictor_residual, fixed_predictor_restore, fixed_predictor_restore_into,
-    lpc_predictor_residual, lpc_predictor_restore, lpc_predictor_restore_into,
+    fixed_predictor_residual, fixed_predictor_restore, fixed_predictor_restore_into, lpc_predictor_residual,
+    lpc_predictor_restore, lpc_predictor_restore_into,
 };
-use crate::flac::rice::{
-    RiceMethod, RicePlan, decode_residual, encode_residual_planned, plan_residual_coding,
-};
+use crate::flac::rice::{RiceMethod, RicePlan, decode_residual, encode_residual_planned, plan_residual_coding};
 
 /// Subframe type codes (from 6-bit header)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,11 +131,7 @@ impl SubframeHeader {
 /// * `reader` - Bitstream reader
 /// * `block_size` - Number of samples in the block
 /// * `bits_per_sample` - Bits per sample (may be adjusted for channel assignment)
-pub fn decode_subframe(
-    reader: &mut BitReader,
-    block_size: usize,
-    bits_per_sample: u8,
-) -> Result<Subframe, FlacError> {
+pub fn decode_subframe(reader: &mut BitReader, block_size: usize, bits_per_sample: u8) -> Result<Subframe, FlacError> {
     let header = SubframeHeader::decode(reader)?;
 
     // Adjust bits per sample for wasted bits
@@ -146,9 +140,7 @@ pub fn decode_subframe(
     let mut samples = match header.subframe_type {
         SubframeType::Constant => decode_constant(reader, block_size, effective_bits)?,
         SubframeType::Verbatim => decode_verbatim(reader, block_size, effective_bits)?,
-        SubframeType::Fixed(order) => {
-            decode_fixed(reader, block_size, effective_bits, order as usize)?
-        }
+        SubframeType::Fixed(order) => decode_fixed(reader, block_size, effective_bits, order as usize)?,
         SubframeType::Lpc(order) => decode_lpc(reader, block_size, effective_bits, order as usize)?,
     };
 
@@ -167,21 +159,13 @@ pub fn decode_subframe(
 }
 
 /// Decode a CONSTANT subframe.
-fn decode_constant(
-    reader: &mut BitReader,
-    block_size: usize,
-    bits_per_sample: u8,
-) -> Result<Vec<i32>, FlacError> {
+fn decode_constant(reader: &mut BitReader, block_size: usize, bits_per_sample: u8) -> Result<Vec<i32>, FlacError> {
     let value = reader.read_bits_signed(bits_per_sample)?;
     Ok(vec![value; block_size])
 }
 
 /// Decode a VERBATIM subframe.
-fn decode_verbatim(
-    reader: &mut BitReader,
-    block_size: usize,
-    bits_per_sample: u8,
-) -> Result<Vec<i32>, FlacError> {
+fn decode_verbatim(reader: &mut BitReader, block_size: usize, bits_per_sample: u8) -> Result<Vec<i32>, FlacError> {
     let mut samples = Vec::with_capacity(block_size);
     for _ in 0..block_size {
         samples.push(reader.read_bits_signed(bits_per_sample)?);
@@ -295,13 +279,13 @@ pub(crate) fn decode_subframe_into(
         SubframeType::Constant => {
             let value = reader.read_bits_signed(effective_bits)?;
             out.resize(start + block_size, value);
-        }
+        },
         SubframeType::Verbatim => {
             out.reserve(block_size);
             for _ in 0..block_size {
                 out.push(reader.read_bits_signed(effective_bits)?);
             }
-        }
+        },
         SubframeType::Fixed(order) => {
             let order = order as usize;
             // Warm-up samples
@@ -345,16 +329,10 @@ pub(crate) fn decode_subframe_into(
                 if param == escape_code {
                     let bps = reader.read_bits(5)? as u8;
                     if bps > 32 {
-                        return Err(crate::flac::error::FlacError::RiceEscapeBitsTooLarge {
-                            bits: bps,
-                        });
+                        return Err(crate::flac::error::FlacError::RiceEscapeBitsTooLarge { bits: bps });
                     }
                     for _ in 0..samples {
-                        let v = if bps == 0 {
-                            0
-                        } else {
-                            reader.read_bits_signed(bps)?
-                        };
+                        let v = if bps == 0 { 0 } else { reader.read_bits_signed(bps)? };
                         unsafe {
                             ptr.add(write_idx).write(v);
                         }
@@ -370,9 +348,7 @@ pub(crate) fn decode_subframe_into(
                     }
                 } else {
                     for _ in 0..samples {
-                        let v = crate::flac::rice::unsigned_to_signed(
-                            reader.read_rice_unsigned(param)?,
-                        );
+                        let v = crate::flac::rice::unsigned_to_signed(reader.read_rice_unsigned(param)?);
                         unsafe {
                             ptr.add(write_idx).write(v);
                         }
@@ -385,7 +361,7 @@ pub(crate) fn decode_subframe_into(
             }
             // In-place restore: out[start..start+order]=warmup, out[start+order..]=residuals
             fixed_predictor_restore_into(out, start, order, block_size)?;
-        }
+        },
         SubframeType::Lpc(order) => {
             let order = order as usize;
             out.reserve(block_size);
@@ -442,16 +418,10 @@ pub(crate) fn decode_subframe_into(
                 if param == escape_code {
                     let bps = reader.read_bits(5)? as u8;
                     if bps > 32 {
-                        return Err(crate::flac::error::FlacError::RiceEscapeBitsTooLarge {
-                            bits: bps,
-                        });
+                        return Err(crate::flac::error::FlacError::RiceEscapeBitsTooLarge { bits: bps });
                     }
                     for _ in 0..samples {
-                        let v = if bps == 0 {
-                            0
-                        } else {
-                            reader.read_bits_signed(bps)?
-                        };
+                        let v = if bps == 0 { 0 } else { reader.read_bits_signed(bps)? };
                         unsafe {
                             ptr.add(write_idx).write(v);
                         }
@@ -467,9 +437,7 @@ pub(crate) fn decode_subframe_into(
                     }
                 } else {
                     for _ in 0..samples {
-                        let v = crate::flac::rice::unsigned_to_signed(
-                            reader.read_rice_unsigned(param)?,
-                        );
+                        let v = crate::flac::rice::unsigned_to_signed(reader.read_rice_unsigned(param)?);
                         unsafe {
                             ptr.add(write_idx).write(v);
                         }
@@ -481,7 +449,7 @@ pub(crate) fn decode_subframe_into(
                 out.set_len(write_idx);
             }
             lpc_predictor_restore_into(out, start, order, qlp_coeffs, qlp_shift)?;
-        }
+        },
     }
 
     // Restore wasted bits in-place
@@ -637,60 +605,53 @@ pub(crate) fn encode_subframe_into(
             None
         };
         order.and_then(|o| {
-            fixed_predictor_residual(effective_samples, o)
-                .ok()
-                .map(|res| {
-                    let plan = plan_residual_coding(
-                        &res,
-                        block_size,
-                        o,
-                        RiceMethod::Rice,
-                        min_partition_order,
-                        max_partition_order,
-                        exhaustive_rice,
-                    );
-                    let est = header_overhead + o * effective_bits as usize + 6 + plan.est_bits;
-                    (o, res, plan, est)
-                })
+            fixed_predictor_residual(effective_samples, o).ok().map(|res| {
+                let plan = plan_residual_coding(
+                    &res,
+                    block_size,
+                    o,
+                    RiceMethod::Rice,
+                    min_partition_order,
+                    max_partition_order,
+                    exhaustive_rice,
+                );
+                let est = header_overhead + o * effective_bits as usize + 6 + plan.est_bits;
+                (o, res, plan, est)
+            })
         })
     };
 
     // LPC candidate (only if enabled and block is large enough)
     let lpc_state: Option<(usize, Vec<i32>, i8, Vec<i32>, RicePlan, usize)> =
         if max_lpc_order > 0 && block_size > max_lpc_order {
-            crate::flac::lpc::find_best_lpc_order(
-                effective_samples,
-                max_lpc_order,
-                qlp_precision,
-                false,
-            )
-            .ok()
-            .and_then(|(order, qlp_coeffs, qlp_shift)| {
-                if order == 0 {
-                    return None;
-                }
-                lpc_predictor_residual(effective_samples, &qlp_coeffs, qlp_shift)
-                    .ok()
-                    .map(|res| {
-                        let plan = plan_residual_coding(
-                            &res,
-                            block_size,
-                            order,
-                            RiceMethod::Rice,
-                            min_partition_order,
-                            max_partition_order,
-                            exhaustive_rice,
-                        );
-                        let est = header_overhead
-                            + order * effective_bits as usize
-                            + 4
-                            + 5
-                            + order * qlp_precision as usize
-                            + 6
-                            + plan.est_bits;
-                        (order, qlp_coeffs, qlp_shift, res, plan, est)
-                    })
-            })
+            crate::flac::lpc::find_best_lpc_order(effective_samples, max_lpc_order, qlp_precision, false)
+                .ok()
+                .and_then(|(order, qlp_coeffs, qlp_shift)| {
+                    if order == 0 {
+                        return None;
+                    }
+                    lpc_predictor_residual(effective_samples, &qlp_coeffs, qlp_shift)
+                        .ok()
+                        .map(|res| {
+                            let plan = plan_residual_coding(
+                                &res,
+                                block_size,
+                                order,
+                                RiceMethod::Rice,
+                                min_partition_order,
+                                max_partition_order,
+                                exhaustive_rice,
+                            );
+                            let est = header_overhead
+                                + order * effective_bits as usize
+                                + 4
+                                + 5
+                                + order * qlp_precision as usize
+                                + 6
+                                + plan.est_bits;
+                            (order, qlp_coeffs, qlp_shift, res, plan, est)
+                        })
+                })
         } else {
             None
         };
@@ -812,11 +773,7 @@ fn compute_wasted_bits(samples: &[i32]) -> u8 {
 mod tests {
     use super::*;
 
-    fn try_encode_constant(
-        samples: &[i32],
-        bits_per_sample: u8,
-        wasted_bits: u8,
-    ) -> Option<EncodedSubframe> {
+    fn try_encode_constant(samples: &[i32], bits_per_sample: u8, wasted_bits: u8) -> Option<EncodedSubframe> {
         if samples.is_empty() {
             return None;
         }
@@ -900,15 +857,13 @@ mod tests {
         let samples: Vec<i32> = (0..256).map(|i| i * 10).collect();
         let bits_per_sample = 16;
 
-        let encoded =
-            encode_subframe(&samples, bits_per_sample, 0, 0, 0, 4, false).expect("Encode failed");
+        let encoded = encode_subframe(&samples, bits_per_sample, 0, 0, 0, 4, false).expect("Encode failed");
 
         assert!(matches!(encoded.subframe_type, SubframeType::Fixed(_)));
 
         // Decode
         let mut reader = BitReader::new(&encoded.data);
-        let decoded =
-            decode_subframe(&mut reader, samples.len(), bits_per_sample).expect("Decode failed");
+        let decoded = decode_subframe(&mut reader, samples.len(), bits_per_sample).expect("Decode failed");
 
         assert_eq!(decoded.samples, samples);
     }
@@ -954,8 +909,7 @@ fn test_fixed_subframe_17bps_roundtrip() {
         .collect();
 
     let bits_per_sample = 17u8;
-    let encoded =
-        encode_subframe(&samples, bits_per_sample, 0, 12, 0, 6, false).expect("encode failed");
+    let encoded = encode_subframe(&samples, bits_per_sample, 0, 12, 0, 6, false).expect("encode failed");
 
     let mut reader = BitReader::new(&encoded.data);
     let decoded = decode_subframe(&mut reader, n, bits_per_sample).expect("decode failed");

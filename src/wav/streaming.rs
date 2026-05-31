@@ -11,9 +11,7 @@ use std::{
     time::Duration,
 };
 
-use audio_samples::{
-    AudioSamples, CastFrom, CastInto, ConvertFrom, ConvertTo, I24, nzu, traits::StandardSample,
-};
+use audio_samples::{AudioSamples, CastFrom, CastInto, ConvertFrom, ConvertTo, I24, nzu, traits::StandardSample};
 use non_empty_slice::NonEmptyVec;
 
 use crate::{
@@ -143,16 +141,13 @@ where
         }
 
         // Parse RIFF header
-        let riff_bytes: [u8; 4] = header_buf
-            .get(0..4)
-            .and_then(|s| s.try_into().ok())
-            .ok_or_else(|| {
-                AudioIOError::corrupted_data(
-                    "Cannot read RIFF header",
-                    format!("Read {} bytes", header_buf.len()),
-                    ErrorPosition::new(0).with_description("RIFF header at file start"),
-                )
-            })?;
+        let riff_bytes: [u8; 4] = header_buf.get(0..4).and_then(|s| s.try_into().ok()).ok_or_else(|| {
+            AudioIOError::corrupted_data(
+                "Cannot read RIFF header",
+                format!("Read {} bytes", header_buf.len()),
+                ErrorPosition::new(0).with_description("RIFF header at file start"),
+            )
+        })?;
         let riff = ChunkID::new(&riff_bytes);
 
         if riff != RIFF_CHUNK {
@@ -163,28 +158,22 @@ where
             ));
         }
 
-        let riff_size_bytes: [u8; 4] = header_buf
-            .get(4..8)
-            .and_then(|s| s.try_into().ok())
-            .ok_or_else(|| {
-                AudioIOError::corrupted_data(
-                    "Cannot read RIFF chunk size",
-                    format!("Read {} bytes", header_buf.len()),
-                    ErrorPosition::new(4).with_description("RIFF chunk size"),
-                )
-            })?;
+        let riff_size_bytes: [u8; 4] = header_buf.get(4..8).and_then(|s| s.try_into().ok()).ok_or_else(|| {
+            AudioIOError::corrupted_data(
+                "Cannot read RIFF chunk size",
+                format!("Read {} bytes", header_buf.len()),
+                ErrorPosition::new(4).with_description("RIFF chunk size"),
+            )
+        })?;
         let riff_size = u32::from_le_bytes(riff_size_bytes);
 
-        let wave_bytes: [u8; 4] = header_buf
-            .get(8..12)
-            .and_then(|s| s.try_into().ok())
-            .ok_or_else(|| {
-                AudioIOError::corrupted_data(
-                    "Cannot read WAVE identifier",
-                    format!("Read {} bytes", header_buf.len()),
-                    ErrorPosition::new(8).with_description("WAVE identifier"),
-                )
-            })?;
+        let wave_bytes: [u8; 4] = header_buf.get(8..12).and_then(|s| s.try_into().ok()).ok_or_else(|| {
+            AudioIOError::corrupted_data(
+                "Cannot read WAVE identifier",
+                format!("Read {} bytes", header_buf.len()),
+                ErrorPosition::new(8).with_description("WAVE identifier"),
+            )
+        })?;
         let wave = ChunkID::new(&wave_bytes);
 
         if wave != WAVE_CHUNK {
@@ -234,21 +223,16 @@ where
             }
 
             let id = ChunkID::new(header_buf[offset..offset + 4].try_into().map_err(|_| {
-                AudioIOError::corrupted_data(
-                    "Cannot read chunk ID",
-                    "Insufficient data",
-                    ErrorPosition::new(offset),
-                )
+                AudioIOError::corrupted_data("Cannot read chunk ID", "Insufficient data", ErrorPosition::new(offset))
             })?);
 
-            let size =
-                u32::from_le_bytes(header_buf[offset + 4..offset + 8].try_into().map_err(|_| {
-                    AudioIOError::corrupted_data(
-                        "Cannot read chunk size",
-                        "Insufficient data",
-                        ErrorPosition::new(offset + 4),
-                    )
-                })?) as usize;
+            let size = u32::from_le_bytes(header_buf[offset + 4..offset + 8].try_into().map_err(|_| {
+                AudioIOError::corrupted_data(
+                    "Cannot read chunk size",
+                    "Insufficient data",
+                    ErrorPosition::new(offset + 4),
+                )
+            })?) as usize;
 
             let padded = size + (size & 1);
             let header_and_data_size = 8 + padded;
@@ -302,10 +286,7 @@ where
         let fmt_bytes = fmt_chunk_data.ok_or_else(|| {
             AudioIOError::corrupted_data(
                 "FMT chunk not found in WAV file",
-                format!(
-                    "Found chunks: {:?}",
-                    chunks.iter().map(|c| c.id).collect::<Vec<_>>()
-                ),
+                format!("Found chunks: {:?}", chunks.iter().map(|c| c.id).collect::<Vec<_>>()),
                 ErrorPosition::new(12),
             )
         })?;
@@ -313,26 +294,18 @@ where
         let data_desc = data_chunk_desc.ok_or_else(|| {
             AudioIOError::corrupted_data(
                 "DATA chunk not found in WAV file",
-                format!(
-                    "Found chunks: {:?}",
-                    chunks.iter().map(|c| c.id).collect::<Vec<_>>()
-                ),
+                format!("Found chunks: {:?}", chunks.iter().map(|c| c.id).collect::<Vec<_>>()),
                 ErrorPosition::new(12),
             )
         })?;
 
         // Parse fmt chunk
-        let fmt_chunk =
-            FmtChunk::from_bytes_validated(&fmt_bytes).map_err(AudioIOError::WavError)?;
+        let fmt_chunk = FmtChunk::from_bytes_validated(&fmt_bytes).map_err(AudioIOError::WavError)?;
         let sample_type = fmt_chunk.actual_sample_type()?;
 
-        let (format_code, channels, sample_rate, byte_rate, block_align, bits_per_sample) =
-            fmt_chunk.fmt_chunk();
+        let (format_code, channels, sample_rate, byte_rate, block_align, bits_per_sample) = fmt_chunk.fmt_chunk();
         let sample_rate = NonZeroU32::new(sample_rate).ok_or_else(|| {
-            AudioIOError::corrupted_data_simple(
-                "Invalid sample rate in FMT chunk",
-                "Sample rate cannot be zero",
-            )
+            AudioIOError::corrupted_data_simple("Invalid sample rate in FMT chunk", "Sample rate cannot be zero")
         })?;
         let bytes_per_sample = bits_per_sample / 8;
 
@@ -419,8 +392,7 @@ where
         }
 
         let byte_offset = frame as u64 * self.block_align as u64;
-        self.reader
-            .seek(SeekFrom::Start(self.data_offset + byte_offset))?;
+        self.reader.seek(SeekFrom::Start(self.data_offset + byte_offset))?;
         self.current_frame = frame;
         Ok(())
     }
@@ -490,11 +462,8 @@ where
         if buffer.is_mono() {
             buffer.replace_with_vec(&converted)?;
         } else {
-            let planar =
-                audio_samples::simd_conversions::deinterleave_multi_vec(&converted, num_channels)
-                    .map_err(|e| {
-                    AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string())
-                })?;
+            let planar = audio_samples::simd_conversions::deinterleave_multi_vec(&converted, num_channels)
+                .map_err(|e| AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string()))?;
             buffer.replace_with_vec(&planar)?;
         }
 
@@ -530,11 +499,11 @@ where
                     .chunks_exact(4)
                     .map(|c| T::convert_from(f32::from_le_bytes([c[0], c[1], c[2], c[3]]))),
             ),
-            ValidatedSampleType::F64 => out.extend(bytes.chunks_exact(8).map(|c| {
-                T::convert_from(f64::from_le_bytes([
-                    c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
-                ]))
-            })),
+            ValidatedSampleType::F64 => out.extend(
+                bytes
+                    .chunks_exact(8)
+                    .map(|c| T::convert_from(f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))),
+            ),
         }
     }
 
@@ -577,11 +546,7 @@ where
     /// # Panics
     ///
     /// Does not panic since the sample rate is guaranteed to be non-zero during parsing.
-    pub fn windows<T>(
-        &mut self,
-        window_size: NonZeroUsize,
-        hop_size: NonZeroUsize,
-    ) -> StreamedWindowIter<'_, R, T>
+    pub fn windows<T>(&mut self, window_size: NonZeroUsize, hop_size: NonZeroUsize) -> StreamedWindowIter<'_, R, T>
     where
         T: StandardSample + ConvertTo<T> + ConvertFrom<T> + 'static,
         f64: CastInto<T> + CastFrom<T> + ConvertTo<T> + ConvertFrom<T>,
@@ -655,8 +620,7 @@ where
     }
 
     fn base_info(&self) -> AudioIOResult<BaseAudioInfo> {
-        let duration =
-            Duration::from_secs_f64(self.total_frames as f64 / self.sample_rate.get() as f64);
+        let duration = Duration::from_secs_f64(self.total_frames as f64 / self.sample_rate.get() as f64);
         Ok(BaseAudioInfo::new(
             self.sample_rate,
             self.channels,
@@ -794,10 +758,7 @@ where
             return None;
         }
 
-        match self
-            .source
-            .read_frames_into(&mut self.frame_buffer, nzu!(1))
-        {
+        match self.source.read_frames_into(&mut self.frame_buffer, nzu!(1)) {
             Ok(0) => None,
             Ok(_) => Some(Ok(self.frame_buffer.clone())),
             Err(e) => Some(Err(e)),
@@ -855,10 +816,7 @@ where
         }
         self.first_window = false;
 
-        match self
-            .source
-            .read_frames_into(&mut self.window_buffer, self.window_size)
-        {
+        match self.source.read_frames_into(&mut self.window_buffer, self.window_size) {
             Ok(0) => None,
             Ok(_) => Some(Ok(self.window_buffer.clone())),
             Err(e) => Some(Err(e)),
@@ -937,11 +895,12 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
+    use std::io::BufReader;
+
     use audio_samples::{nzu, sample_rate};
 
     use super::*;
-    use std::fs::File;
-    use std::io::BufReader;
 
     #[test]
     fn test_streamed_wav_file_open() {
@@ -979,9 +938,7 @@ mod tests {
             let channels = unsafe { NonZeroU32::new_unchecked(channels as u32) };
             AudioSamples::<f32>::zeros_multi(channels, nzu!(1024), sample_rate)
         };
-        let frames_read = streamed
-            .read_frames_into(&mut buffer, nzu!(1024))
-            .expect("Read failed");
+        let frames_read = streamed.read_frames_into(&mut buffer, nzu!(1024)).expect("Read failed");
 
         assert!(frames_read > 0);
         assert_eq!(streamed.current_frame(), frames_read);

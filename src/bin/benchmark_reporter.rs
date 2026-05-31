@@ -9,13 +9,13 @@ fn main() {
 
 #[cfg(feature = "benchmark_reporting")]
 mod benchmark_report {
-    use serde::Deserialize;
-    use sysinfo::{Disks, System};
-    use walkdir::WalkDir;
-
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::Path;
+
+    use serde::Deserialize;
+    use sysinfo::{Disks, System};
+    use walkdir::WalkDir;
 
     #[derive(Debug, Deserialize)]
     struct Estimates {
@@ -149,11 +149,7 @@ mod benchmark_report {
 
                 ("audio_samples_io".to_string(), operation, format)
             } else {
-                (
-                    group_id.to_string(),
-                    "unknown".to_string(),
-                    "unknown".to_string(),
-                )
+                (group_id.to_string(), "unknown".to_string(), "unknown".to_string())
             }
         } else if let Some(rest) = group_id.strip_prefix("hound-") {
             // Remove "hound_"
@@ -170,18 +166,10 @@ mod benchmark_report {
 
                 ("hound".to_string(), operation, format)
             } else {
-                (
-                    group_id.to_string(),
-                    "unknown".to_string(),
-                    "unknown".to_string(),
-                )
+                (group_id.to_string(), "unknown".to_string(), "unknown".to_string())
             }
         } else {
-            (
-                group_id.to_string(),
-                "unknown".to_string(),
-                "unknown".to_string(),
-            )
+            (group_id.to_string(), "unknown".to_string(), "unknown".to_string())
         }
     }
 
@@ -200,8 +188,7 @@ mod benchmark_report {
         let fid = function_id.to_string();
         let fid_lc = fid.to_lowercase();
 
-        let (library, mut format) = if fid_lc.starts_with("audio-") || fid_lc.starts_with("audio_")
-        {
+        let (library, mut format) = if fid_lc.starts_with("audio-") || fid_lc.starts_with("audio_") {
             let parts: Vec<&str> = fid.split(|c| c == '-' || c == '_').collect();
             let fmt = parts
                 .get(1)
@@ -240,18 +227,13 @@ mod benchmark_report {
         let criterion_dir = Path::new("target/criterion");
 
         if !criterion_dir.exists() {
-            return Err(
-                "Criterion results directory not found. Please run benchmarks first.".into(),
-            );
+            return Err("Criterion results directory not found. Please run benchmarks first.".into());
         }
 
         let mut results = Vec::new();
 
         // Walk the criterion directory and locate all `benchmark.json` files.
-        for entry in WalkDir::new(criterion_dir)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
+        for entry in WalkDir::new(criterion_dir).into_iter().filter_map(|e| e.ok()) {
             if !entry.file_type().is_file() {
                 continue;
             }
@@ -278,9 +260,7 @@ mod benchmark_report {
             let benchmark_info: BenchmarkInfo = serde_json::from_str(&benchmark_content)?;
 
             // Skip unsupported placeholders
-            if benchmark_info.group_id.contains("unsupported")
-                || benchmark_info.function_id.contains("unsupported")
-            {
+            if benchmark_info.group_id.contains("unsupported") || benchmark_info.function_id.contains("unsupported") {
                 continue;
             }
 
@@ -313,15 +293,10 @@ mod benchmark_report {
             // Parent of benchmark.json should be the `new` directory
             let new_path = bench_path.parent().unwrap_or(criterion_dir);
 
-            if let Ok(result) =
-                load_benchmark_result(new_path, &library, &operation, &format, &duration)
-            {
+            if let Ok(result) = load_benchmark_result(new_path, &library, &operation, &format, &duration) {
                 results.push(result);
             } else {
-                eprintln!(
-                    "Warning: failed to load result for {}",
-                    bench_path.display()
-                );
+                eprintln!("Warning: failed to load result for {}", bench_path.display());
             }
         }
 
@@ -365,8 +340,7 @@ mod benchmark_report {
                 let new_path = duration_path.join("new");
 
                 if new_path.exists()
-                    && let Ok(result) =
-                        load_benchmark_result(&new_path, library, operation, format, &duration)
+                    && let Ok(result) = load_benchmark_result(&new_path, library, operation, format, &duration)
                 {
                     results.push(result);
                 }
@@ -393,8 +367,8 @@ mod benchmark_report {
         let benchmark_info: BenchmarkInfo = serde_json::from_str(&benchmark_content)?;
 
         let sample_count = benchmark_info.throughput.as_ref().and_then(|t| t.elements);
-        let throughput_samples_per_sec = sample_count
-            .map(|count| count as f64 / (estimates.mean.point_estimate / 1_000_000_000.0));
+        let throughput_samples_per_sec =
+            sample_count.map(|count| count as f64 / (estimates.mean.point_estimate / 1_000_000_000.0));
 
         // Normalize duration into structured fields and a readable label
         let (sample_rate, channels, normalized_label) = parse_duration(duration);
@@ -472,18 +446,12 @@ mod benchmark_report {
                 "- **Core Count**: {} physical cores\n",
                 System::physical_core_count().unwrap_or(0)
             ));
-            info.push_str(&format!(
-                "- **Thread Count**: {} logical cores\n",
-                system.cpus().len()
-            ));
+            info.push_str(&format!("- **Thread Count**: {} logical cores\n", system.cpus().len()));
 
             // CPU frequency (average across cores)
-            let avg_freq: u64 = system.cpus().iter().map(|cpu| cpu.frequency()).sum::<u64>()
-                / system.cpus().len() as u64;
-            info.push_str(&format!(
-                "- **Base Frequency**: {:.1} GHz\n",
-                avg_freq as f64 / 1000.0
-            ));
+            let avg_freq: u64 =
+                system.cpus().iter().map(|cpu| cpu.frequency()).sum::<u64>() / system.cpus().len() as u64;
+            info.push_str(&format!("- **Base Frequency**: {:.1} GHz\n", avg_freq as f64 / 1000.0));
 
             // Architecture detection
             let arch = std::env::consts::ARCH;
@@ -496,14 +464,8 @@ mod benchmark_report {
         let available_memory = system.available_memory();
         let used_memory = system.used_memory();
 
-        info.push_str(&format!(
-            "- **Total RAM**: {}\n",
-            format_bytes(total_memory)
-        ));
-        info.push_str(&format!(
-            "- **Available RAM**: {}\n",
-            format_bytes(available_memory)
-        ));
+        info.push_str(&format!("- **Total RAM**: {}\n", format_bytes(total_memory)));
+        info.push_str(&format!("- **Available RAM**: {}\n", format_bytes(available_memory)));
         info.push_str(&format!(
             "- **Used RAM**: {} ({:.1}%)\n",
             format_bytes(used_memory),
@@ -556,20 +518,12 @@ mod benchmark_report {
 
         // Compilation target information
         info.push_str("\n### Compilation Target\n\n");
-        info.push_str(&format!(
-            "- **Target Triple**: {}\n",
-            std::env::consts::ARCH
-        ));
+        info.push_str(&format!("- **Target Triple**: {}\n", std::env::consts::ARCH));
         info.push_str(&format!("- **Target OS**: {}\n", std::env::consts::OS));
-        info.push_str(&format!(
-            "- **Target Family**: {}\n",
-            std::env::consts::FAMILY
-        ));
+        info.push_str(&format!("- **Target Family**: {}\n", std::env::consts::FAMILY));
 
         // Rust compilation info
-        if let Ok(rustc_version) = std::process::Command::new("rustc")
-            .arg("--version")
-            .output()
+        if let Ok(rustc_version) = std::process::Command::new("rustc").arg("--version").output()
             && let Ok(version_str) = std::str::from_utf8(&rustc_version.stdout)
         {
             info.push_str(&format!("- **Rust Compiler**: {}\n", version_str.trim()));
@@ -602,10 +556,7 @@ mod benchmark_report {
         ));
 
         // Group results by operation and format
-        let mut grouped: BTreeMap<
-            String,
-            BTreeMap<String, BTreeMap<String, Vec<&BenchmarkResult>>>,
-        > = BTreeMap::new();
+        let mut grouped: BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<&BenchmarkResult>>>> = BTreeMap::new();
 
         for result in &results {
             grouped
@@ -626,14 +577,11 @@ mod benchmark_report {
         for (operation, formats) in &grouped {
             for (format, durations) in formats {
                 for (duration, results_for_duration) in durations {
-                    let audio_samples_io = results_for_duration
-                        .iter()
-                        .find(|r| r.library == "audio_samples_io");
+                    let audio_samples_io = results_for_duration.iter().find(|r| r.library == "audio_samples_io");
                     let hound = results_for_duration.iter().find(|r| r.library == "hound");
 
                     if let Some(audio_samples_io_result) = audio_samples_io {
-                        let audio_samples_io_time =
-                            format_time(audio_samples_io_result.mean_time_ns);
+                        let audio_samples_io_time = format_time(audio_samples_io_result.mean_time_ns);
 
                         if let Some(hound_result) = hound {
                             let hound_time = format_time(hound_result.mean_time_ns);
@@ -648,12 +596,7 @@ mod benchmark_report {
                             };
                             report.push_str(&format!(
                                 "| {} | {} | {} | {} | {} | {} |\n",
-                                operation,
-                                format,
-                                duration,
-                                audio_samples_io_time,
-                                hound_time,
-                                ratio_str
+                                operation, format, duration, audio_samples_io_time, hound_time, ratio_str
                             ));
                         } else {
                             report.push_str(&format!(
@@ -675,12 +618,8 @@ mod benchmark_report {
             for (format, durations) in formats {
                 report.push_str(&format!("### {} Format\n\n", format.to_uppercase()));
 
-                report.push_str(
-                    "| Duration | Library | Mean Time | Throughput | Std Dev | 95% CI |\n",
-                );
-                report.push_str(
-                    "|----------|---------|-----------|------------|---------|--------|\n",
-                );
+                report.push_str("| Duration | Library | Mean Time | Throughput | Std Dev | 95% CI |\n");
+                report.push_str("|----------|---------|-----------|------------|---------|--------|\n");
 
                 for (duration, results_for_duration) in durations {
                     for result in results_for_duration {
@@ -691,8 +630,7 @@ mod benchmark_report {
 
                         let ci_str = format!(
                             "±{:.1}%",
-                            (result.confidence_interval_high - result.confidence_interval_low)
-                                / result.mean_time_ns
+                            (result.confidence_interval_high - result.confidence_interval_low) / result.mean_time_ns
                                 * 50.0
                         ); // Rough percentage
 
@@ -724,14 +662,10 @@ mod benchmark_report {
         for formats in grouped.values() {
             for durations in formats.values() {
                 for results_for_duration in durations.values() {
-                    let audio_samples_io = results_for_duration
-                        .iter()
-                        .find(|r| r.library == "audio_samples_io");
+                    let audio_samples_io = results_for_duration.iter().find(|r| r.library == "audio_samples_io");
                     let hound = results_for_duration.iter().find(|r| r.library == "hound");
 
-                    if let (Some(audio_samples_io_result), Some(hound_result)) =
-                        (audio_samples_io, hound)
-                    {
+                    if let (Some(audio_samples_io_result), Some(hound_result)) = (audio_samples_io, hound) {
                         total_comparisons += 1;
                         let ratio = calculate_performance_ratio(
                             audio_samples_io_result.mean_time_ns,
@@ -755,8 +689,7 @@ mod benchmark_report {
         }
 
         if total_comparisons > 0 {
-            let faster_percentage =
-                (audio_samples_io_faster_count as f64 / total_comparisons as f64) * 100.0;
+            let faster_percentage = (audio_samples_io_faster_count as f64 / total_comparisons as f64) * 100.0;
             report.push_str(&format!(
                 "- **audio_samples_io wins**: {:.1}% of comparable tests ({}/{})\n",
                 faster_percentage, audio_samples_io_faster_count, total_comparisons
@@ -773,9 +706,7 @@ mod benchmark_report {
 
         report.push_str("\n### Key Observations\n\n");
         report.push_str("- **I24 and F64 formats**: Only supported by audio_samples_io\n");
-        report.push_str(
-            "- **Duration scaling**: Performance characteristics across different file sizes\n",
-        );
+        report.push_str("- **Duration scaling**: Performance characteristics across different file sizes\n");
         report.push_str("- **Format efficiency**: Relative performance by sample format\n");
 
         // Add system information
@@ -845,8 +776,7 @@ mod benchmark_report {
         // Executive summary CSV (operation,format,duration,audio_samples_io_mean_ns,hound_mean_ns,ratio_str)
         let mut summary_rows = String::new();
         // Executive summary CSV (times in microseconds)
-        summary_rows
-            .push_str("operation,format,duration,audio_samples_io_mean_us,hound_mean_us,ratio\n");
+        summary_rows.push_str("operation,format,duration,audio_samples_io_mean_us,hound_mean_us,ratio\n");
 
         // Group results by operation/format/duration like generate_report
         use std::collections::BTreeMap as Map;
@@ -865,9 +795,7 @@ mod benchmark_report {
         for (operation, formats) in &grouped {
             for (format, durations) in formats {
                 for (duration, results_for_duration) in durations {
-                    let audio_samples_io = results_for_duration
-                        .iter()
-                        .find(|r| r.library == "audio_samples_io");
+                    let audio_samples_io = results_for_duration.iter().find(|r| r.library == "audio_samples_io");
                     let hound = results_for_duration.iter().find(|r| r.library == "hound");
 
                     if let Some(audio_samples_io_result) = audio_samples_io {
@@ -875,20 +803,14 @@ mod benchmark_report {
                         let audio_us = audio_samples_io_result.mean_time_ns / 1_000.0;
                         if let Some(hound_result) = hound {
                             let hound_us = hound_result.mean_time_ns / 1_000.0;
-                            let ratio = if audio_us > 0.0 {
-                                hound_us / audio_us
-                            } else {
-                                0.0
-                            };
+                            let ratio = if audio_us > 0.0 { hound_us / audio_us } else { 0.0 };
                             summary_rows.push_str(&format!(
                                 "{},{},{},{:.6},{:.6},{:.6}\n",
                                 operation, format, duration, audio_us, hound_us, ratio
                             ));
                         } else {
-                            summary_rows.push_str(&format!(
-                                "{},{},{},{:.6},,\n",
-                                operation, format, duration, audio_us
-                            ));
+                            summary_rows
+                                .push_str(&format!("{},{},{},{:.6},,\n", operation, format, duration, audio_us));
                         }
                     }
                 }

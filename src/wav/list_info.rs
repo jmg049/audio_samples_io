@@ -144,12 +144,7 @@ impl InfoMetadata {
 
         while offset + 8 <= bytes.len() {
             // Loop guard ensures offset+8 <= bytes.len(), so both 4-byte reads are in bounds.
-            let id = ChunkID::new(&[
-                bytes[offset],
-                bytes[offset + 1],
-                bytes[offset + 2],
-                bytes[offset + 3],
-            ]);
+            let id = ChunkID::new(&[bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]);
             let size = u32::from_le_bytes([
                 bytes[offset + 4],
                 bytes[offset + 5],

@@ -1,11 +1,7 @@
-use std::{
-    any::TypeId, fs, hint::black_box, io::Cursor, num::NonZeroU32, path::PathBuf, sync::Arc,
-    time::Duration,
-};
+use std::{any::TypeId, fs, hint::black_box, io::Cursor, num::NonZeroU32, path::PathBuf, sync::Arc, time::Duration};
 
 use audio_samples::{
-    AudioSample, AudioSamples, ConvertTo, I24, chirp, cosine_wave, sawtooth_wave, sine_wave,
-    square_wave,
+    AudioSample, AudioSamples, ConvertTo, I24, chirp, cosine_wave, sawtooth_wave, sine_wave, square_wave,
     traits::{ConvertFrom, StandardSample},
 };
 use audio_samples_io::{
@@ -108,14 +104,7 @@ fn bench_write_case_with_hound<T>(
     bench_audio_samples_io_write(group, Arc::clone(&audio), payload_bytes, &label);
     if channels <= 2 {
         let interleaved = Arc::new(audio.to_interleaved_vec());
-        bench_hound_write_impl::<T>(
-            group,
-            interleaved,
-            payload_bytes,
-            sample_rate,
-            channels,
-            &label,
-        );
+        bench_hound_write_impl::<T>(group, interleaved, payload_bytes, sample_rate, channels, &label);
     }
 }
 
@@ -217,12 +206,8 @@ fn bench_audio_samples_io_write<T>(
         b.iter_batched(
             || Cursor::new(Vec::with_capacity(capacity)),
             move |writer| {
-                audio_samples_io::write_with(
-                    writer,
-                    samples.as_ref(),
-                    audio_samples_io::types::FileType::WAV,
-                )
-                .expect("write wav");
+                audio_samples_io::write_with(writer, samples.as_ref(), audio_samples_io::types::FileType::WAV)
+                    .expect("write wav");
             },
             BatchSize::SmallInput,
         );
@@ -296,8 +281,7 @@ where
     }
 
     let frames = frames_per_channel.expect("at least one channel");
-    let data = Array2::from_shape_vec((channels, frames), planar)
-        .expect("channel stacking should succeed");
+    let data = Array2::from_shape_vec((channels, frames), planar).expect("channel stacking should succeed");
     AudioSamples::new_multi_channel(
         data,
         NonZeroU32::new(sample_rate).expect("sample rate must be non-zero"),
@@ -305,11 +289,7 @@ where
     .unwrap()
 }
 
-fn channel_signal<T>(
-    channel_idx: usize,
-    duration: Duration,
-    sample_rate: u32,
-) -> AudioSamples<'static, T>
+fn channel_signal<T>(channel_idx: usize, duration: Duration, sample_rate: u32) -> AudioSamples<'static, T>
 where
     T: StandardSample + 'static,
     f64: ConvertTo<T> + ConvertFrom<T>,
@@ -323,13 +303,7 @@ where
         1 => cosine_wave::<T>(base_freq * 1.5, duration, sample_rate, amplitude * 0.9),
         2 => square_wave::<T>(base_freq * 0.75, duration, sample_rate, amplitude * 0.8),
         3 => sawtooth_wave::<T>(base_freq * 1.2, duration, sample_rate, amplitude * 0.7),
-        _ => chirp::<T>(
-            base_freq,
-            base_freq * 3.0,
-            duration,
-            sample_rate,
-            amplitude * 0.85,
-        ),
+        _ => chirp::<T>(base_freq, base_freq * 3.0, duration, sample_rate, amplitude * 0.85),
     }
 }
 

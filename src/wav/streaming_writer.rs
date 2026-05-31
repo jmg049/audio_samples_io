@@ -175,11 +175,7 @@ where
     /// Check if extensible format is needed.
     const fn needs_extensible_format(channels: u16, sample_type: ValidatedSampleType) -> bool {
         // Use extensible format for more than 2 channels or non-standard bit depths
-        channels > 2
-            || matches!(
-                sample_type,
-                ValidatedSampleType::I24 | ValidatedSampleType::F64
-            )
+        channels > 2 || matches!(sample_type, ValidatedSampleType::I24 | ValidatedSampleType::F64)
     }
 
     /// Write standard 16-byte FMT chunk.
@@ -236,7 +232,7 @@ where
                 } else {
                     0xFFFFFFFF
                 }
-            }
+            },
         };
 
         // FMT chunk header
@@ -301,11 +297,7 @@ where
         if !bytes.len().is_multiple_of(frame_bytes) {
             return Err(AudioIOError::corrupted_data_simple(
                 "Byte count must be a multiple of frame size",
-                format!(
-                    "Got {} bytes, frame size is {} bytes",
-                    bytes.len(),
-                    frame_bytes
-                ),
+                format!("Got {} bytes, frame size is {} bytes", bytes.len(), frame_bytes),
             ));
         }
 
@@ -423,12 +415,8 @@ where
         // Get interleaved samples and convert to target format
         let interleaved = samples.data.as_interleaved_vec();
 
-        let bytes_written = write_frames_converted::<T, W>(
-            &mut self.writer,
-            &interleaved,
-            self.sample_type,
-            self.channels,
-        )?;
+        let bytes_written =
+            write_frames_converted::<T, W>(&mut self.writer, &interleaved, self.sample_type, self.channels)?;
 
         self.frames_written += frames_per_channel.get();
         self.data_bytes_written += bytes_written as u64;
@@ -451,34 +439,18 @@ where
     W: std::io::Write,
 {
     match target {
-        ValidatedSampleType::U8 => {
-            write_converted_samples::<T, u8, W>(writer, interleaved, channels)
-        }
-        ValidatedSampleType::I16 => {
-            write_converted_samples::<T, i16, W>(writer, interleaved, channels)
-        }
-        ValidatedSampleType::I24 => {
-            write_converted_samples::<T, I24, W>(writer, interleaved, channels)
-        }
-        ValidatedSampleType::I32 => {
-            write_converted_samples::<T, i32, W>(writer, interleaved, channels)
-        }
-        ValidatedSampleType::F32 => {
-            write_converted_samples::<T, f32, W>(writer, interleaved, channels)
-        }
-        ValidatedSampleType::F64 => {
-            write_converted_samples::<T, f64, W>(writer, interleaved, channels)
-        }
+        ValidatedSampleType::U8 => write_converted_samples::<T, u8, W>(writer, interleaved, channels),
+        ValidatedSampleType::I16 => write_converted_samples::<T, i16, W>(writer, interleaved, channels),
+        ValidatedSampleType::I24 => write_converted_samples::<T, I24, W>(writer, interleaved, channels),
+        ValidatedSampleType::I32 => write_converted_samples::<T, i32, W>(writer, interleaved, channels),
+        ValidatedSampleType::F32 => write_converted_samples::<T, f32, W>(writer, interleaved, channels),
+        ValidatedSampleType::F64 => write_converted_samples::<T, f64, W>(writer, interleaved, channels),
     }
 }
 
 /// Convert samples from type `T` to type `U` and write them to `writer`, streaming in ~256 KiB
 /// chunks to avoid large intermediate allocations.
-pub(crate) fn write_converted_samples<T, U, W>(
-    writer: &mut W,
-    samples: &[T],
-    channels: u16,
-) -> AudioIOResult<usize>
+pub(crate) fn write_converted_samples<T, U, W>(writer: &mut W, samples: &[T], channels: u16) -> AudioIOResult<usize>
 where
     T: StandardSample + ConvertTo<U> + 'static,
     U: StandardSample + 'static,
@@ -537,11 +509,12 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+    use std::num::NonZeroU32;
+
     use audio_samples::{channels, nzu};
 
     use super::*;
-    use std::io::Cursor;
-    use std::num::NonZeroU32;
 
     #[test]
     fn test_streaming_writer_basic() {
@@ -549,8 +522,7 @@ mod tests {
 
         {
             let cursor = Cursor::new(&mut buffer);
-            let mut writer =
-                StreamedWavWriter::new_f32(cursor, 2, 44100).expect("Failed to create writer");
+            let mut writer = StreamedWavWriter::new_f32(cursor, 2, 44100).expect("Failed to create writer");
 
             // Create test audio
             let sample_rate = NonZeroU32::new(44100).expect("Invalid sample rate");
@@ -575,8 +547,7 @@ mod tests {
         let mut buffer = Vec::new();
         let cursor = Cursor::new(&mut buffer);
 
-        let mut writer =
-            StreamedWavWriter::new_i16(cursor, 1, 22050).expect("Failed to create writer");
+        let mut writer = StreamedWavWriter::new_i16(cursor, 1, 22050).expect("Failed to create writer");
 
         // Write multiple chunks
         let sample_rate = NonZeroU32::new(22050).expect("Invalid sample rate");
@@ -596,8 +567,7 @@ mod tests {
         let mut buffer = Vec::new();
         let cursor = Cursor::new(&mut buffer);
 
-        let mut writer =
-            StreamedWavWriter::new_f32(cursor, 1, 44100).expect("Failed to create writer");
+        let mut writer = StreamedWavWriter::new_f32(cursor, 1, 44100).expect("Failed to create writer");
 
         writer.finalize().expect("First finalize failed");
         writer.finalize().expect("Second finalize should succeed");
@@ -610,8 +580,7 @@ mod tests {
         let mut buffer = Vec::new();
         let cursor = Cursor::new(&mut buffer);
 
-        let mut writer =
-            StreamedWavWriter::new_f32(cursor, 2, 44100).expect("Failed to create writer");
+        let mut writer = StreamedWavWriter::new_f32(cursor, 2, 44100).expect("Failed to create writer");
 
         // Try to write mono audio to stereo writer
         let sample_rate = NonZeroU32::new(44100).expect("Invalid sample rate");
@@ -626,8 +595,7 @@ mod tests {
         let mut buffer = Vec::new();
         let cursor = Cursor::new(&mut buffer);
 
-        let mut writer =
-            StreamedWavWriter::new_f32(cursor, 1, 44100).expect("Failed to create writer");
+        let mut writer = StreamedWavWriter::new_f32(cursor, 1, 44100).expect("Failed to create writer");
 
         writer.finalize().expect("Finalize failed");
 

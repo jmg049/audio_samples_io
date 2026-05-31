@@ -44,7 +44,7 @@ const fn alaw_to_linear(a_val: u8) -> i16 {
         _ => {
             magnitude += 0x108;
             magnitude <<= segment - 1;
-        }
+        },
     }
     if (a & 0x80) != 0 {
         magnitude as i16
@@ -115,14 +115,8 @@ mod tests {
 
     #[test]
     fn from_format_maps_correctly() {
-        assert_eq!(
-            Companding::from_format(FormatCode::ALaw),
-            Some(Companding::ALaw)
-        );
-        assert_eq!(
-            Companding::from_format(FormatCode::MuLaw),
-            Some(Companding::MuLaw)
-        );
+        assert_eq!(Companding::from_format(FormatCode::ALaw), Some(Companding::ALaw));
+        assert_eq!(Companding::from_format(FormatCode::MuLaw), Some(Companding::MuLaw));
         assert_eq!(Companding::from_format(FormatCode::Pcm), None);
     }
 }

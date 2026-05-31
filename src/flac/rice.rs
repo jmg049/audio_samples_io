@@ -135,9 +135,7 @@ pub fn decode_residual(
             let bits_per_sample = reader.read_bits(5)? as u8;
 
             if bits_per_sample > 32 {
-                return Err(FlacError::RiceEscapeBitsTooLarge {
-                    bits: bits_per_sample,
-                });
+                return Err(FlacError::RiceEscapeBitsTooLarge { bits: bits_per_sample });
             }
 
             // Safety: total_residuals is pre-allocated capacity; write_idx advances
@@ -229,9 +227,7 @@ pub fn decode_residual_into(
             let bits_per_sample = reader.read_bits(5)? as u8;
 
             if bits_per_sample > 32 {
-                return Err(FlacError::RiceEscapeBitsTooLarge {
-                    bits: bits_per_sample,
-                });
+                return Err(FlacError::RiceEscapeBitsTooLarge { bits: bits_per_sample });
             }
 
             let ptr: *mut i32 = out.as_mut_ptr();
@@ -320,11 +316,7 @@ pub fn encode_residual(
 
         // Check if escape coding would be more efficient
         let rice_bits = estimate_rice_bits_exact(partition_residuals, param);
-        let max_abs = partition_residuals
-            .iter()
-            .map(|&r| r.unsigned_abs())
-            .max()
-            .unwrap_or(0);
+        let max_abs = partition_residuals.iter().map(|&r| r.unsigned_abs()).max().unwrap_or(0);
         // +1 for the sign bit: signed N-bit needs 2^(N-1) > max_abs.
         // Cap at 31 to fit in the 5-bit escape field.
         let escape_bits_per_sample = if max_abs == 0 {
@@ -374,10 +366,7 @@ pub fn encode_residual(
 /// Uses a simple heuristic based on the mean absolute value.
 pub fn find_optimal_rice_param(residuals: &[i32], method: RiceMethod) -> u8 {
     rice_param_from_sum(
-        residuals
-            .iter()
-            .map(|&r| signed_to_unsigned(r) as u64)
-            .sum(),
+        residuals.iter().map(|&r| signed_to_unsigned(r) as u64).sum(),
         residuals.len(),
         method,
     )
@@ -545,13 +534,7 @@ pub fn plan_residual_coding(
         max_abs: 0,
         count: 0,
     }; MAX_RICE_PARTITIONS];
-    let num_leaf = compute_leaf_data(
-        residuals,
-        block_size,
-        predictor_order,
-        max_order,
-        &mut leaf_buf,
-    );
+    let num_leaf = compute_leaf_data(residuals, block_size, predictor_order, max_order, &mut leaf_buf);
     let leaves = &leaf_buf[..num_leaf];
 
     let param_bits = method.param_bits() as usize;
@@ -658,11 +641,7 @@ pub fn encode_residual_planned(
 
         if param == escape_code {
             // Escape coding: raw signed values
-            let max_abs = partition_residuals
-                .iter()
-                .map(|&r| r.unsigned_abs())
-                .max()
-                .unwrap_or(0);
+            let max_abs = partition_residuals.iter().map(|&r| r.unsigned_abs()).max().unwrap_or(0);
             let escape_bps = if max_abs == 0 {
                 0u32
             } else {

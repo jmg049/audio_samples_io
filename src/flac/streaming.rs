@@ -151,8 +151,7 @@ impl<R: ReadSeek> StreamedFlacFile<R> {
             }
         }
 
-        let stream_info =
-            stream_info.ok_or(AudioIOError::FlacError(FlacError::MissingStreamInfo))?;
+        let stream_info = stream_info.ok_or(AudioIOError::FlacError(FlacError::MissingStreamInfo))?;
 
         // Record where audio data starts (current reader position after all metadata).
         let audio_data_start = reader.stream_position().map_err(AudioIOError::from)?;
@@ -163,10 +162,8 @@ impl<R: ReadSeek> StreamedFlacFile<R> {
             17..=24 => ValidatedSampleType::I24,
             25..=32 => ValidatedSampleType::I32,
             bits => {
-                return Err(AudioIOError::FlacError(FlacError::InvalidBitsPerSample {
-                    bits,
-                }));
-            }
+                return Err(AudioIOError::FlacError(FlacError::InvalidBitsPerSample { bits }));
+            },
         };
 
         let num_channels = stream_info.channels as usize;
@@ -181,9 +178,7 @@ impl<R: ReadSeek> StreamedFlacFile<R> {
         };
 
         let block_size_hint = stream_info.max_block_size as usize;
-        let scratch: Vec<Vec<i32>> = (0..num_channels)
-            .map(|_| Vec::with_capacity(block_size_hint))
-            .collect();
+        let scratch: Vec<Vec<i32>> = (0..num_channels).map(|_| Vec::with_capacity(block_size_hint)).collect();
         let pending: Vec<Vec<i32>> = (0..num_channels).map(|_| Vec::new()).collect();
 
         Ok(StreamedFlacFile {
@@ -290,23 +285,23 @@ impl<R: ReadSeek> StreamedFlacFile<R> {
                     self.pending_start = 0;
 
                     return Ok(true);
-                }
+                },
                 Err(FlacError::UnexpectedEof) if !self.reader_exhausted => {
                     // We ran out of buffered bytes mid-frame — fetch more and retry.
                     self.refill_buf()?;
                     // Loop back to retry at same buf_start position.
-                }
+                },
                 Err(FlacError::UnexpectedEof) => {
                     // EOF and still not enough bytes — stream is truncated.
                     return Ok(false);
-                }
+                },
                 Err(FlacError::InvalidFrameSync { .. }) => {
                     // Bad sync at this position — skip one byte and keep searching.
                     self.buf_start += 1;
-                }
+                },
                 Err(other) => {
                     return Err(AudioIOError::FlacError(other));
-                }
+                },
             }
         }
     }
@@ -340,15 +335,13 @@ impl<R: ReadSeek> AudioFileMetadata for StreamedFlacFile<R> {
         let bits_per_sample = si.bits_per_sample as u16;
         let bytes_per_sample = bits_per_sample.div_ceil(8);
         let block_align = channels * bytes_per_sample;
-        let sample_rate = NonZeroU32::new(si.sample_rate).ok_or_else(|| {
-            AudioIOError::corrupted_data_simple("Invalid sample rate", "sample rate cannot be zero")
-        })?;
+        let sample_rate = NonZeroU32::new(si.sample_rate)
+            .ok_or_else(|| AudioIOError::corrupted_data_simple("Invalid sample rate", "sample rate cannot be zero"))?;
         let byte_rate = sample_rate.get() * block_align as u32;
 
         let samples_per_channel = si.total_samples as usize;
         let total_all_channels = samples_per_channel.saturating_mul(channels as usize);
-        let duration =
-            Duration::from_secs_f64(samples_per_channel as f64 / sample_rate.get() as f64);
+        let duration = Duration::from_secs_f64(samples_per_channel as f64 / sample_rate.get() as f64);
 
         Ok(BaseAudioInfo::new(
             sample_rate,
@@ -472,11 +465,11 @@ impl<R: ReadSeek> AudioStreamReader for StreamedFlacFile<R> {
                 match self.decode_next_frame()? {
                     true => {
                         // pending now has a freshly decoded block; loop will drain it.
-                    }
+                    },
                     false => {
                         // EOF before reaching target frame — stop here.
                         break;
-                    }
+                    },
                 }
             }
         }
@@ -507,9 +500,7 @@ impl<R: ReadSeek> AudioStreamRead for StreamedFlacFile<R> {
 
         let num_channels = self.stream_info.channels as usize;
         // One Vec<T> per channel, capacity = frames_to_read.
-        let mut out: Vec<Vec<T>> = (0..num_channels)
-            .map(|_| Vec::with_capacity(frames_to_read))
-            .collect();
+        let mut out: Vec<Vec<T>> = (0..num_channels).map(|_| Vec::with_capacity(frames_to_read)).collect();
 
         // Inline i32 → T conversion closure.
         // The match on `bits` is resolved at monomorphisation time.
@@ -546,11 +537,11 @@ impl<R: ReadSeek> AudioStreamRead for StreamedFlacFile<R> {
                 match self.decode_next_frame()? {
                     true => {
                         // pending refreshed; loop will drain it.
-                    }
+                    },
                     false => {
                         // EOF — stop filling.
                         break;
-                    }
+                    },
                 }
             }
         }
@@ -569,10 +560,7 @@ impl<R: ReadSeek> AudioStreamRead for StreamedFlacFile<R> {
         }
 
         let non_empty = NonEmptyVec::try_from(flat).map_err(|_| {
-            AudioIOError::corrupted_data_simple(
-                "Empty decoded output",
-                "No samples after FLAC frame decode",
-            )
+            AudioIOError::corrupted_data_simple("Empty decoded output", "No samples after FLAC frame decode")
         })?;
         buffer.replace_with_vec(&non_empty)?;
 
@@ -582,19 +570,18 @@ impl<R: ReadSeek> AudioStreamRead for StreamedFlacFile<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use audio_samples::{AudioSamples, nzu, sample_rate, sine_wave};
     use std::{fs::File, io::BufReader, num::NonZeroUsize, time::Duration};
+
+    use audio_samples::{AudioSamples, nzu, sample_rate, sine_wave};
+
+    use super::*;
 
     fn open_test_flac() -> StreamedFlacFile<BufReader<File>> {
         let file = BufReader::new(File::open("resources/test.flac").expect("test.flac"));
         StreamedFlacFile::new(file).expect("open StreamedFlacFile")
     }
 
-    fn make_buf(
-        s: &StreamedFlacFile<BufReader<File>>,
-        frames: usize,
-    ) -> AudioSamples<'static, f32> {
+    fn make_buf(s: &StreamedFlacFile<BufReader<File>>, frames: usize) -> AudioSamples<'static, f32> {
         let sr = NonZeroU32::new(s.sample_rate()).unwrap();
         if s.num_channels() == 1 {
             AudioSamples::<f32>::zeros_mono(NonZeroUsize::new(frames).unwrap(), sr)
@@ -679,10 +666,12 @@ mod tests {
 
     #[test]
     fn test_streamed_flac_matches_bulk_read() {
+        use std::io::BufWriter;
+
+        use audio_samples::AudioTypeConversion;
+
         use crate::flac::{CompressionLevel, FlacFile, write_flac};
         use crate::traits::{AudioFile, AudioFileRead};
-        use audio_samples::AudioTypeConversion;
-        use std::io::BufWriter;
 
         let sr = sample_rate!(44100);
         let sine = sine_wave::<f32>(440.0, Duration::from_millis(200), sr, 0.5).to_format::<i16>();
@@ -695,8 +684,7 @@ mod tests {
         }
 
         // Bulk read via FlacFile
-        let flac =
-            FlacFile::open_with_options(&path, crate::types::OpenOptions::default()).unwrap();
+        let flac = FlacFile::open_with_options(&path, crate::types::OpenOptions::default()).unwrap();
         let bulk = flac.read::<i16>().unwrap();
 
         // Streaming read via StreamedFlacFile (sine_wave is mono)
@@ -708,9 +696,7 @@ mod tests {
         let mut frames_read = 0usize;
 
         while streamed.remaining_frames() > 0 {
-            let n = streamed
-                .read_frames_into(&mut buf, nzu!(1024))
-                .expect("read");
+            let n = streamed.read_frames_into(&mut buf, nzu!(1024)).expect("read");
             if n == 0 {
                 break;
             }

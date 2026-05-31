@@ -24,7 +24,7 @@ impl Display for ChunkID {
                     "0x{:02X}{:02X}{:02X}{:02X}",
                     self.id[0], self.id[1], self.id[2], self.id[3]
                 )
-            }
+            },
         }
     }
 }

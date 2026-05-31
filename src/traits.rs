@@ -1,11 +1,12 @@
 use core::fmt::{Debug, Display};
 use std::{num::NonZeroUsize, path::Path, time::Duration};
 
+use audio_samples::{AudioSamples, ConvertFrom, ConvertTo, SampleType, traits::StandardSample};
+
 use crate::{
     error::{AudioIOError, AudioIOResult},
     types::{AudioInfo, BaseAudioInfo, FileType, OpenOptions, ValidatedSampleType},
 };
-use audio_samples::{AudioSamples, ConvertFrom, ConvertTo, SampleType, traits::StandardSample};
 
 /// Marker trait for audio info structs
 pub trait AudioInfoMarker {}
@@ -91,14 +92,17 @@ pub trait AudioFile {
 ///
 /// ## Why not just implement std::io::Read?
 ///
-/// The standard library's `Read` trait is designed for reading raw bytes, which while close to the use case of audio_samples_io,
-/// does not directly map to reading audio samples of various types and formats, hence the need for a more specific implementation
+/// The standard library's `Read` trait is designed for reading raw bytes, which while close to the use case of
+/// audio_samples_io, does not directly map to reading audio samples of various types and formats, hence the need for a
+/// more specific implementation
 ///
 /// ## Generic Constraints
 ///
-/// The trait does not impose any specific type constraints at the declaration level and instead uses generic constraints on individual methods.
-/// This allows for greater flexibility in implementing the trait and avoids also allows the WavFile struct to not have an associated generic type parameter,
-/// which complicates usage in terms of forcing the user to specify a type parameter when opening a file even if they don't intend to read samples immediately.
+/// The trait does not impose any specific type constraints at the declaration level and instead uses generic
+/// constraints on individual methods. This allows for greater flexibility in implementing the trait and avoids also
+/// allows the WavFile struct to not have an associated generic type parameter, which complicates usage in terms of
+/// forcing the user to specify a type parameter when opening a file even if they don't intend to read samples
+/// immediately.
 pub trait AudioFileRead<'a> {
     fn read<T>(&'a self) -> AudioIOResult<AudioSamples<'a, T>>
     where

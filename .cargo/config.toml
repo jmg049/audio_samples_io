@@ -1,0 +1,44 @@
+[build]
+# Clippy linting configuration
+# Correctness and logic
+rustflags = [
+    "-W", "clippy::unit_cmp",
+    "-W", "clippy::match_same_arms",
+    # Allow large error types for comprehensive error handling
+    "-A", "clippy::result_large_err",
+    # Functions may need mutations in the future
+    "-A", "clippy::missing_const_for_fn",
+    # Sometimes clearer to have separate conditions
+    "-A", "clippy::collapsible_if",
+    # Panics are converted to proper errors where needed
+    "-A", "clippy::missing_panics_doc",
+    # Sometimes clearer with explicit borrows
+    "-A", "clippy::needless_borrows_for_generic_args",
+    # Similar blocks may diverge in the future
+    "-A", "clippy::if_same_then_else",
+    # Explicit casts for clarity
+    "-A", "clippy::unnecessary_cast",
+    # Explicit operations for clarity
+    "-A", "clippy::identity_op",
+
+    # Performance-focused
+    "-W", "clippy::inefficient_to_string",
+    "-W", "clippy::map_clone",
+    "-W", "clippy::unnecessary_to_owned",
+    "-W", "clippy::large_stack_arrays",
+    "-W", "clippy::box_collection",
+    "-W", "clippy::vec_box",
+    "-W", "clippy::needless_collect",
+
+    # Style and idiomatic Rust
+    "-W", "clippy::redundant_clone",
+    "-W", "clippy::needless_return",
+    "-W", "clippy::let_unit_value",
+    "-W", "clippy::manual_map",
+    "-W", "clippy::unwrap_used",
+    "-W", "clippy::panic",
+    "-W", "clippy::missing_safety_doc",
+
+    # Maintainability
+    "-A", "clippy::too_many_arguments",
+]

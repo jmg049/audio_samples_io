@@ -3,19 +3,20 @@
 //! directly from WAV data using Fortran (column-major) layout to eliminate
 //! deinterleaving overhead.
 
+use std::any::TypeId;
+use std::io::{BufReader, Read};
+use std::path::Path;
+
+use audio_samples::I24;
 use audio_samples::traits::StandardSample;
 use non_empty_slice::NonEmptyVec;
 use numpy::{Element, PyArray1, PyArray2, PyArrayMethods};
 use pyo3::prelude::*;
-use std::any::TypeId;
-use std::io::{BufReader, Read};
-use std::path::Path;
 
 use crate::traits::{AudioFile, AudioFileMetadata};
 use crate::types::{OpenOptions, ValidatedSampleType};
 use crate::wav::{WavFile, wav_file::parse_wav_header_streaming};
 use crate::{AudioIOError, AudioIOResult, BaseAudioInfo, FileType};
-use audio_samples::I24;
 
 /// Type-erased container for a natively-typed audio array produced by [`read_pyarray_native`].
 ///
@@ -71,19 +72,19 @@ pub fn read_pyarray_native(py: Python<'_>, path: &Path) -> Option<PyResult<Nativ
     let result = match info.sample_type {
         audio_samples::SampleType::U8 => {
             alloc_and_fill::<u8>(py, reader, info).map(|(a, i)| NativeAudioArray::U8(a, i))
-        }
+        },
         audio_samples::SampleType::I16 => {
             alloc_and_fill::<i16>(py, reader, info).map(|(a, i)| NativeAudioArray::I16(a, i))
-        }
+        },
         audio_samples::SampleType::I32 => {
             alloc_and_fill::<i32>(py, reader, info).map(|(a, i)| NativeAudioArray::I32(a, i))
-        }
+        },
         audio_samples::SampleType::F32 => {
             alloc_and_fill::<f32>(py, reader, info).map(|(a, i)| NativeAudioArray::F32(a, i))
-        }
+        },
         audio_samples::SampleType::F64 => {
             alloc_and_fill::<f64>(py, reader, info).map(|(a, i)| NativeAudioArray::F64(a, i))
-        }
+        },
         _ => return None,
     };
 
@@ -116,8 +117,7 @@ where
     let read_result: AudioIOResult<()> = py.detach(|| {
         let mut r = reader;
         // Safety: pointer valid (just allocated, not yet shared), CPython is non-moving.
-        let bytes =
-            unsafe { std::slice::from_raw_parts_mut(data_ptr_usize as *mut u8, byte_count) };
+        let bytes = unsafe { std::slice::from_raw_parts_mut(data_ptr_usize as *mut u8, byte_count) };
         r.read_exact(bytes).map_err(AudioIOError::from)
     });
 
@@ -165,12 +165,7 @@ where
         .detach(|| read_interleaved_with_info::<_, T>(path))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
 
-    let pyarray = create_pyarray_fortran(
-        py,
-        interleaved_vec,
-        info.channels as usize,
-        info.total_samples,
-    )?;
+    let pyarray = create_pyarray_fortran(py, interleaved_vec, info.channels as usize, info.total_samples)?;
 
     Ok((pyarray, info))
 }
@@ -189,10 +184,7 @@ where
 /// 2. CPython uses reference-counted, non-moving GC; object addresses are stable.
 /// 3. We hold a strong reference (`Bound<'_, PyArray2<T>>`) that prevents deallocation.
 #[cfg(target_endian = "little")]
-fn read_pyarray_direct<T>(
-    py: Python<'_>,
-    path: &Path,
-) -> Option<PyResult<(Py<PyArray2<T>>, BaseAudioInfo)>>
+fn read_pyarray_direct<T>(py: Python<'_>, path: &Path) -> Option<PyResult<(Py<PyArray2<T>>, BaseAudioInfo)>>
 where
     T: StandardSample + Element + 'static,
 {
@@ -247,15 +239,12 @@ where
         let mut r = reader;
         // Safety: pointer was valid when captured (step 2), array is held alive by `array`,
         // CPython does not move objects, no other thread has seen this array.
-        let bytes =
-            unsafe { std::slice::from_raw_parts_mut(data_ptr_usize as *mut u8, byte_count) };
+        let bytes = unsafe { std::slice::from_raw_parts_mut(data_ptr_usize as *mut u8, byte_count) };
         r.read_exact(bytes).map_err(AudioIOError::from)
     });
 
     if let Err(e) = read_result {
-        return Some(Err(PyErr::new::<pyo3::exceptions::PyIOError, _>(
-            e.to_string(),
-        )));
+        return Some(Err(PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string())));
     }
 
     Some(Ok((array.unbind(), info)))
@@ -299,7 +288,7 @@ where
             }?;
 
             Ok((interleaved_vec, info))
-        }
+        },
         #[cfg(feature = "flac")]
         FileType::FLAC => {
             use crate::flac::FlacFile;
@@ -329,12 +318,11 @@ where
                 }
             }
 
-            let nev = NonEmptyVec::try_from(interleaved).map_err(|_| {
-                AudioIOError::corrupted_data_simple("Empty FLAC file", "No samples decoded")
-            })?;
+            let nev = NonEmptyVec::try_from(interleaved)
+                .map_err(|_| AudioIOError::corrupted_data_simple("Empty FLAC file", "No samples decoded"))?;
 
             Ok((nev, info))
-        }
+        },
         other => Err(AudioIOError::unsupported_format(format!(
             "Unsupported file format: {:?}",
             other
@@ -388,8 +376,7 @@ where
     let mut vec: Vec<T> = Vec::with_capacity(total_samples);
     unsafe { vec.set_len(total_samples) };
 
-    let bytes =
-        unsafe { std::slice::from_raw_parts_mut(vec.as_mut_ptr().cast::<u8>(), byte_count) };
+    let bytes = unsafe { std::slice::from_raw_parts_mut(vec.as_mut_ptr().cast::<u8>(), byte_count) };
 
     // No explicit seek needed: parse_wav_header_streaming stops reading at the first byte of the
     // data payload, leaving the BufReader positioned there.  Its internal buffer already holds
@@ -446,21 +433,17 @@ where
     // which matches the interleaved format perfectly
     let array2 = array1
         .reshape_with_order(shape, numpy::npyffi::NPY_ORDER::NPY_FORTRANORDER)
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "Failed to reshape array: {}",
-                e
-            ))
-        })?;
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to reshape array: {}", e)))?;
 
     Ok(array2.unbind())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use non_empty_slice::non_empty_vec;
     use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
+
+    use super::*;
 
     #[test]
     #[cfg(feature = "numpy")]
@@ -472,8 +455,8 @@ mod tests {
             let channels = 2;
             let total_samples = 6;
 
-            let arr = create_pyarray_fortran(py, interleaved, channels, total_samples)
-                .expect("Failed to create PyArray");
+            let arr =
+                create_pyarray_fortran(py, interleaved, channels, total_samples).expect("Failed to create PyArray");
             let bound = arr.bind(py);
 
             // Should be shape (2 channels, 3 frames)
@@ -508,8 +491,7 @@ mod tests {
             let channels = 1;
             let total_samples = 4;
 
-            let arr = create_pyarray_fortran(py, mono, channels, total_samples)
-                .expect("Failed to create PyArray");
+            let arr = create_pyarray_fortran(py, mono, channels, total_samples).expect("Failed to create PyArray");
             let bound = arr.bind(py);
 
             // Should be shape (1 channel, 4 frames)

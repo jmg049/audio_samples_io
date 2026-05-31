@@ -26,11 +26,11 @@ const IMA_INDEX: [i32; 16] = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 
 
 /// IMA ADPCM quantiser step-size table (89 entries).
 const IMA_STEP: [i32; 89] = [
-    7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66,
-    73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449,
-    494, 544, 598, 658, 724, 796, 876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272,
-    2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493,
-    10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767,
+    7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88, 97, 107,
+    118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796, 876, 963,
+    1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358, 5894,
+    6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794,
+    32767,
 ];
 
 #[inline]
@@ -80,9 +80,8 @@ pub fn decode(fmt: &FmtChunk<'_>, data: &[u8]) -> AudioIOResult<Vec<i16>> {
 fn decode_ms(fmt: &FmtChunk<'_>, data: &[u8]) -> AudioIOResult<Vec<i16>> {
     let channels = fmt.channels() as usize;
     let block_align = fmt.block_align() as usize;
-    let spb = samples_per_block(fmt).ok_or_else(|| {
-        AudioIOError::unsupported_format("MS ADPCM fmt chunk missing wSamplesPerBlock")
-    })?;
+    let spb = samples_per_block(fmt)
+        .ok_or_else(|| AudioIOError::unsupported_format("MS ADPCM fmt chunk missing wSamplesPerBlock"))?;
     let ext = fmt.as_bytes();
 
     // Extension layout: [18..20] wSamplesPerBlock, [20..22] wNumCoef, [22..] aCoef pairs.
@@ -93,9 +92,7 @@ fn decode_ms(fmt: &FmtChunk<'_>, data: &[u8]) -> AudioIOResult<Vec<i16>> {
     }
     let num_coef = u16::from_le_bytes([ext[20], ext[21]]) as usize;
     if ext.len() < 22 + num_coef * 4 {
-        return Err(AudioIOError::unsupported_format(
-            "MS ADPCM coefficient table truncated",
-        ));
+        return Err(AudioIOError::unsupported_format("MS ADPCM coefficient table truncated"));
     }
     let coefs: Vec<(i32, i32)> = (0..num_coef)
         .map(|i| {
@@ -107,9 +104,7 @@ fn decode_ms(fmt: &FmtChunk<'_>, data: &[u8]) -> AudioIOResult<Vec<i16>> {
         })
         .collect();
     if coefs.is_empty() || block_align == 0 || channels == 0 {
-        return Err(AudioIOError::unsupported_format(
-            "invalid MS ADPCM parameters",
-        ));
+        return Err(AudioIOError::unsupported_format("invalid MS ADPCM parameters"));
     }
 
     let header_len = 7 * channels; // per channel: 1 predictor index + 2 delta + 2 samp1 + 2 samp2
@@ -158,11 +153,7 @@ fn decode_ms(fmt: &FmtChunk<'_>, data: &[u8]) -> AudioIOResult<Vec<i16>> {
                 }
                 let ch = count % channels;
                 let (c1, c2) = coefs[predictor[ch]];
-                let signed = if nib >= 8 {
-                    nib as i32 - 16
-                } else {
-                    nib as i32
-                };
+                let signed = if nib >= 8 { nib as i32 - 16 } else { nib as i32 };
                 let predict = (samp1[ch] * c1 + samp2[ch] * c2) / 256;
                 let new = clamp_i16(predict + signed * delta[ch]) as i32;
                 out.push(new as i16);
@@ -184,13 +175,10 @@ fn decode_ms(fmt: &FmtChunk<'_>, data: &[u8]) -> AudioIOResult<Vec<i16>> {
 fn decode_ima(fmt: &FmtChunk<'_>, data: &[u8]) -> AudioIOResult<Vec<i16>> {
     let channels = fmt.channels() as usize;
     let block_align = fmt.block_align() as usize;
-    let spb = samples_per_block(fmt).ok_or_else(|| {
-        AudioIOError::unsupported_format("IMA ADPCM fmt chunk missing wSamplesPerBlock")
-    })?;
+    let spb = samples_per_block(fmt)
+        .ok_or_else(|| AudioIOError::unsupported_format("IMA ADPCM fmt chunk missing wSamplesPerBlock"))?;
     if channels == 0 || block_align == 0 {
-        return Err(AudioIOError::unsupported_format(
-            "invalid IMA ADPCM parameters",
-        ));
+        return Err(AudioIOError::unsupported_format("invalid IMA ADPCM parameters"));
     }
 
     let header_len = 4 * channels; // per channel: 2-byte initial sample + 1-byte index + 1 reserved
@@ -280,12 +268,7 @@ mod tests {
     }
 
     /// Build a minimal MS ADPCM fmt chunk with a single coefficient pair.
-    fn ms_fmt(
-        channels: u16,
-        block_align: u16,
-        samples_per_block: u16,
-        coef: (i16, i16),
-    ) -> Vec<u8> {
+    fn ms_fmt(channels: u16, block_align: u16, samples_per_block: u16, coef: (i16, i16)) -> Vec<u8> {
         let mut v = vec![0u8; 26];
         v[0..2].copy_from_slice(&0x0002u16.to_le_bytes());
         v[2..4].copy_from_slice(&channels.to_le_bytes());

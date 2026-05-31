@@ -5,11 +5,12 @@
 /// Using hound as the fixture generator cross-validates against the de-facto WAV reference.
 #[cfg(feature = "wav")]
 mod wav_read {
+    use std::path::Path;
+
     use audio_samples::SampleType;
     use audio_samples_io::traits::{AudioFile, AudioFileMetadata, AudioFileRead};
     use audio_samples_io::{OpenOptions, WavFile};
     use hound::{SampleFormat, WavSpec, WavWriter};
-    use std::path::Path;
 
     fn temp_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("asio_test_{name}_{}.wav", std::process::id()))
@@ -174,10 +175,7 @@ mod wav_read {
         w.finalize().unwrap();
 
         let wav = open(&path);
-        assert_eq!(
-            interleaved_i32(&wav),
-            vec![19, -229_373, 33_587_161, -2_147_483_497]
-        );
+        assert_eq!(interleaved_i32(&wav), vec![19, -229_373, 33_587_161, -2_147_483_497]);
 
         std::fs::remove_file(&path).ok();
     }
@@ -202,10 +200,7 @@ mod wav_read {
         let wav = open(&path);
         let info = <WavFile as AudioFileMetadata>::base_info(&wav).unwrap();
         assert_eq!(info.channels, 2);
-        assert_eq!(
-            interleaved_i32(&wav),
-            vec![19, -229_373, 33_587_161, -2_147_483_497]
-        );
+        assert_eq!(interleaved_i32(&wav), vec![19, -229_373, 33_587_161, -2_147_483_497]);
 
         std::fs::remove_file(&path).ok();
     }
@@ -501,9 +496,10 @@ mod wav_read {
 
 #[cfg(feature = "wav")]
 mod sample_iter {
+    use std::{fs::File, io::BufReader};
+
     use audio_samples_io::wav::StreamedWavFile;
     use hound::{SampleFormat, WavSpec, WavWriter};
-    use std::{fs::File, io::BufReader};
 
     fn temp_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("asio_siter_{name}_{}.wav", std::process::id()))
@@ -547,10 +543,7 @@ mod sample_iter {
         w.finalize().unwrap();
 
         let mut reader = StreamedWavFile::new(BufReader::new(File::open(&path).unwrap())).unwrap();
-        let samples: Vec<i16> = reader
-            .samples::<i16>()
-            .map(|r| r.expect("sample error"))
-            .collect();
+        let samples: Vec<i16> = reader.samples::<i16>().map(|r| r.expect("sample error")).collect();
         assert_eq!(samples, [1, 2, 3, 4, 5, 6, 7, 8]);
         std::fs::remove_file(&path).ok();
     }
@@ -571,10 +564,7 @@ mod sample_iter {
         w.finalize().unwrap();
 
         let mut reader = StreamedWavFile::new(BufReader::new(File::open(&path).unwrap())).unwrap();
-        let sum: i16 = reader
-            .samples::<i16>()
-            .map(|r| r.expect("sample error"))
-            .sum();
+        let sum: i16 = reader.samples::<i16>().map(|r| r.expect("sample error")).sum();
         assert_eq!(sum, 55); // 1+2+…+10
         std::fs::remove_file(&path).ok();
     }
@@ -595,10 +585,7 @@ mod sample_iter {
         w.finalize().unwrap();
 
         let mut reader = StreamedWavFile::new(BufReader::new(File::open(&path).unwrap())).unwrap();
-        let samples: Vec<f32> = reader
-            .samples::<f32>()
-            .map(|r| r.expect("sample error"))
-            .collect();
+        let samples: Vec<f32> = reader.samples::<f32>().map(|r| r.expect("sample error")).collect();
         assert_eq!(samples.len(), 3);
         assert!(samples[0] > 0.0);
         assert_eq!(samples[1], 0.0);

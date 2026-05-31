@@ -81,8 +81,7 @@ fn read_i16(bytes: &[u8], name: &str) -> Vec<i16> {
     std::fs::write(&path, bytes).expect("write temp wav");
     let wav = <WavFile as AudioFile>::open_with_options(&path, OpenOptions::default())
         .unwrap_or_else(|e| panic!("open {name}: {e}"));
-    let audio = <WavFile as AudioFileRead>::read::<i16>(&wav)
-        .unwrap_or_else(|e| panic!("read {name}: {e}"));
+    let audio = <WavFile as AudioFileRead>::read::<i16>(&wav).unwrap_or_else(|e| panic!("read {name}: {e}"));
     let out = audio.to_interleaved_vec().into_vec();
     std::fs::remove_file(&path).ok();
     out
@@ -250,8 +249,7 @@ fn metadata_round_trips() {
 
     write_with_metadata(&path, &audio, &meta).expect("write with metadata");
 
-    let wav = <WavFile as AudioFile>::open_with_options(&path, OpenOptions::default())
-        .expect("reopen tagged file");
+    let wav = <WavFile as AudioFile>::open_with_options(&path, OpenOptions::default()).expect("reopen tagged file");
 
     // INFO tags survive the round-trip.
     let list = wav.list().expect("list parse").expect("LIST chunk present");

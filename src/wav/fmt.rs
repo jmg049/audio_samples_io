@@ -36,13 +36,13 @@ impl<'a> FmtChunk<'a> {
                     .try_into()
                     .map_err(|_| WavError::InvalidFmtChunkSize(bytes.len()))?;
                 Ok(FmtChunk::Base(b))
-            }
+            },
             40 => {
                 let b: &[u8; 40] = bytes
                     .try_into()
                     .map_err(|_| WavError::InvalidFmtChunkSize(bytes.len()))?;
                 Ok(FmtChunk::Extensible(b))
-            }
+            },
             // A base chunk plus a `cbSize` extension field: 18-byte PCM headers and compressed
             // codec headers (ADPCM, etc.). The first 16 bytes are the standard WAVEFORMATEX.
             len if len >= 18 => Ok(FmtChunk::Extended(bytes)),
@@ -196,7 +196,7 @@ impl<'a> FmtChunk<'a> {
                     .try_into()
                     .expect("Guaranteed by enum variant and constructor");
                 Some(b)
-            }
+            },
         }
     }
 
@@ -215,13 +215,12 @@ impl<'a> FmtChunk<'a> {
                 //   [18..20] wValidBitsPerSample
                 //   [20..24] dwChannelMask
                 //   [24..40] SubFormat GUID — bytes 24..26 hold the actual format code
-                let format_code =
-                    FormatCode::const_from(u16::from_le_bytes([bytes[24], bytes[25]]));
+                let format_code = FormatCode::const_from(u16::from_le_bytes([bytes[24], bytes[25]]));
                 let bits_per_sample = self.bits_per_sample();
                 let sample_type = SampleType::from_bits(bits_per_sample);
 
                 Ok(Some((format_code, sample_type)))
-            }
+            },
         }
     }
 
@@ -246,10 +245,9 @@ impl<'a> FmtChunk<'a> {
                     _ => Err(WavError::UnsupportedSampleType),
                 },
                 // Companded 8-bit codes and ADPCM blocks both decode to 16-bit linear PCM.
-                FormatCode::ALaw
-                | FormatCode::MuLaw
-                | FormatCode::MsAdpcm
-                | FormatCode::ImaAdpcm => Ok(ValidatedSampleType::I16),
+                FormatCode::ALaw | FormatCode::MuLaw | FormatCode::MsAdpcm | FormatCode::ImaAdpcm => {
+                    Ok(ValidatedSampleType::I16)
+                },
                 _ => ValidatedSampleType::try_from(SampleType::from_bits(bits_per_sample))
                     .map_err(|_| WavError::UnsupportedSampleType),
             };
@@ -265,7 +263,7 @@ impl<'a> FmtChunk<'a> {
             // mu-law/a-law (#78) and ADPCM (#45) decode to 16-bit linear PCM.
             FormatCode::ALaw | FormatCode::MuLaw | FormatCode::MsAdpcm | FormatCode::ImaAdpcm => {
                 Ok(ValidatedSampleType::I16)
-            }
+            },
             _ => ValidatedSampleType::try_from(SampleType::from_bits(bits_per_sample))
                 .map_err(|_| WavError::UnsupportedSampleType),
         }
@@ -332,7 +330,7 @@ impl<'a> FmtChunk<'a> {
 
         // Check bits per sample is byte-aligned
         if !bits_per_sample.is_multiple_of(8) {
-            return Err(WavError::invalid_format(&format!(
+            return Err(WavError::invalid_format(format!(
                 "Bits per sample {bits_per_sample} is not byte-aligned"
             )));
         }
@@ -342,7 +340,7 @@ impl<'a> FmtChunk<'a> {
         // Validate block_align = channels * bytes_per_sample
         let expected_block_align = channels * bytes_per_sample;
         if block_align != expected_block_align {
-            return Err(WavError::invalid_format(&format!(
+            return Err(WavError::invalid_format(format!(
                 "Block align {block_align} does not match expected {expected_block_align} (channels {channels} * bytes_per_sample {bytes_per_sample})"
             )));
         }
@@ -350,24 +348,24 @@ impl<'a> FmtChunk<'a> {
         // Validate byte_rate = sample_rate * block_align
         let expected_byte_rate = sample_rate * block_align as u32;
         if byte_rate != expected_byte_rate {
-            return Err(WavError::invalid_format(&format!(
+            return Err(WavError::invalid_format(format!(
                 "Byte rate {byte_rate} does not match expected {expected_byte_rate} (sample_rate {sample_rate} * block_align {block_align})"
             )));
         }
 
         // Check reasonable ranges
         if channels > 256 {
-            return Err(WavError::invalid_format(&format!(
+            return Err(WavError::invalid_format(format!(
                 "Too many channels: {channels} (maximum 256)"
             )));
         }
         if sample_rate > 384000 {
-            return Err(WavError::invalid_format(&format!(
+            return Err(WavError::invalid_format(format!(
                 "Sample rate too high: {sample_rate} Hz (maximum 384000)"
             )));
         }
         if bits_per_sample > 64 {
-            return Err(WavError::invalid_format(&format!(
+            return Err(WavError::invalid_format(format!(
                 "Bits per sample too high: {bits_per_sample} (maximum 64)"
             )));
         }
@@ -384,8 +382,7 @@ impl<'a> FmtChunk<'a> {
 // - use of the crate feature "colored" which enables the use of the ``colored`` crate for colored terminal output
 impl Display for FmtChunk<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        let (format, channels, sample_rate, byte_rate, block_align, bits_per_sample) =
-            self.fmt_chunk();
+        let (format, channels, sample_rate, byte_rate, block_align, bits_per_sample) = self.fmt_chunk();
         write!(
             f,
             "FmtChunk {{ format: {format:?}, channels: {channels}, sample_rate: {sample_rate}, byte_rate: {byte_rate}, block_align: {block_align}, bits_per_sample: {bits_per_sample} }}"
@@ -433,10 +430,7 @@ mod tests {
         let err = fmt
             .validate_format_consistency()
             .expect_err("Expected validation to fail");
-        assert!(
-            err.to_string()
-                .contains("Block align 2 does not match expected 4")
-        );
+        assert!(err.to_string().contains("Block align 2 does not match expected 4"));
     }
 
     #[test]
@@ -460,10 +454,7 @@ mod tests {
         let err = fmt
             .validate_format_consistency()
             .expect_err("Expected validation to fail");
-        assert!(
-            err.to_string()
-                .contains("Bits per sample 12 is not byte-aligned")
-        );
+        assert!(err.to_string().contains("Bits per sample 12 is not byte-aligned"));
     }
 
     #[test]
@@ -475,14 +466,7 @@ mod tests {
         let block_align = channels * bytes_per_sample; // 600
         let sample_rate = 44_100u32;
         let byte_rate = sample_rate * block_align as u32; // 26_460_000
-        let bytes = make_base_fmt_bytes(
-            1,
-            channels,
-            sample_rate,
-            byte_rate,
-            block_align,
-            bits_per_sample,
-        );
+        let bytes = make_base_fmt_bytes(1, channels, sample_rate, byte_rate, block_align, bits_per_sample);
         let fmt = FmtChunk::from_bytes(&bytes).expect("Failed to create FmtChunk");
         let err = fmt
             .validate_format_consistency()

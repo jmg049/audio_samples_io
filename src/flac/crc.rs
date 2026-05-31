@@ -70,9 +70,7 @@ const CRC16_TABLE_STATE_HI: [u16; 256] = {
     let mut t = [0u16; 256];
     let mut i = 0;
     while i < 256 {
-        let x = crc16_advance1(crc16_advance1(crc16_advance1(crc16_advance1(
-            (i as u16) << 8,
-        ))));
+        let x = crc16_advance1(crc16_advance1(crc16_advance1(crc16_advance1((i as u16) << 8))));
         t[i] = x;
         i += 1;
     }

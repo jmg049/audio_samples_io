@@ -165,8 +165,7 @@ impl StreamInfo {
         // Byte 11: sample rate bits 11-4
         // Byte 12: sample rate bits 3-0, channels bits 2-0
         // Byte 13: bits per sample bits 4-0, total samples bits 35-32
-        let sample_rate =
-            ((bytes[10] as u32) << 12) | ((bytes[11] as u32) << 4) | ((bytes[12] as u32) >> 4);
+        let sample_rate = ((bytes[10] as u32) << 12) | ((bytes[11] as u32) << 4) | ((bytes[12] as u32) >> 4);
 
         let channels = ((bytes[12] & 0x0E) >> 1) + 1;
 
@@ -220,9 +219,8 @@ impl StreamInfo {
 
         bytes[10] = (self.sample_rate >> 12) as u8;
         bytes[11] = (self.sample_rate >> 4) as u8;
-        bytes[12] = ((self.sample_rate & 0x0F) << 4) as u8
-            | ((channels_minus_1 & 0x07) << 1)
-            | ((bits_minus_1 >> 4) & 0x01);
+        bytes[12] =
+            ((self.sample_rate & 0x0F) << 4) as u8 | ((channels_minus_1 & 0x07) << 1) | ((bits_minus_1 >> 4) & 0x01);
         bytes[13] = ((bits_minus_1 & 0x0F) << 4) | ((self.total_samples >> 32) as u8 & 0x0F);
 
         // Bytes 14-17: total samples lower 32 bits
@@ -278,11 +276,7 @@ impl Display for StreamInfo {
             "  Block size: {}-{} samples",
             self.min_block_size, self.max_block_size
         )?;
-        writeln!(
-            f,
-            "  Frame size: {}-{} bytes",
-            self.min_frame_size, self.max_frame_size
-        )?;
+        writeln!(f, "  Frame size: {}-{} bytes", self.min_frame_size, self.max_frame_size)?;
         writeln!(f, "  Sample rate: {} Hz", self.sample_rate)?;
         writeln!(f, "  Channels: {}", self.channels)?;
         writeln!(f, "  Bits per sample: {}", self.bits_per_sample)?;
@@ -435,9 +429,7 @@ impl VorbisComment {
         let mut pos = 0;
 
         // Vendor string length (little-endian!)
-        let vendor_len =
-            u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
-                as usize;
+        let vendor_len = u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as usize;
         pos += 4;
 
         if pos + vendor_len > bytes.len() {
@@ -452,9 +444,7 @@ impl VorbisComment {
         }
 
         // Number of comments
-        let num_comments =
-            u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
-                as usize;
+        let num_comments = u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as usize;
         pos += 4;
 
         let mut comments: HashMap<String, Vec<String>> = HashMap::new();
@@ -464,9 +454,7 @@ impl VorbisComment {
                 return Err(FlacError::UnexpectedEof);
             }
 
-            let comment_len =
-                u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
-                    as usize;
+            let comment_len = u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as usize;
             pos += 4;
 
             if pos + comment_len > bytes.len() {
@@ -533,10 +521,7 @@ impl VorbisComment {
 
     /// Add a tag value (appends to existing).
     pub fn add(&mut self, key: &str, value: impl Into<String>) {
-        self.comments
-            .entry(key.to_uppercase())
-            .or_default()
-            .push(value.into());
+        self.comments.entry(key.to_uppercase()).or_default().push(value.into());
     }
 }
 
@@ -646,9 +631,7 @@ impl Picture {
         ]));
         pos += 4;
 
-        let mime_len =
-            u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
-                as usize;
+        let mime_len = u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as usize;
         pos += 4;
 
         if pos + mime_len > bytes.len() {
@@ -660,9 +643,7 @@ impl Picture {
         if pos + 4 > bytes.len() {
             return Err(FlacError::UnexpectedEof);
         }
-        let desc_len =
-            u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
-                as usize;
+        let desc_len = u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as usize;
         pos += 4;
 
         if pos + desc_len > bytes.len() {
@@ -675,25 +656,19 @@ impl Picture {
             return Err(FlacError::UnexpectedEof);
         }
 
-        let width =
-            u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]);
+        let width = u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]);
         pos += 4;
 
-        let height =
-            u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]);
+        let height = u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]);
         pos += 4;
 
-        let color_depth =
-            u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]);
+        let color_depth = u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]);
         pos += 4;
 
-        let num_colors =
-            u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]);
+        let num_colors = u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]);
         pos += 4;
 
-        let data_len =
-            u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
-                as usize;
+        let data_len = u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as usize;
         pos += 4;
 
         if pos + data_len > bytes.len() {
@@ -756,9 +731,7 @@ impl MetadataBlock {
     /// Parse a metadata block from its header and data.
     pub fn parse(header: &MetadataBlockHeader, data: &[u8]) -> Result<Self, FlacError> {
         match header.block_type {
-            MetadataBlockType::StreamInfo => {
-                Ok(MetadataBlock::StreamInfo(StreamInfo::from_bytes(data)?))
-            }
+            MetadataBlockType::StreamInfo => Ok(MetadataBlock::StreamInfo(StreamInfo::from_bytes(data)?)),
             MetadataBlockType::Padding => Ok(MetadataBlock::Padding(data.len())),
             MetadataBlockType::Application => {
                 if data.len() < 4 {
@@ -770,13 +743,9 @@ impl MetadataBlock {
                     id,
                     data: data[4..].to_vec(),
                 })
-            }
-            MetadataBlockType::SeekTable => {
-                Ok(MetadataBlock::SeekTable(SeekTable::from_bytes(data)?))
-            }
-            MetadataBlockType::VorbisComment => Ok(MetadataBlock::VorbisComment(
-                VorbisComment::from_bytes(data)?,
-            )),
+            },
+            MetadataBlockType::SeekTable => Ok(MetadataBlock::SeekTable(SeekTable::from_bytes(data)?)),
+            MetadataBlockType::VorbisComment => Ok(MetadataBlock::VorbisComment(VorbisComment::from_bytes(data)?)),
             MetadataBlockType::CueSheet => Ok(MetadataBlock::CueSheet(data.to_vec())),
             MetadataBlockType::Picture => Ok(MetadataBlock::Picture(Picture::from_bytes(data)?)),
             MetadataBlockType::Reserved(n) => Ok(MetadataBlock::Unknown {
@@ -809,7 +778,7 @@ impl MetadataBlock {
                 let mut bytes = id.to_vec();
                 bytes.extend_from_slice(data);
                 bytes
-            }
+            },
             MetadataBlock::SeekTable(table) => table.to_bytes(),
             MetadataBlock::VorbisComment(comment) => comment.to_bytes(),
             MetadataBlock::Picture(picture) => picture.to_bytes(),
@@ -889,8 +858,7 @@ impl FlacMetadata {
             }
         }
 
-        let stream_info =
-            stream_info.ok_or_else(|| AudioIOError::from(FlacError::MissingStreamInfo))?;
+        let stream_info = stream_info.ok_or_else(|| AudioIOError::from(FlacError::MissingStreamInfo))?;
 
         Ok(FlacMetadata {
             stream_info,

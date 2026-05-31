@@ -62,18 +62,8 @@ impl<'a> BextChunk<'a> {
     ///
     /// This is the primary timecode reference for synchronisation.
     pub fn time_reference(&self) -> u64 {
-        let lo = u32::from_le_bytes([
-            self.bytes[338],
-            self.bytes[339],
-            self.bytes[340],
-            self.bytes[341],
-        ]) as u64;
-        let hi = u32::from_le_bytes([
-            self.bytes[342],
-            self.bytes[343],
-            self.bytes[344],
-            self.bytes[345],
-        ]) as u64;
+        let lo = u32::from_le_bytes([self.bytes[338], self.bytes[339], self.bytes[340], self.bytes[341]]) as u64;
+        let hi = u32::from_le_bytes([self.bytes[342], self.bytes[343], self.bytes[344], self.bytes[345]]) as u64;
         lo | (hi << 32)
     }
 
@@ -135,11 +125,7 @@ impl<'a> BextChunk<'a> {
         if self.bytes.len() <= Self::MIN_SIZE {
             return String::new();
         }
-        fixed_str(
-            self.bytes,
-            Self::MIN_SIZE,
-            self.bytes.len() - Self::MIN_SIZE,
-        )
+        fixed_str(self.bytes, Self::MIN_SIZE, self.bytes.len() - Self::MIN_SIZE)
     }
 
     /// Read a signed i16 loudness field — `None` if version < 2 or value is 0x7FFF (unset sentinel).
@@ -148,11 +134,7 @@ impl<'a> BextChunk<'a> {
             return None;
         }
         let v = i16::from_le_bytes([self.bytes[offset], self.bytes[offset + 1]]);
-        if v == 0x7FFF_u16 as i16 {
-            None
-        } else {
-            Some(v)
-        }
+        if v == 0x7FFF_u16 as i16 { None } else { Some(v) }
     }
 }
 

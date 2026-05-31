@@ -113,7 +113,7 @@ pub const fn sample_rate_to_code(rate: u32) -> (u8, u8) {
             else {
                 (0, 0)
             }
-        }
+        },
     }
 }
 
@@ -136,6 +136,6 @@ pub const fn block_size_to_code(size: u32) -> (u8, u8) {
         _ => {
             // Use 8-bit if fits
             if size <= 256 { (6, 1) } else { (7, 2) }
-        }
+        },
     }
 }

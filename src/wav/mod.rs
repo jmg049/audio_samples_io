@@ -14,15 +14,15 @@ pub mod streaming;
 pub mod streaming_sink;
 pub mod streaming_writer;
 pub mod wav_file;
+use core::fmt::{Display, Formatter, Result as FmtResult};
+
 pub use bext::BextChunk;
 pub use companding::Companding;
-use core::fmt::{Display, Formatter, Result as FmtResult};
 pub use cue::cue_chunk_bytes;
 pub use cue::{CueChunk, CuePoint};
 pub use fact::FactChunk;
 pub use header::{
-    build_wav_header, build_wav_header_infinite, needs_extensible, wav_data_len, wav_file_len,
-    wav_header_len,
+    build_wav_header, build_wav_header_infinite, needs_extensible, wav_data_len, wav_file_len, wav_header_len,
 };
 pub use list_info::{InfoMetadata, ListChunk};
 pub use smpl::{LoopType, SampleLoop, SmplChunk};
@@ -168,7 +168,7 @@ impl Display for FormatCode {
             match self {
                 FormatCode::Unknown(code) => {
                     write!(f, "{} (0x{:04X})", self.description(), code)
-                }
+                },
                 other => write!(f, "{}", other.description()),
             }
         } else {
@@ -198,11 +198,7 @@ impl ExtendedFormatInfo {
         0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71, 0x00, 0x00,
     ];
 
-    pub const fn try_new(
-        valid_bits_per_sample: u16,
-        channel_mask: u32,
-        sub_format: [u8; 16],
-    ) -> AudioIOResult<Self> {
+    pub const fn try_new(valid_bits_per_sample: u16, channel_mask: u32, sub_format: [u8; 16]) -> AudioIOResult<Self> {
         // Catch invalid sub-format GUIDs at const construction time
         match FormatCode::const_from(u16::from_le_bytes([sub_format[0], sub_format[1]])) {
             FormatCode::Unknown(_) => Err(AudioIOError::WavError(WavError::invalid_subformat())),

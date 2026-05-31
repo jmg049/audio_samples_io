@@ -5,13 +5,14 @@
 /// Cross-reading with hound validates that our output is spec-compliant.
 #[cfg(feature = "wav")]
 mod wav_write {
+    use std::io::Cursor;
+    use std::path::Path;
+
     use audio_samples::traits::StandardSample;
     use audio_samples::{AudioSamples, I24, nzu, sample_rate};
     use audio_samples_io::traits::{AudioFile, AudioFileRead};
     use audio_samples_io::{OpenOptions, WavFile, write};
     use hound::{SampleFormat, WavReader};
-    use std::io::Cursor;
-    use std::path::Path;
 
     fn temp_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("asio_write_test_{name}_{}.wav", std::process::id()))
@@ -62,10 +63,8 @@ mod wav_write {
         let sr = sample_rate!(44100);
         let left: AudioSamples<i16> = mono(&[2i16, 5, 11, 17], 44100);
         let right: AudioSamples<i16> = mono(&[-3i16, -7, -13, -19], 44100);
-        let stereo = audio_samples::AudioEditing::stack(
-            non_empty_slice::NonEmptySlice::new(&[left, right]).unwrap(),
-        )
-        .expect("stack failed");
+        let stereo = audio_samples::AudioEditing::stack(non_empty_slice::NonEmptySlice::new(&[left, right]).unwrap())
+            .expect("stack failed");
         write(&path, &stereo).expect("write failed");
 
         let mut reader = WavReader::open(&path).expect("hound open failed");
@@ -156,11 +155,7 @@ mod wav_write {
 
         let wav = open(&path);
         let read_back = <WavFile as AudioFileRead>::read::<I24>(&wav).expect("read failed");
-        let read_i32: Vec<i32> = read_back
-            .to_interleaved_vec()
-            .iter()
-            .map(|s| s.to_i32())
-            .collect();
+        let read_i32: Vec<i32> = read_back.to_interleaved_vec().iter().map(|s| s.to_i32()).collect();
         assert_eq!(read_i32, values_i32);
 
         std::fs::remove_file(&path).ok();
@@ -173,8 +168,7 @@ mod wav_write {
         let audio = mono(&[1i16, 2, 3, 4], 44100);
         let mut buffer = Vec::new();
         let cursor = Cursor::new(&mut buffer);
-        audio_samples_io::write_with(cursor, &audio, audio_samples_io::FileType::WAV)
-            .expect("write_with failed");
+        audio_samples_io::write_with(cursor, &audio, audio_samples_io::FileType::WAV).expect("write_with failed");
 
         assert!(buffer.len() > 44, "file too small");
         assert_eq!(&buffer[0..4], b"RIFF");
@@ -186,8 +180,7 @@ mod wav_write {
         let original = mono(&[100i16, -200, 300, -400], 22050);
         let mut buffer = Vec::new();
         let cursor = Cursor::new(&mut buffer);
-        audio_samples_io::write_with(cursor, &original, audio_samples_io::FileType::WAV)
-            .expect("write_with failed");
+        audio_samples_io::write_with(cursor, &original, audio_samples_io::FileType::WAV).expect("write_with failed");
 
         let path = temp_path("cursor_readback");
         std::fs::write(&path, &buffer).expect("write to temp file failed");
@@ -214,12 +207,7 @@ mod wav_write {
         let mut pos = 12usize;
         while pos + 8 <= bytes.len() {
             let id = &bytes[pos..pos + 4];
-            let size = u32::from_le_bytes([
-                bytes[pos + 4],
-                bytes[pos + 5],
-                bytes[pos + 6],
-                bytes[pos + 7],
-            ]) as usize;
+            let size = u32::from_le_bytes([bytes[pos + 4], bytes[pos + 5], bytes[pos + 6], bytes[pos + 7]]) as usize;
             if id == b"fmt " {
                 found_fmt = true;
                 assert!(size >= 16, "fmt chunk too small: {size}");
@@ -288,11 +276,7 @@ mod wav_write {
             write(&path, &audio).expect("write failed");
 
             let reader = WavReader::open(&path).expect("hound open failed");
-            assert_eq!(
-                reader.spec().sample_rate,
-                sr,
-                "sample rate mismatch for {sr}"
-            );
+            assert_eq!(reader.spec().sample_rate, sr, "sample rate mismatch for {sr}");
 
             std::fs::remove_file(&path).ok();
         }
@@ -314,19 +298,14 @@ mod wav_write {
         let ch1 = mono(&[1.0f32, 0.5, 0.0, -0.5], 44100);
         let ch2 = mono(&[0.5f32, 1.0, -0.5, 0.0], 44100);
         let ch3 = mono(&[0.0f32, 0.5, 1.0, -1.0], 44100);
-        let three_ch = audio_samples::AudioEditing::stack(
-            non_empty_slice::NonEmptySlice::new(&[ch1, ch2, ch3]).unwrap(),
-        )
-        .expect("stack failed");
+        let three_ch =
+            audio_samples::AudioEditing::stack(non_empty_slice::NonEmptySlice::new(&[ch1, ch2, ch3]).unwrap())
+                .expect("stack failed");
         write(&path, &three_ch).expect("write failed");
 
         let wav = open(&path);
         let info = <WavFile as AudioFileMetadata>::base_info(&wav).unwrap();
-        assert_eq!(
-            info.sample_type,
-            SampleType::F32,
-            "extensible f32 parsed as wrong type"
-        );
+        assert_eq!(info.sample_type, SampleType::F32, "extensible f32 parsed as wrong type");
         assert_eq!(info.channels, 3);
         assert_eq!(info.bits_per_sample, 32);
 

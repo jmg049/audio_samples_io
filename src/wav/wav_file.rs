@@ -1,11 +1,4 @@
-use audio_samples::{
-    AudioData, AudioSamples, I24, SampleType,
-    traits::{ConvertFrom, StandardSample},
-};
 use core::fmt::{Display, Formatter, Result as FmtResult};
-use memmap2::MmapOptions;
-use ndarray::{Array1, Array2, ShapeBuilder};
-use non_empty_slice::NonEmptyVec;
 use std::{
     any::TypeId,
     fs::File,
@@ -17,19 +10,25 @@ use std::{
     time::Duration,
 };
 
+use audio_samples::{
+    AudioData, AudioSamples, I24, SampleType,
+    traits::{ConvertFrom, StandardSample},
+};
+use memmap2::MmapOptions;
+use ndarray::{Array1, Array2, ShapeBuilder};
+use non_empty_slice::NonEmptyVec;
+
 use crate::{
     MAX_MMAP_SIZE, MAX_WAV_SIZE,
     error::{AudioIOError, AudioIOResult, ErrorPosition},
     traits::{AudioFile, AudioFileMetadata, AudioFileRead, AudioFileWrite, AudioInfoMarker},
-    types::{
-        AudioDataSource, BaseAudioInfo, FileType, OpenOptions, ValidatedSampleType, WriteOptions,
-    },
+    types::{AudioDataSource, BaseAudioInfo, FileType, OpenOptions, ValidatedSampleType, WriteOptions},
     wav::{
         Companding, FormatCode,
         bext::BextChunk,
         chunks::{
-            BEXT_CHUNK, CUE_CHUNK, ChunkDesc, ChunkID, DATA_CHUNK, FACT_CHUNK, FMT_CHUNK,
-            LIST_CHUNK, RIFF_CHUNK, SMPL_CHUNK, WAVE_CHUNK,
+            BEXT_CHUNK, CUE_CHUNK, ChunkDesc, ChunkID, DATA_CHUNK, FACT_CHUNK, FMT_CHUNK, LIST_CHUNK, RIFF_CHUNK,
+            SMPL_CHUNK, WAVE_CHUNK,
         },
         cue::{CueChunk, CuePoint, cue_chunk_bytes},
         data::DataChunk,
@@ -127,10 +126,7 @@ impl<'a> WavFile<'a> {
         self.chunks
             .iter()
             .find(|c| c.id == FACT_CHUNK)
-            .map(|desc| {
-                FactChunk::from_bytes(&self.data_source[desc.data_range()])
-                    .map_err(AudioIOError::WavError)
-            })
+            .map(|desc| FactChunk::from_bytes(&self.data_source[desc.data_range()]).map_err(AudioIOError::WavError))
             .transpose()
     }
 
@@ -142,10 +138,7 @@ impl<'a> WavFile<'a> {
         self.chunks
             .iter()
             .find(|c| c.id == LIST_CHUNK)
-            .map(|desc| {
-                ListChunk::from_bytes(&self.data_source[desc.data_range()])
-                    .map_err(AudioIOError::WavError)
-            })
+            .map(|desc| ListChunk::from_bytes(&self.data_source[desc.data_range()]).map_err(AudioIOError::WavError))
             .transpose()
     }
 
@@ -156,10 +149,7 @@ impl<'a> WavFile<'a> {
         self.chunks
             .iter()
             .find(|c| c.id == CUE_CHUNK)
-            .map(|desc| {
-                CueChunk::from_bytes(&self.data_source[desc.data_range()])
-                    .map_err(AudioIOError::WavError)
-            })
+            .map(|desc| CueChunk::from_bytes(&self.data_source[desc.data_range()]).map_err(AudioIOError::WavError))
             .transpose()
     }
 
@@ -170,10 +160,7 @@ impl<'a> WavFile<'a> {
         self.chunks
             .iter()
             .find(|c| c.id == SMPL_CHUNK)
-            .map(|desc| {
-                SmplChunk::from_bytes(&self.data_source[desc.data_range()])
-                    .map_err(AudioIOError::WavError)
-            })
+            .map(|desc| SmplChunk::from_bytes(&self.data_source[desc.data_range()]).map_err(AudioIOError::WavError))
             .transpose()
     }
 
@@ -184,10 +171,7 @@ impl<'a> WavFile<'a> {
         self.chunks
             .iter()
             .find(|c| c.id == BEXT_CHUNK)
-            .map(|desc| {
-                BextChunk::from_bytes(&self.data_source[desc.data_range()])
-                    .map_err(AudioIOError::WavError)
-            })
+            .map(|desc| BextChunk::from_bytes(&self.data_source[desc.data_range()]).map_err(AudioIOError::WavError))
             .transpose()
     }
 
@@ -226,8 +210,7 @@ impl<'a> AudioFileMetadata for WavFile<'a> {
 
     fn base_info(&self) -> AudioIOResult<BaseAudioInfo> {
         let fmt_chunk = self.fmt_chunk();
-        let (_, channels, sample_rate, byte_rate, block_align, bits_per_sample) =
-            fmt_chunk.fmt_chunk();
+        let (_, channels, sample_rate, byte_rate, block_align, bits_per_sample) = fmt_chunk.fmt_chunk();
         let sample_rate = match NonZeroU32::new(sample_rate) {
             Some(sr) => sr,
             None => {
@@ -235,14 +218,13 @@ impl<'a> AudioFileMetadata for WavFile<'a> {
                     "Invalid sample rate in FMT chunk",
                     "Sample rate cannot be zero",
                 ));
-            }
+            },
         };
         let (total_samples, duration) = {
             let data_chunk = self.data();
             // safety: channels is non-zero as per WAV spec
-            let total_frames = data_chunk.total_frames(self.sample_type, unsafe {
-                NonZeroU32::new_unchecked(channels as u32)
-            });
+            let total_frames =
+                data_chunk.total_frames(self.sample_type, unsafe { NonZeroU32::new_unchecked(channels as u32) });
             // Duration is based on frames, not total samples
             let duration = Duration::from_secs_f64(total_frames as f64 / sample_rate.get() as f64);
             (self.total_samples(), duration)
@@ -353,11 +335,7 @@ impl<'a> AudioFile for WavFile<'a> {
 
         // 1. Parse the RIFF header + File size + WAVE identifier
         // Assume the first 12 bytes are the RIFF header
-        let riff = ChunkID::new(
-            bytes[0..4]
-                .try_into()
-                .expect("Guaranteed to be at least 12 bytes now"),
-        );
+        let riff = ChunkID::new(bytes[0..4].try_into().expect("Guaranteed to be at least 12 bytes now"));
 
         if riff != RIFF_CHUNK {
             return Err(AudioIOError::corrupted_data(
@@ -367,11 +345,8 @@ impl<'a> AudioFile for WavFile<'a> {
             ));
         }
 
-        let declared_file_size = u32::from_le_bytes(
-            bytes[4..8]
-                .try_into()
-                .expect("Guaranteed to be at least 12 bytes now"),
-        ) as usize;
+        let declared_file_size =
+            u32::from_le_bytes(bytes[4..8].try_into().expect("Guaranteed to be at least 12 bytes now")) as usize;
 
         // Streaming producers (ffmpeg, live capture) cannot know the final length up front and
         // write a placeholder RIFF size — commonly 0xFFFFFFFF — that overruns the real byte count.
@@ -379,11 +354,7 @@ impl<'a> AudioFile for WavFile<'a> {
         // bytes actually present rather than rejecting the file outright.
         let file_size = declared_file_size.min(bytes.len().saturating_sub(8));
 
-        let wave = ChunkID::new(
-            bytes[8..12]
-                .try_into()
-                .expect("Guaranteed to be at least 12 bytes now"),
-        );
+        let wave = ChunkID::new(bytes[8..12].try_into().expect("Guaranteed to be at least 12 bytes now"));
 
         if wave != WAVE_CHUNK {
             return Err(AudioIOError::corrupted_data(
@@ -397,8 +368,8 @@ impl<'a> AudioFile for WavFile<'a> {
         chunks.push(ChunkDesc {
             id: riff,
             offset: 0,
-            logical_size: file_size as usize,
-            total_size: file_size as usize + 8, // RIFF header + data
+            logical_size: file_size,
+            total_size: file_size + 8, // RIFF header + data
         });
         chunks.push(ChunkDesc {
             id: wave,
@@ -464,23 +435,19 @@ impl<'a> AudioFile for WavFile<'a> {
             Some(fmt_chunk) => {
                 let start = fmt_chunk.offset + 8; // skip 8-byte header
                 let end = start + fmt_chunk.logical_size; // exclude padding if any
-                let fmt_chunk = FmtChunk::from_bytes_validated(&bytes[start..end])
-                    .map_err(AudioIOError::WavError)?;
+                let fmt_chunk = FmtChunk::from_bytes_validated(&bytes[start..end]).map_err(AudioIOError::WavError)?;
                 let sample_type = fmt_chunk.actual_sample_type()?;
                 let companding = fmt_chunk.companding();
                 let is_adpcm = fmt_chunk.format_code().is_adpcm();
                 (start..end, sample_type, companding, is_adpcm)
-            }
+            },
             None => {
                 return Err(AudioIOError::corrupted_data(
                     "FMT chunk not found in WAV file",
-                    format!(
-                        "Found chunks: {:?}",
-                        chunks.iter().map(|c| c.id).collect::<Vec<_>>()
-                    ),
+                    format!("Found chunks: {:?}", chunks.iter().map(|c| c.id).collect::<Vec<_>>()),
                     ErrorPosition::new(12).with_description("chunk data section"),
                 ));
-            }
+            },
         };
 
         let data_range = match data_chunk_desc {
@@ -488,25 +455,22 @@ impl<'a> AudioFile for WavFile<'a> {
                 let start = data_chunk.offset + 8; // skip 8-byte header
                 let end = start + data_chunk.logical_size; // exclude padding byte
                 start..end
-            }
+            },
             None => {
                 return Err(AudioIOError::corrupted_data(
                     "DATA chunk not found in WAV file",
-                    format!(
-                        "Found chunks: {:?}",
-                        chunks.iter().map(|c| c.id).collect::<Vec<_>>()
-                    ),
+                    format!("Found chunks: {:?}", chunks.iter().map(|c| c.id).collect::<Vec<_>>()),
                     ErrorPosition::new(12).with_description("chunk data section"),
                 ));
-            }
+            },
         };
 
         let total_samples = {
             let data_chunk = DataChunk::from_bytes(&bytes[data_range.clone()]);
             if is_adpcm {
                 // ADPCM expands a variable number of samples per block.
-                let fmt_chunk = FmtChunk::from_bytes(&bytes[fmt_range.clone()])
-                    .expect("fmt chunk validated during open");
+                let fmt_chunk =
+                    FmtChunk::from_bytes(&bytes[fmt_range.clone()]).expect("fmt chunk validated during open");
                 crate::wav::adpcm::decoded_sample_count(&fmt_chunk, data_chunk.len())
             } else if companding.is_some() {
                 // Companded data is one byte per (decoded) sample.
@@ -543,9 +507,7 @@ impl<'a> AudioFile for WavFile<'a> {
 /// header fits in the first 8 KiB read by the `BufReader`, so this triggers at most one read
 /// syscall regardless of file size.
 #[inline]
-pub fn parse_wav_header_streaming<R: Read + Seek>(
-    reader: &mut R,
-) -> AudioIOResult<(BaseAudioInfo, u64)> {
+pub fn parse_wav_header_streaming<R: Read + Seek>(reader: &mut R) -> AudioIOResult<(BaseAudioInfo, u64)> {
     use crate::wav::chunks::RIFF_CHUNK;
 
     // ---- RIFF + WAVE header (12 bytes) ----
@@ -577,14 +539,14 @@ pub fn parse_wav_header_streaming<R: Read + Seek>(
         match reader.read_exact(&mut chunk_hdr) {
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(e) => return Err(AudioIOError::from(e)),
-            Ok(_) => {}
+            Ok(_) => {},
         }
         let id = &chunk_hdr[0..4];
         let size = u32::from_le_bytes(match chunk_hdr[4..8].try_into() {
             Ok(b) => b,
-            Err(_) => unreachable!(
-                "chunk header is 8 bytes long, 4..8 is a 4-byte slice, try_into will always succeed"
-            ),
+            Err(_) => {
+                unreachable!("chunk header is 8 bytes long, 4..8 is a 4-byte slice, try_into will always succeed")
+            },
         }) as usize;
         let padded = size + (size & 1); // RIFF chunks are padded to even sizes
 
@@ -595,13 +557,9 @@ pub fn parse_wav_header_streaming<R: Read + Seek>(
                     format!("Expected 16 or 40, got {size}"),
                 ));
             }
-            reader
-                .read_exact(&mut fmt_buf[..size])
-                .map_err(AudioIOError::from)?;
+            reader.read_exact(&mut fmt_buf[..size]).map_err(AudioIOError::from)?;
             if size & 1 != 0 {
-                reader
-                    .read_exact(&mut [0u8; 1])
-                    .map_err(AudioIOError::from)?;
+                reader.read_exact(&mut [0u8; 1]).map_err(AudioIOError::from)?;
             }
             fmt_size = size;
             have_fmt = true;
@@ -630,9 +588,8 @@ pub fn parse_wav_header_streaming<R: Read + Seek>(
             "WAV file must contain a fmt  chunk before data",
         ));
     }
-    let data_byte_offset = data_byte_offset.ok_or_else(|| {
-        AudioIOError::corrupted_data_simple("No data chunk found", "WAV file has no data chunk")
-    })?;
+    let data_byte_offset = data_byte_offset
+        .ok_or_else(|| AudioIOError::corrupted_data_simple("No data chunk found", "WAV file has no data chunk"))?;
 
     let data_byte_count = data_byte_count.ok_or_else(|| {
         AudioIOError::corrupted_data_simple(
@@ -642,16 +599,12 @@ pub fn parse_wav_header_streaming<R: Read + Seek>(
     })?;
 
     // ---- parse fmt bytes ----
-    let fmt_chunk =
-        FmtChunk::from_bytes_validated(&fmt_buf[..fmt_size]).map_err(AudioIOError::WavError)?;
-    let sample_type: ValidatedSampleType = fmt_chunk
-        .actual_sample_type()
-        .map_err(AudioIOError::WavError)?;
+    let fmt_chunk = FmtChunk::from_bytes_validated(&fmt_buf[..fmt_size]).map_err(AudioIOError::WavError)?;
+    let sample_type: ValidatedSampleType = fmt_chunk.actual_sample_type().map_err(AudioIOError::WavError)?;
 
     let (_, channels, sample_rate, byte_rate, block_align, bits_per_sample) = fmt_chunk.fmt_chunk();
-    let sample_rate = NonZeroU32::new(sample_rate).ok_or_else(|| {
-        AudioIOError::corrupted_data_simple("Invalid sample rate", "Sample rate cannot be zero")
-    })?;
+    let sample_rate = NonZeroU32::new(sample_rate)
+        .ok_or_else(|| AudioIOError::corrupted_data_simple("Invalid sample rate", "Sample rate cannot be zero"))?;
 
     let bytes_per_sample = fmt_chunk.bytes_per_sample();
     let total_samples = if bytes_per_sample > 0 {
@@ -712,24 +665,12 @@ impl<'a> AudioFileRead<'a> for WavFile<'a> {
         }
 
         match sample_type {
-            ValidatedSampleType::U8 => {
-                read_typed_internal::<u8, T>(&data_chunk, num_channels, sample_rate)
-            }
-            ValidatedSampleType::I16 => {
-                read_typed_internal::<i16, T>(&data_chunk, num_channels, sample_rate)
-            }
-            ValidatedSampleType::I24 => {
-                read_typed_internal::<I24, T>(&data_chunk, num_channels, sample_rate)
-            }
-            ValidatedSampleType::I32 => {
-                read_typed_internal::<i32, T>(&data_chunk, num_channels, sample_rate)
-            }
-            ValidatedSampleType::F32 => {
-                read_typed_internal::<f32, T>(&data_chunk, num_channels, sample_rate)
-            }
-            ValidatedSampleType::F64 => {
-                read_typed_internal::<f64, T>(&data_chunk, num_channels, sample_rate)
-            }
+            ValidatedSampleType::U8 => read_typed_internal::<u8, T>(&data_chunk, num_channels, sample_rate),
+            ValidatedSampleType::I16 => read_typed_internal::<i16, T>(&data_chunk, num_channels, sample_rate),
+            ValidatedSampleType::I24 => read_typed_internal::<I24, T>(&data_chunk, num_channels, sample_rate),
+            ValidatedSampleType::I32 => read_typed_internal::<i32, T>(&data_chunk, num_channels, sample_rate),
+            ValidatedSampleType::F32 => read_typed_internal::<f32, T>(&data_chunk, num_channels, sample_rate),
+            ValidatedSampleType::F64 => read_typed_internal::<f64, T>(&data_chunk, num_channels, sample_rate),
         }
     }
 
@@ -748,7 +689,11 @@ impl<'a> AudioFileRead<'a> for WavFile<'a> {
         }
 
         match self.sample_type {
-            ValidatedSampleType::U8 => read_into_typed_internal::<u8, T>(&data_chunk, audio), // technicaly not part of the wav spec, but it does not disallow it either, so we support it
+            ValidatedSampleType::U8 => read_into_typed_internal::<u8, T>(&data_chunk, audio), /* technicaly not part
+                                                                                                * of the wav spec,
+                                                                                                * but it does not
+                                                                                                * disallow it either,
+                                                                                                * so we support it */
             ValidatedSampleType::I16 => read_into_typed_internal::<i16, T>(&data_chunk, audio),
             ValidatedSampleType::I24 => read_into_typed_internal::<I24, T>(&data_chunk, audio),
             ValidatedSampleType::I32 => read_into_typed_internal::<i32, T>(&data_chunk, audio),
@@ -775,8 +720,7 @@ where
     // SAFETY: sample_rate comes from validated WAV header which requires non-zero sample rate
     if num_channels.get() == 1 {
         // Mono: data is already in correct format
-        AudioSamples::new_mono(Array1::from_vec(interleaved_data.into_vec()), sample_rate)
-            .map_err(Into::into)
+        AudioSamples::new_mono(Array1::from_vec(interleaved_data.into_vec()), sample_rate).map_err(Into::into)
     } else {
         let total_samples = interleaved_data.len();
         let frames = total_samples.get() / num_channels.get() as usize;
@@ -802,10 +746,7 @@ where
     }
 }
 
-fn read_into_typed_internal<'a, S, T>(
-    data_chunk: &DataChunk<'a>,
-    audio: &mut AudioSamples<'a, T>,
-) -> AudioIOResult<()>
+fn read_into_typed_internal<'a, S, T>(data_chunk: &DataChunk<'a>, audio: &mut AudioSamples<'a, T>) -> AudioIOResult<()>
 where
     S: StandardSample + 'static,
     T: StandardSample + ConvertFrom<S> + 'static,
@@ -838,11 +779,8 @@ where
     } else {
         // Multi-channel: deinterleave the converted data before replacing
         // Use optimized deinterleave from audio_samples
-        let planar_data =
-            audio_samples::simd_conversions::deinterleave_multi_vec(&converted, num_channels)
-                .map_err(|e| {
-                    AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string())
-                })?;
+        let planar_data = audio_samples::simd_conversions::deinterleave_multi_vec(&converted, num_channels)
+            .map_err(|e| AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string()))?;
         audio.replace_with_vec(&planar_data).map_err(|e| e.into())
     }
 }
@@ -912,11 +850,8 @@ where
     if audio.is_mono() {
         audio.replace_with_vec(&decoded).map_err(|e| e.into())
     } else {
-        let planar_data =
-            audio_samples::simd_conversions::deinterleave_multi_vec(&decoded, num_channels)
-                .map_err(|e| {
-                    AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string())
-                })?;
+        let planar_data = audio_samples::simd_conversions::deinterleave_multi_vec(&decoded, num_channels)
+            .map_err(|e| AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string()))?;
         audio.replace_with_vec(&planar_data).map_err(|e| e.into())
     }
 }
@@ -988,20 +923,14 @@ where
     if audio.is_mono() {
         audio.replace_with_vec(&decoded).map_err(|e| e.into())
     } else {
-        let planar_data =
-            audio_samples::simd_conversions::deinterleave_multi_vec(&decoded, num_channels)
-                .map_err(|e| {
-                    AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string())
-                })?;
+        let planar_data = audio_samples::simd_conversions::deinterleave_multi_vec(&decoded, num_channels)
+            .map_err(|e| AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string()))?;
         audio.replace_with_vec(&planar_data).map_err(|e| e.into())
     }
 }
 
 /// Shared ADPCM expansion: decode blocks to 16-bit linear PCM, then convert to `T`.
-fn decode_adpcm<T>(
-    fmt_chunk: &FmtChunk<'_>,
-    data_chunk: &DataChunk<'_>,
-) -> AudioIOResult<NonEmptyVec<T>>
+fn decode_adpcm<T>(fmt_chunk: &FmtChunk<'_>, data_chunk: &DataChunk<'_>) -> AudioIOResult<NonEmptyVec<T>>
 where
     T: StandardSample + ConvertFrom<i16> + 'static,
 {
@@ -1025,9 +954,7 @@ where
 /// This function validates that the sample type is valid before conversion.
 const fn sample_type_to_format(sample_type: SampleType) -> Option<FormatCode> {
     match sample_type {
-        SampleType::U8 | SampleType::I16 | SampleType::I24 | SampleType::I32 => {
-            Some(FormatCode::Pcm)
-        }
+        SampleType::U8 | SampleType::I16 | SampleType::I24 | SampleType::I32 => Some(FormatCode::Pcm),
         SampleType::F32 | SampleType::F64 => Some(FormatCode::IeeeFloat),
         _ => None,
     }
@@ -1048,8 +975,8 @@ where
     W: Write,
 {
     let sample_type = get_sample_type::<T>();
-    let format_code = sample_type_to_format(sample_type)
-        .ok_or(AudioIOError::WavError(WavError::UnsupportedSampleType))?;
+    let format_code =
+        sample_type_to_format(sample_type).ok_or(AudioIOError::WavError(WavError::UnsupportedSampleType))?;
     let bits_per_sample = T::BITS as u16;
     let bytes_per_sample = T::BYTES as u16;
     let block_align = channels * bytes_per_sample;
@@ -1089,8 +1016,8 @@ where
     W: Write,
 {
     let sample_type = get_sample_type::<T>();
-    let format_code = sample_type_to_format(sample_type)
-        .ok_or(AudioIOError::WavError(WavError::UnsupportedSampleType))?;
+    let format_code =
+        sample_type_to_format(sample_type).ok_or(AudioIOError::WavError(WavError::UnsupportedSampleType))?;
     let bits_per_sample = T::BITS as u16;
     let bytes_per_sample = T::BYTES as u16;
     let block_align = channels * bytes_per_sample;
@@ -1115,7 +1042,7 @@ where
             } else {
                 0xFFFFFFFF
             }
-        }
+        },
     };
 
     // FMT chunk header
@@ -1177,23 +1104,19 @@ where
     // On little-endian platforms the in-memory bytes need no reordering for any integer or
     // float type (except I24 which uses a non-standard 4-byte in-memory representation).
     #[cfg(target_endian = "little")]
-    if TypeId::of::<T>() != TypeId::of::<I24>() {
-        if let AudioData::Multi(ref m) = audio.data {
-            let view = m.as_view();
-            if !view.is_standard_layout() {
-                if let Some(slice) = view.as_slice_memory_order() {
-                    // Safety: T is a plain numeric type (StandardSample, not I24).
-                    // Casting any &[T] to &[u8] is valid — bytes are always initialised.
-                    let bytes = unsafe {
-                        std::slice::from_raw_parts(
-                            slice.as_ptr().cast::<u8>(),
-                            std::mem::size_of_val(slice),
-                        )
-                    };
-                    writer.write_all(bytes)?;
-                    return Ok(());
-                }
-            }
+    if TypeId::of::<T>() != TypeId::of::<I24>()
+        && let AudioData::Multi(ref m) = audio.data
+    {
+        let view = m.as_view();
+        if !view.is_standard_layout()
+            && let Some(slice) = view.as_slice_memory_order()
+        {
+            // Safety: T is a plain numeric type (StandardSample, not I24).
+            // Casting any &[T] to &[u8] is valid — bytes are always initialised.
+            let bytes =
+                unsafe { std::slice::from_raw_parts(slice.as_ptr().cast::<u8>(), std::mem::size_of_val(slice)) };
+            writer.write_all(bytes)?;
+            return Ok(());
         }
     }
 
@@ -1211,58 +1134,55 @@ where
     // tile at a time, and write each tile to the output — zero large allocations, sequential
     // reads within each channel's tile window, sequential writes.
     #[cfg(target_endian = "little")]
-    if TypeId::of::<T>() != TypeId::of::<I24>() {
-        if let AudioData::Multi(ref m) = audio.data {
-            let view = m.as_view();
-            if view.is_standard_layout() {
-                use std::mem::MaybeUninit;
+    if TypeId::of::<T>() != TypeId::of::<I24>()
+        && let AudioData::Multi(ref m) = audio.data
+    {
+        let view = m.as_view();
+        if view.is_standard_layout() {
+            use std::mem::MaybeUninit;
 
-                let channels = view.shape()[0];
-                let frames = view.shape()[1];
-                let sample_size = mem::size_of::<T>();
+            let channels = view.shape()[0];
+            let frames = view.shape()[1];
+            let sample_size = mem::size_of::<T>();
 
-                // Tile size: aim for ~64 KB of output data to stay in L1/L2 cache.
-                const TARGET_TILE_BYTES: usize = 512 * 1024;
-                let tile_frames = (TARGET_TILE_BYTES / (channels * sample_size)).max(1);
+            // Tile size: aim for ~64 KB of output data to stay in L1/L2 cache.
+            const TARGET_TILE_BYTES: usize = 512 * 1024;
+            let tile_frames = (TARGET_TILE_BYTES / (channels * sample_size)).max(1);
 
-                // One contiguous slice per channel (rows are contiguous in C-order).
-                let rows: Vec<&[T]> = (0..channels)
-                    .map(|c| view.row(c).to_slice().expect("C-order row is contiguous"))
-                    .collect();
+            // One contiguous slice per channel (rows are contiguous in C-order).
+            let rows: Vec<&[T]> = (0..channels)
+                .map(|c| view.row(c).to_slice().expect("C-order row is contiguous"))
+                .collect();
 
-                // Pre-allocate tile buffer once — avoids per-tile page faults.
-                let tile_capacity = tile_frames * channels;
+            // Pre-allocate tile buffer once — avoids per-tile page faults.
+            let tile_capacity = tile_frames * channels;
 
-                // Allocate uninitialised buffer
-                let mut tile: Vec<MaybeUninit<T>> = Vec::with_capacity(tile_capacity);
+            // Allocate uninitialised buffer
+            let mut tile: Vec<MaybeUninit<T>> = Vec::with_capacity(tile_capacity);
 
-                // SAFETY: we will initialise every element before reading
-                unsafe { tile.set_len(tile_capacity) };
+            // SAFETY: we will initialise every element before reading
+            unsafe { tile.set_len(tile_capacity) };
 
-                for tile_start in (0..frames).step_by(tile_frames) {
-                    let tile_end = (tile_start + tile_frames).min(frames);
-                    let actual_frames = tile_end - tile_start;
-                    // Channels-outer loop: each channel's tile window is read sequentially,
-                    // letting the HW prefetcher stream contiguous cache lines.  Writes land
-                    // at stride=channels in the tile buffer (still within a small working set).
-                    for c in 0..channels {
-                        for (i, f) in (tile_start..tile_end).enumerate() {
-                            // Safety: f < frames and c < channels, both in bounds.
-                            tile[i * channels + c].write(rows[c][f]);
-                        }
+            for tile_start in (0..frames).step_by(tile_frames) {
+                let tile_end = (tile_start + tile_frames).min(frames);
+                let actual_frames = tile_end - tile_start;
+                // Channels-outer loop: each channel's tile window is read sequentially,
+                // letting the HW prefetcher stream contiguous cache lines.  Writes land
+                // at stride=channels in the tile buffer (still within a small working set).
+                for c in 0..channels {
+                    for (i, f) in (tile_start..tile_end).enumerate() {
+                        // Safety: f < frames and c < channels, both in bounds.
+                        tile[i * channels + c].write(rows[c][f]);
                     }
-                    // Safety: T is a plain numeric type (not I24), LE platform; tile
-                    // slice is fully initialised above.
-                    let bytes = unsafe {
-                        std::slice::from_raw_parts(
-                            tile.as_ptr().cast::<u8>(),
-                            actual_frames * channels * sample_size,
-                        )
-                    };
-                    writer.write_all(bytes)?;
                 }
-                return Ok(());
+                // Safety: T is a plain numeric type (not I24), LE platform; tile
+                // slice is fully initialised above.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(tile.as_ptr().cast::<u8>(), actual_frames * channels * sample_size)
+                };
+                writer.write_all(bytes)?;
             }
+            return Ok(());
         }
     }
 
@@ -1289,11 +1209,7 @@ where
         let bytes_this_chunk = samples_this_chunk * bytes_per_sample;
 
         let mut write_idx = 0;
-        for sample in interleaved
-            .iter()
-            .skip(sample_start)
-            .take(samples_this_chunk)
-        {
+        for sample in interleaved.iter().skip(sample_start).take(samples_this_chunk) {
             let bytes = sample.to_le_bytes();
             let dst = &mut buf[write_idx..write_idx + bytes_per_sample];
             dst.copy_from_slice(bytes.as_ref());
@@ -1323,20 +1239,16 @@ pub struct WavMetadata {
 impl WavMetadata {
     /// True if there is nothing to write.
     pub fn is_empty(&self) -> bool {
-        self.cue_points.is_empty()
-            && self
-                .info
-                .as_ref()
-                .is_none_or(|i| i.to_list_chunk().is_none())
+        self.cue_points.is_empty() && self.info.as_ref().is_none_or(|i| i.to_list_chunk().is_none())
     }
 
     /// Serialise all present metadata into one contiguous, word-aligned buffer of complete chunks.
     fn to_chunk_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        if let Some(ref info) = self.info {
-            if let Some(list) = info.to_list_chunk() {
-                out.extend_from_slice(&list);
-            }
+        if let Some(ref info) = self.info
+            && let Some(list) = info.to_list_chunk()
+        {
+            out.extend_from_slice(&list);
         }
         if let Some(cue) = cue_chunk_bytes(&self.cue_points) {
             out.extend_from_slice(&cue);
@@ -1346,11 +1258,7 @@ impl WavMetadata {
 }
 
 // Write complete WAV file to a writer
-pub(crate) fn write_wav<T, W>(
-    writer: W,
-    audio: &AudioSamples<T>,
-    opts: WriteOptions,
-) -> AudioIOResult<()>
+pub(crate) fn write_wav<T, W>(writer: W, audio: &AudioSamples<T>, opts: WriteOptions) -> AudioIOResult<()>
 where
     T: StandardSample + 'static,
     W: Write,
@@ -1394,18 +1302,10 @@ where
         })?;
 
     // Calculate padded data size (must be even)
-    let padded_data_size = if data_size % 2 == 1 {
-        data_size + 1
-    } else {
-        data_size
-    };
+    let padded_data_size = if data_size % 2 == 1 { data_size + 1 } else { data_size };
 
     // Determine FMT chunk size
-    let fmt_chunk_size = if needs_extensible_format::<T>(channels) {
-        40
-    } else {
-        16
-    };
+    let fmt_chunk_size = if needs_extensible_format::<T>(channels) { 40 } else { 16 };
     let fmt_total_size = 8 + fmt_chunk_size; // chunk header + data
 
     // Serialise trailing metadata chunks up front so their bytes are counted in the RIFF size.
@@ -1483,9 +1383,8 @@ mod wav_tests {
     use audio_samples::sample_rate;
     use non_empty_slice::NonEmptySlice;
 
-    use crate::wav::FormatCode;
-
     use super::*;
+    use crate::wav::FormatCode;
 
     #[allow(dead_code)]
     fn make_base_fmt_bytes(
@@ -1516,14 +1415,10 @@ mod wav_tests {
     #[test]
     fn test_wav_fmt_chunk() {
         let wav_path = Path::new("resources/test.wav");
-        let wav_file = WavFile::open_with_options(wav_path, OpenOptions::default())
-            .expect("Failed to open test WAV file");
+        let wav_file =
+            WavFile::open_with_options(wav_path, OpenOptions::default()).expect("Failed to open test WAV file");
         let fmt_chunk = wav_file.fmt_chunk();
-        assert_eq!(
-            fmt_chunk.format_code(),
-            FormatCode::Pcm,
-            "Format code mismatch"
-        );
+        assert_eq!(fmt_chunk.format_code(), FormatCode::Pcm, "Format code mismatch");
         assert_eq!(fmt_chunk.sample_rate(), 44100, "Sample rate mismatch");
         assert_eq!(fmt_chunk.channels(), 2, "Channel count mismatch");
     }
@@ -1531,28 +1426,21 @@ mod wav_tests {
     #[test]
     fn test_wav_data_chunk() {
         let wav_path = Path::new("resources/test.wav");
-        let wav_file = WavFile::open_with_options(wav_path, OpenOptions::default())
-            .expect("Failed to open test WAV file");
+        let wav_file =
+            WavFile::open_with_options(wav_path, OpenOptions::default()).expect("Failed to open test WAV file");
 
         let audio = wav_file.read::<i16>();
-        assert!(
-            audio.is_ok(),
-            "Failed to read audio samples from DATA chunk"
-        );
+        assert!(audio.is_ok(), "Failed to read audio samples from DATA chunk");
     }
 
     #[test]
     fn test_wav_properties() {
         let wav_path = Path::new("resources/test.wav");
-        let wav_file = WavFile::open_with_options(wav_path, OpenOptions::default())
-            .expect("Failed to open test WAV file");
+        let wav_file =
+            WavFile::open_with_options(wav_path, OpenOptions::default()).expect("Failed to open test WAV file");
 
         let base_info = wav_file.base_info().expect("Failed to get base info");
-        assert_eq!(
-            base_info.sample_rate,
-            sample_rate!(44100),
-            "Sample rate mismatch"
-        );
+        assert_eq!(base_info.sample_rate, sample_rate!(44100), "Sample rate mismatch");
         assert_eq!(base_info.channels, 2, "Channel count mismatch");
         assert_eq!(base_info.bits_per_sample, 16, "Bits per sample mismatch");
 
@@ -1572,8 +1460,9 @@ mod wav_tests {
 
     #[test]
     fn test_wav_write_i16() {
-        use audio_samples::{AudioTypeConversion, sine_wave};
         use std::fs;
+
+        use audio_samples::{AudioTypeConversion, sine_wave};
 
         // Generate a sine wave
         let sample_rate = sample_rate!(44100);
@@ -1597,8 +1486,8 @@ mod wav_tests {
         assert!(metadata.len() > 44, "WAV file too small"); // At least header size
 
         // Read back and verify
-        let wav_file = WavFile::open_with_options(&output_path, OpenOptions::default())
-            .expect("Failed to open written WAV file");
+        let wav_file =
+            WavFile::open_with_options(&output_path, OpenOptions::default()).expect("Failed to open written WAV file");
 
         let base_info = wav_file.base_info().expect("Failed to get base info");
         assert_eq!(base_info.sample_rate, sample_rate!(44100));
@@ -1614,8 +1503,9 @@ mod wav_tests {
 
     #[test]
     fn test_wav_write_f32() {
-        use audio_samples::sine_wave;
         use std::fs;
+
+        use audio_samples::sine_wave;
 
         // Generate a sine wave
         let sample_rate = sample_rate!(48000);
@@ -1634,8 +1524,8 @@ mod wav_tests {
         .expect("Failed to write WAV file");
 
         // Read back and verify
-        let wav_file = WavFile::open_with_options(&output_path, OpenOptions::default())
-            .expect("Failed to open written WAV file");
+        let wav_file =
+            WavFile::open_with_options(&output_path, OpenOptions::default()).expect("Failed to open written WAV file");
 
         let base_info = wav_file.base_info().expect("Failed to get base info");
         assert_eq!(base_info.sample_rate, sample_rate!(48000));
@@ -1655,17 +1545,15 @@ mod wav_tests {
 
     #[test]
     fn test_wav_read_i24_roundtrip() {
-        use audio_samples::sine_wave;
         use std::fs;
+
+        use audio_samples::sine_wave;
 
         let sample_rate = sample_rate!(48_000);
         let duration = Duration::from_millis(20);
         let audio = sine_wave::<I24>(440.0, duration, sample_rate, 0.5);
 
-        let output_path = std::env::temp_dir().join(format!(
-            "test_read_i24_roundtrip_{}.wav",
-            std::process::id()
-        ));
+        let output_path = std::env::temp_dir().join(format!("test_read_i24_roundtrip_{}.wav", std::process::id()));
         write_wav(
             std::fs::File::create(&output_path).expect("Failed to create output file"),
             &audio,
@@ -1694,8 +1582,9 @@ mod wav_tests {
 
     #[test]
     fn test_wav_write_stereo() {
-        use audio_samples::sine_wave;
         use std::fs;
+
+        use audio_samples::sine_wave;
 
         // Generate stereo sine waves (left: 440Hz, right: 880Hz)
         let sample_rate = sample_rate!(44100);
@@ -1704,10 +1593,8 @@ mod wav_tests {
         let right = sine_wave::<f32>(880.0, duration, sample_rate, 0.4);
 
         // Combine into stereo
-        let stereo = audio_samples::AudioEditing::stack(
-            NonEmptySlice::new(&[left, right]).expect("two channels"),
-        )
-        .expect("Failed to create stereo");
+        let stereo = audio_samples::AudioEditing::stack(NonEmptySlice::new(&[left, right]).expect("two channels"))
+            .expect("Failed to create stereo");
 
         // Write to file
         let output_path = std::env::temp_dir().join("test_write_stereo.wav");
@@ -1719,8 +1606,8 @@ mod wav_tests {
         .expect("Failed to write stereo WAV file");
 
         // Read back and verify
-        let wav_file = WavFile::open_with_options(&output_path, OpenOptions::default())
-            .expect("Failed to open written WAV file");
+        let wav_file =
+            WavFile::open_with_options(&output_path, OpenOptions::default()).expect("Failed to open written WAV file");
 
         let base_info = wav_file.base_info().expect("Failed to get base info");
         assert_eq!(base_info.sample_rate, sample_rate!(44100));
@@ -1737,8 +1624,9 @@ mod wav_tests {
 
     #[test]
     fn test_wav_write_type_conversion() {
-        use audio_samples::{AudioTypeConversion, sine_wave};
         use std::fs;
+
+        use audio_samples::{AudioTypeConversion, sine_wave};
 
         // Generate f32 sine wave
         let sample_rate = sample_rate!(44100);
@@ -1755,8 +1643,8 @@ mod wav_tests {
         .expect("Failed to write converted WAV file");
 
         // Verify it's written as i16 PCM
-        let wav_file = WavFile::open_with_options(&output_path, OpenOptions::default())
-            .expect("Failed to open written WAV file");
+        let wav_file =
+            WavFile::open_with_options(&output_path, OpenOptions::default()).expect("Failed to open written WAV file");
 
         let base_info = wav_file.base_info().expect("Failed to get base info");
         assert_eq!(base_info.bits_per_sample, 16);
@@ -1770,8 +1658,9 @@ mod wav_tests {
 
     #[test]
     fn test_audiofilewrite_trait() {
-        use audio_samples::sine_wave;
         use std::fs;
+
+        use audio_samples::sine_wave;
 
         // Create a test WAV file first
         let sample_rate = sample_rate!(22050);
@@ -1785,8 +1674,8 @@ mod wav_tests {
         .expect("Failed to write input WAV file");
 
         // Open the WAV file and use the trait method to write as f32
-        let mut wav_file = WavFile::open_with_options(&input_path, OpenOptions::default())
-            .expect("Failed to open input WAV file");
+        let mut wav_file =
+            WavFile::open_with_options(&input_path, OpenOptions::default()).expect("Failed to open input WAV file");
 
         let output_path = std::env::temp_dir().join("test_trait_output.wav");
         wav_file
@@ -1794,8 +1683,8 @@ mod wav_tests {
             .expect("Failed to write using trait method");
 
         // Verify the output is f32
-        let output_wav = WavFile::open_with_options(&output_path, OpenOptions::default())
-            .expect("Failed to open output WAV file");
+        let output_wav =
+            WavFile::open_with_options(&output_path, OpenOptions::default()).expect("Failed to open output WAV file");
 
         let base_info = output_wav.base_info().expect("Failed to get base info");
         assert_eq!(base_info.bits_per_sample, 32);
@@ -1811,8 +1700,9 @@ mod wav_tests {
 
     #[test]
     fn test_wav_write_read_roundtrip_validation() {
-        use audio_samples::{AudioTypeConversion, sine_wave};
         use std::fs;
+
+        use audio_samples::{AudioTypeConversion, sine_wave};
 
         // Test multiple sample types with comprehensive validation
         let sample_rate = sample_rate!(44100);
@@ -1851,14 +1741,10 @@ mod wav_tests {
 
                     // Read back and verify data integrity
                     let read_samples = wav_file.read::<i16>().expect("Failed to read WAV samples");
-                    let read_bytes = read_samples
-                        .bytes()
-                        .expect("Failed to get bytes from read samples");
-                    let written_bytes = samples
-                        .bytes()
-                        .expect("Failed to get bytes from written samples");
+                    let read_bytes = read_samples.bytes().expect("Failed to get bytes from read samples");
+                    let written_bytes = samples.bytes().expect("Failed to get bytes from written samples");
                     assert_eq!(read_bytes.as_slice(), written_bytes.as_slice());
-                }
+                },
                 "i32" => {
                     let samples = base_sine.to_format::<i32>();
                     write_wav(
@@ -1880,14 +1766,10 @@ mod wav_tests {
 
                     // Read back and verify data integrity
                     let read_samples = wav_file.read::<i32>().expect("Failed to read WAV samples");
-                    let read_bytes = read_samples
-                        .bytes()
-                        .expect("Failed to get bytes from read samples");
-                    let written_bytes = samples
-                        .bytes()
-                        .expect("Failed to get bytes from written samples");
+                    let read_bytes = read_samples.bytes().expect("Failed to get bytes from read samples");
+                    let written_bytes = samples.bytes().expect("Failed to get bytes from written samples");
                     assert_eq!(read_bytes.as_slice(), written_bytes.as_slice());
-                }
+                },
                 "f32" => {
                     write_wav(
                         std::fs::File::create(&output_path).expect("Failed to create output file"),
@@ -1908,32 +1790,22 @@ mod wav_tests {
 
                     // Read back and verify data integrity (with small tolerance for f32)
                     let read_samples = wav_file.read::<f32>().expect("Failed to read WAV samples");
-                    let orig_bytes = base_sine
-                        .bytes()
-                        .expect("Failed to get bytes from original samples");
-                    let read_bytes = read_samples
-                        .bytes()
-                        .expect("Failed to get bytes from read samples");
+                    let orig_bytes = base_sine.bytes().expect("Failed to get bytes from original samples");
+                    let read_bytes = read_samples.bytes().expect("Failed to get bytes from read samples");
 
                     let orig_f32: &[f32] = bytemuck::cast_slice(orig_bytes.as_slice());
                     let read_f32: &[f32] = bytemuck::cast_slice(read_bytes.as_slice());
 
                     for (orig, read) in orig_f32.iter().zip(read_f32.iter()) {
-                        assert!(
-                            (orig - read).abs() < 1e-6,
-                            "f32 samples should be nearly identical"
-                        );
+                        assert!((orig - read).abs() < 1e-6, "f32 samples should be nearly identical");
                     }
-                }
+                },
                 _ => unreachable!(),
             }
 
             // Verify file is readable by external tools (basic structure check)
             let file_bytes = std::fs::read(&output_path).expect("Failed to read output file");
-            assert!(
-                file_bytes.len() > 44,
-                "WAV file should have proper header + data"
-            );
+            assert!(file_bytes.len() > 44, "WAV file should have proper header + data");
             assert_eq!(&file_bytes[0..4], b"RIFF");
             assert_eq!(&file_bytes[8..12], b"WAVE");
 
@@ -2095,9 +1967,7 @@ mod wav_tests {
 
         // Also check specific_info exposes the same data
         let info = wav.specific_info();
-        let si_meta = info
-            .info_metadata
-            .expect("info_metadata should be populated");
+        let si_meta = info.info_metadata.expect("info_metadata should be populated");
         assert_eq!(si_meta.title.as_deref(), Some("Test Track"));
 
         std::fs::remove_file(&path).ok();
@@ -2106,8 +1976,7 @@ mod wav_tests {
     #[test]
     fn test_fact_and_list_together() {
         let tags: &[(&[u8; 4], &str)] = &[(b"IGNR", "Ambient"), (b"ICRD", "2024")];
-        let path =
-            std::env::temp_dir().join(format!("test_fact_and_list_{}.wav", std::process::id()));
+        let path = std::env::temp_dir().join(format!("test_fact_and_list_{}.wav", std::process::id()));
         let wav_bytes = build_wav_with_chunks(true, tags);
         std::fs::write(&path, &wav_bytes).expect("write test wav");
 

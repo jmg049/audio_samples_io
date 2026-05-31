@@ -28,8 +28,7 @@ fn stream_write_single_chunk_roundtrips() {
 
     let path = tmp("aio_flac_stream_single.flac");
     {
-        let mut writer =
-            create_streamed_flac::<_, i16>(&path, 1, 44100).expect("create streaming FLAC writer");
+        let mut writer = create_streamed_flac::<_, i16>(&path, 1, 44100).expect("create streaming FLAC writer");
         let n = writer.write_frames(&audio).expect("write_frames");
         assert_eq!(n, expected, "write_frames should report frames written");
         writer.finalize().expect("finalize");
@@ -55,9 +54,8 @@ fn stream_write_multi_chunk_accumulates() {
     let chunk_a = sine_wave::<i16>(330.0, Duration::from_secs_f64(4000.0 / 44100.0), sr, 0.4);
     let chunk_b = sine_wave::<i16>(440.0, Duration::from_secs_f64(4000.0 / 44100.0), sr, 0.4);
     let chunk_c = sine_wave::<i16>(550.0, Duration::from_secs_f64(2000.0 / 44100.0), sr, 0.4);
-    let expected = chunk_a.samples_per_channel().get()
-        + chunk_b.samples_per_channel().get()
-        + chunk_c.samples_per_channel().get();
+    let expected =
+        chunk_a.samples_per_channel().get() + chunk_b.samples_per_channel().get() + chunk_c.samples_per_channel().get();
 
     let path = tmp("aio_flac_stream_multi.flac");
     {
@@ -134,17 +132,12 @@ fn stream_write_in_memory_cursor() {
     let mut buffer = Vec::new();
     {
         let cursor = Cursor::new(&mut buffer);
-        let mut writer =
-            create_streamed_flac_writer::<_, i16>(cursor, 1, 22050).expect("create cursor writer");
+        let mut writer = create_streamed_flac_writer::<_, i16>(cursor, 1, 22050).expect("create cursor writer");
         writer.write_frames(&audio).expect("write");
         writer.finalize().expect("finalize");
     }
 
-    assert_eq!(
-        &buffer[0..4],
-        b"fLaC",
-        "stream should start with the FLAC marker"
-    );
+    assert_eq!(&buffer[0..4], b"fLaC", "stream should start with the FLAC marker");
 
     let path = tmp("aio_flac_stream_cursor.flac");
     std::fs::write(&path, &buffer).expect("write buffer to temp file");
@@ -183,9 +176,7 @@ fn stream_write_finalize_idempotent() {
     let mut writer = create_streamed_flac::<_, i16>(&path, 1, 44100).expect("create writer");
     writer.write_frames(&audio).expect("write");
     writer.finalize().expect("first finalize");
-    writer
-        .finalize()
-        .expect("second finalize should be a no-op");
+    writer.finalize().expect("second finalize should be a no-op");
     assert!(writer.is_finalized());
     drop(writer);
     std::fs::remove_file(&path).ok();
@@ -211,11 +202,7 @@ fn unified_create_streamed_dispatches_by_extension() {
         }
         let back = read::<_, i16>(&path).expect("read back");
         assert_eq!(back.sample_rate(), sr, "sample rate for .{ext}");
-        assert_eq!(
-            back.samples_per_channel().get(),
-            expected,
-            "sample count for .{ext}"
-        );
+        assert_eq!(back.samples_per_channel().get(), expected, "sample count for .{ext}");
         std::fs::remove_file(&path).ok();
     }
 }
@@ -225,9 +212,10 @@ fn unified_create_streamed_dispatches_by_extension() {
 #[cfg(feature = "wav")]
 #[test]
 fn unified_create_streamed_with_explicit_format() {
+    use std::io::Cursor;
+
     use audio_samples_io::create_streamed_with;
     use audio_samples_io::types::FileType;
-    use std::io::Cursor;
 
     let sr = sample_rate!(44100);
     let audio = sine_wave::<i16>(440.0, Duration::from_secs_f64(0.03), sr, 0.5);
@@ -240,8 +228,7 @@ fn unified_create_streamed_with_explicit_format() {
         let mut buf = Vec::new();
         {
             let cursor = Cursor::new(&mut buf);
-            let mut writer =
-                create_streamed_with::<_, i16>(cursor, 1, 44100, format).expect("create_with");
+            let mut writer = create_streamed_with::<_, i16>(cursor, 1, 44100, format).expect("create_with");
             writer.write_frames(&audio).expect("write");
             writer.finalize().expect("finalize");
         }

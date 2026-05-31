@@ -92,33 +92,33 @@ mod avx2_lpc {
                 *c as i64 * *s.add(si - 1) as i64
                     + *c.add(1) as i64 * *s.add(si - 2) as i64
                     + *c.add(2) as i64 * *s.add(si - 3) as i64
-            }
+            },
             4 => dot4(c, s.add(si - 4)),
             5 => dot4(c, s.add(si - 4)) + *c.add(4) as i64 * *s.add(si - 5) as i64,
             6 => {
                 dot4(c, s.add(si - 4))
                     + *c.add(4) as i64 * *s.add(si - 5) as i64
                     + *c.add(5) as i64 * *s.add(si - 6) as i64
-            }
+            },
             7 => {
                 dot4(c, s.add(si - 4))
                     + *c.add(4) as i64 * *s.add(si - 5) as i64
                     + *c.add(5) as i64 * *s.add(si - 6) as i64
                     + *c.add(6) as i64 * *s.add(si - 7) as i64
-            }
+            },
             8 => dot8(c, s.add(si - 8)),
             9 => dot8(c, s.add(si - 8)) + *c.add(8) as i64 * *s.add(si - 9) as i64,
             10 => {
                 dot8(c, s.add(si - 8))
                     + *c.add(8) as i64 * *s.add(si - 9) as i64
                     + *c.add(9) as i64 * *s.add(si - 10) as i64
-            }
+            },
             11 => {
                 dot8(c, s.add(si - 8))
                     + *c.add(8) as i64 * *s.add(si - 9) as i64
                     + *c.add(9) as i64 * *s.add(si - 10) as i64
                     + *c.add(10) as i64 * *s.add(si - 11) as i64
-            }
+            },
             12 => dot12(c, s.add(si - 12)),
             _ => {
                 let mut acc = 0i64;
@@ -126,7 +126,7 @@ mod avx2_lpc {
                     acc += *c.add(j) as i64 * *s.add(si - 1 - j) as i64;
                 }
                 acc
-            }
+            },
         }
     }
 
@@ -155,11 +155,7 @@ mod avx2_lpc {
         let ushift = shift as u64;
         // Arithmetic right shift workaround: logical shift + OR sign-fill bits.
         // fill_bits = upper `shift` bits all 1; applied only to negative accumulators.
-        let fill_bits: u64 = if ushift == 0 {
-            0
-        } else {
-            !0u64 << (64 - ushift)
-        };
+        let fill_bits: u64 = if ushift == 0 { 0 } else { !0u64 << (64 - ushift) };
         let shift_v = _mm256_set1_epi64x(ushift as i64);
         let fill_v = _mm256_set1_epi64x(fill_bits as i64);
         let zero = _mm256_setzero_si256();
@@ -251,13 +247,7 @@ unsafe fn restore_sample<const ORDER: usize>(buf: *const i32, cv: &[i32; ORDER],
 /// Replaces the AVX2 `lpc_restore` dispatch.  See `restore_sample` for the
 /// critical-path analysis.
 #[inline(always)]
-unsafe fn lpc_restore_fast<const ORDER: usize>(
-    buf: *mut i32,
-    res: *const i32,
-    n: usize,
-    c: *const i32,
-    shift: i32,
-) {
+unsafe fn lpc_restore_fast<const ORDER: usize>(buf: *mut i32, res: *const i32, n: usize, c: *const i32, shift: i32) {
     // Stack-local copy: prevents LLVM from treating c and buf as aliases,
     // which would force coefficient reloads on every outer iteration.
     let mut cv = [0i32; ORDER];
@@ -309,14 +299,14 @@ pub fn fixed_predictor_residual(samples: &[i32], order: usize) -> Result<Vec<i32
         0 => {
             residuals.extend_from_slice(samples);
             return Ok(residuals);
-        }
+        },
         1 => {
             for i in 0..out_len {
                 unsafe {
                     ptr.add(i).write(samples[i + 1].wrapping_sub(samples[i]));
                 }
             }
-        }
+        },
         2 => {
             for i in 0..out_len {
                 // s[i+2] - 2*s[i+1] + s[i]  (coefficients 2 → left-shift, no IMUL)
@@ -327,7 +317,7 @@ pub fn fixed_predictor_residual(samples: &[i32], order: usize) -> Result<Vec<i32
                     ptr.add(i).write(r);
                 }
             }
-        }
+        },
         3 => {
             for i in 0..out_len {
                 // s[i+3] - 3*s[i+2] + 3*s[i+1] - s[i]
@@ -339,7 +329,7 @@ pub fn fixed_predictor_residual(samples: &[i32], order: usize) -> Result<Vec<i32
                     ptr.add(i).write(r);
                 }
             }
-        }
+        },
         4 => {
             for i in 0..out_len {
                 // s[i+4] - 4*s[i+3] + 6*s[i+2] - 4*s[i+1] + s[i]
@@ -352,7 +342,7 @@ pub fn fixed_predictor_residual(samples: &[i32], order: usize) -> Result<Vec<i32
                     ptr.add(i).write(r);
                 }
             }
-        }
+        },
         _ => unreachable!(),
     }
 
@@ -371,11 +361,7 @@ pub fn fixed_predictor_residual(samples: &[i32], order: usize) -> Result<Vec<i32
 ///
 /// # Returns
 /// Vector of restored samples (including warm-up)
-pub fn fixed_predictor_restore(
-    warmup: &[i32],
-    residuals: &[i32],
-    order: usize,
-) -> Result<Vec<i32>, FlacError> {
+pub fn fixed_predictor_restore(warmup: &[i32], residuals: &[i32], order: usize) -> Result<Vec<i32>, FlacError> {
     if order > MAX_FIXED_ORDER {
         return Err(FlacError::InvalidFixedOrder { order: order as u8 });
     }
@@ -396,38 +382,36 @@ pub fn fixed_predictor_restore(
             for &r in residuals {
                 samples.push(r);
             }
-        }
+        },
         1 => {
             for &r in residuals {
                 let i = samples.len();
                 let p = samples[i - 1] as i64;
                 samples.push((p + r as i64) as i32);
             }
-        }
+        },
         2 => {
             for &r in residuals {
                 let i = samples.len();
                 let p = 2 * samples[i - 1] as i64 - samples[i - 2] as i64;
                 samples.push((p + r as i64) as i32);
             }
-        }
+        },
         3 => {
             for &r in residuals {
                 let i = samples.len();
-                let p =
-                    3 * samples[i - 1] as i64 - 3 * samples[i - 2] as i64 + samples[i - 3] as i64;
+                let p = 3 * samples[i - 1] as i64 - 3 * samples[i - 2] as i64 + samples[i - 3] as i64;
                 samples.push((p + r as i64) as i32);
             }
-        }
+        },
         4 => {
             for &r in residuals {
                 let i = samples.len();
-                let p = 4 * samples[i - 1] as i64 - 6 * samples[i - 2] as i64
-                    + 4 * samples[i - 3] as i64
+                let p = 4 * samples[i - 1] as i64 - 6 * samples[i - 2] as i64 + 4 * samples[i - 3] as i64
                     - samples[i - 4] as i64;
                 samples.push((p + r as i64) as i32);
             }
-        }
+        },
         _ => unreachable!("fixed predictor order > 4 should have been caught above"),
     }
 
@@ -455,7 +439,7 @@ pub(crate) fn fixed_predictor_restore_into(
     // the loop, so the write to buf[i] is output-only and never re-read
     // through memory.
     match order {
-        0 => {}
+        0 => {},
         1 => {
             let mut s = buf[offset];
             for r in buf.iter_mut().take(end).skip(offset + 1) {
@@ -463,7 +447,7 @@ pub(crate) fn fixed_predictor_restore_into(
                 *r = ns;
                 s = ns;
             }
-        }
+        },
         2 => {
             let mut s0 = buf[offset];
             let mut s1 = buf[offset + 1];
@@ -473,7 +457,7 @@ pub(crate) fn fixed_predictor_restore_into(
                 s0 = s1;
                 s1 = s2;
             }
-        }
+        },
         3 => {
             let mut s0 = buf[offset];
             let mut s1 = buf[offset + 1];
@@ -489,7 +473,7 @@ pub(crate) fn fixed_predictor_restore_into(
                 s1 = s2;
                 s2 = s3;
             }
-        }
+        },
         4 => {
             let mut s0 = buf[offset];
             let mut s1 = buf[offset + 1];
@@ -508,7 +492,7 @@ pub(crate) fn fixed_predictor_restore_into(
                 s2 = s3;
                 s3 = s4;
             }
-        }
+        },
         _ => unreachable!(),
     }
     Ok(())
@@ -570,7 +554,7 @@ pub(crate) fn lpc_predictor_restore_into(
                 }
                 buf[si] = ((pred >> shift) + residual) as i32;
             }
-        }
+        },
     }
 
     Ok(())
@@ -578,12 +562,7 @@ pub(crate) fn lpc_predictor_restore_into(
 
 /// In-place LPC restore; `buf` is already offset to the frame start (buf[0..order]=warmup).
 /// Reads residual at buf[ORDER+k] before computing the prediction, then overwrites.
-unsafe fn lpc_restore_fast_into<const ORDER: usize>(
-    buf: *mut i32,
-    n: usize,
-    c: *const i32,
-    shift: i32,
-) {
+unsafe fn lpc_restore_fast_into<const ORDER: usize>(buf: *mut i32, n: usize, c: *const i32, shift: i32) {
     let mut cv = [0i32; ORDER];
     for (j, item) in cv.iter_mut().enumerate().take(ORDER) {
         unsafe {
@@ -990,10 +969,7 @@ pub fn compute_lpc_coefficients(samples: &[i32], order: usize) -> Result<Vec<f64
 /// Tuple of (quantized_coeffs, shift) where:
 /// - quantized_coeffs are scaled integer coefficients
 /// - shift is the number of bits to shift right after multiplication
-pub fn quantize_lpc_coefficients(
-    coeffs: &[f64],
-    precision: u8,
-) -> Result<(Vec<i32>, i8), FlacError> {
+pub fn quantize_lpc_coefficients(coeffs: &[f64], precision: u8) -> Result<(Vec<i32>, i8), FlacError> {
     if coeffs.is_empty() {
         return Ok((vec![], 0));
     }
@@ -1039,11 +1015,7 @@ pub fn quantize_lpc_coefficients(
 ///
 /// # Returns
 /// Vector of residuals (length = samples.len() - order)
-pub fn lpc_predictor_residual(
-    samples: &[i32],
-    qlp_coeffs: &[i32],
-    qlp_shift: i8,
-) -> Result<Vec<i32>, FlacError> {
+pub fn lpc_predictor_residual(samples: &[i32], qlp_coeffs: &[i32], qlp_shift: i8) -> Result<Vec<i32>, FlacError> {
     let order = qlp_coeffs.len();
 
     if order == 0 || order > MAX_LPC_ORDER {
@@ -1103,7 +1075,7 @@ pub fn lpc_predictor_residual(
                     pred >>= qlp_shift;
                     residuals.push((samples[i] as i64 - pred) as i32);
                 }
-            }
+            },
         }
         return Ok(residuals);
     }
@@ -1141,7 +1113,7 @@ pub fn lpc_predictor_residual(
                 pred >>= qlp_shift;
                 residuals.push((samples[i] as i64 - pred) as i32);
             }
-        }
+        },
     }
 
     Ok(residuals)
@@ -1226,7 +1198,7 @@ pub fn lpc_predictor_restore(
                 pred >>= qlp_shift;
                 samples.push((pred + residual as i64) as i32);
             }
-        }
+        },
     }
 
     Ok(samples)
@@ -1522,9 +1494,7 @@ mod tests {
     #[test]
     fn test_lpc_predictor_roundtrip() {
         // Create a simple signal
-        let samples: Vec<i32> = (0..100)
-            .map(|i| (100.0 * (i as f64 * 0.1).sin()) as i32)
-            .collect();
+        let samples: Vec<i32> = (0..100).map(|i| (100.0 * (i as f64 * 0.1).sin()) as i32).collect();
 
         // Compute LPC coefficients
         let order = 4;
@@ -1535,8 +1505,7 @@ mod tests {
         let residuals = lpc_predictor_residual(&samples, &qlp_coeffs, qlp_shift).unwrap();
 
         // Restore samples
-        let restored =
-            lpc_predictor_restore(&samples[..order], &residuals, &qlp_coeffs, qlp_shift).unwrap();
+        let restored = lpc_predictor_restore(&samples[..order], &residuals, &qlp_coeffs, qlp_shift).unwrap();
 
         // Should match original
         assert_eq!(restored, samples);

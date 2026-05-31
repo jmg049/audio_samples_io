@@ -88,8 +88,7 @@ pub fn cue_chunk_bytes(points: &[CuePoint]) -> Option<Vec<u8>> {
     if points.is_empty() {
         return None;
     }
-    let mut body =
-        Vec::with_capacity(CueChunk::HEADER_BYTES + points.len() * CueChunk::POINT_BYTES);
+    let mut body = Vec::with_capacity(CueChunk::HEADER_BYTES + points.len() * CueChunk::POINT_BYTES);
     body.extend_from_slice(&(points.len() as u32).to_le_bytes());
     for p in points {
         body.extend_from_slice(&p.id.to_le_bytes());
@@ -109,12 +108,7 @@ pub fn cue_chunk_bytes(points: &[CuePoint]) -> Option<Vec<u8>> {
 
 #[inline]
 fn u32_at(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([
-        bytes[offset],
-        bytes[offset + 1],
-        bytes[offset + 2],
-        bytes[offset + 3],
-    ])
+    u32::from_le_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]])
 }
 
 #[cfg(test)]

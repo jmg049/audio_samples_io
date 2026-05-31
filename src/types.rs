@@ -198,6 +198,7 @@ pub struct BaseAudioInfo {
 }
 
 impl BaseAudioInfo {
+    #[allow(clippy::too_many_arguments)]
     pub const fn new(
         sample_rate: NonZeroU32,
         channels: u16,
@@ -227,7 +228,6 @@ impl BaseAudioInfo {
 
 impl Display for BaseAudioInfo {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        //
         // -------- COMPACT MODE --------
         //
         if !f.alternate() {
@@ -243,7 +243,6 @@ impl Display for BaseAudioInfo {
             );
         }
 
-        //
         // -------- PRETTY MODE --------
         //
 
@@ -288,12 +287,7 @@ impl Display for BaseAudioInfo {
                 label("Bytes per Sample"),
                 value(format!("{} bytes", self.bytes_per_sample))
             )?;
-            writeln!(
-                f,
-                "├─ {}: {}",
-                label("Total Samples"),
-                value(self.total_samples)
-            )?;
+            writeln!(f, "├─ {}: {}", label("Total Samples"), value(self.total_samples))?;
             writeln!(
                 f,
                 "└─ {}: {}",
@@ -482,9 +476,7 @@ pub struct OpenOptions {
 
 impl Default for OpenOptions {
     fn default() -> Self {
-        OpenOptions {
-            use_memory_map: true,
-        }
+        OpenOptions { use_memory_map: true }
     }
 }
 

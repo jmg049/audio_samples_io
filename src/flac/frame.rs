@@ -9,8 +9,8 @@
 use crate::flac::ChannelAssignment;
 use crate::flac::bitstream::{BitReader, BitWriter};
 use crate::flac::constants::{
-    BITS_PER_SAMPLE_TABLE, BLOCK_SIZE_TABLE, FRAME_SYNC_CODE, SAMPLE_RATE_TABLE,
-    bits_per_sample_to_code, block_size_to_code, sample_rate_to_code,
+    BITS_PER_SAMPLE_TABLE, BLOCK_SIZE_TABLE, FRAME_SYNC_CODE, SAMPLE_RATE_TABLE, bits_per_sample_to_code,
+    block_size_to_code, sample_rate_to_code,
 };
 use crate::flac::crc::{Crc8, Crc16};
 use crate::flac::error::FlacError;
@@ -67,7 +67,7 @@ impl Frame {
 
                 let right: Vec<i32> = left.iter().zip(side.iter()).map(|(&l, &s)| l - s).collect();
                 vec![left, right]
-            }
+            },
             ChannelAssignment::RightSide => {
                 // Right-side: subframe 0 = left - right (side), subframe 1 = right
                 // Restore: left = side + right
@@ -75,13 +75,9 @@ impl Frame {
                 let side = iter.next().map(|s| s.samples).unwrap_or_default();
                 let right = iter.next().map(|s| s.samples).unwrap_or_default();
 
-                let left: Vec<i32> = side
-                    .iter()
-                    .zip(right.iter())
-                    .map(|(&s, &r)| s + r)
-                    .collect();
+                let left: Vec<i32> = side.iter().zip(right.iter()).map(|(&s, &r)| s + r).collect();
                 vec![left, right]
-            }
+            },
             ChannelAssignment::MidSide => {
                 // Mid-side: subframe 0 = mid = (left + right) >> 1, subframe 1 = side = left - right
                 // Restore: left = mid + (side + 1) >> 1, right = mid - (side >> 1)
@@ -101,11 +97,11 @@ impl Frame {
                 }
 
                 vec![left, right]
-            }
+            },
             ChannelAssignment::Independent(_) => {
                 // Independent channels: return as-is
                 self.subframes.into_iter().map(|sf| sf.samples).collect()
-            }
+            },
         }
     }
 
@@ -168,8 +164,8 @@ pub fn decode_frame(
     }
 
     // Parse channel assignment
-    let channel_assignment = ChannelAssignment::from_code(channel_code)
-        .ok_or(FlacError::InvalidChannelAssignment(channel_code))?;
+    let channel_assignment =
+        ChannelAssignment::from_code(channel_code).ok_or(FlacError::InvalidChannelAssignment(channel_code))?;
 
     // Parse sample size
     let bits_per_sample = if sample_size_code == 0 {
@@ -231,9 +227,9 @@ pub fn decode_frame(
     for ch in 0..num_channels {
         // Adjust bits per sample for stereo decorrelation
         let subframe_bps = match (channel_assignment, ch) {
-            (ChannelAssignment::MidSide, 1)
-            | (ChannelAssignment::RightSide, 0)
-            | (ChannelAssignment::LeftSide, 1) => bits_per_sample + 1,
+            (ChannelAssignment::MidSide, 1) | (ChannelAssignment::RightSide, 0) | (ChannelAssignment::LeftSide, 1) => {
+                bits_per_sample + 1
+            },
             _ => bits_per_sample,
         };
 
@@ -301,8 +297,8 @@ pub(crate) fn decode_frame_into_channels(
         return Err(FlacError::ReservedBitsPerSampleCode);
     }
 
-    let channel_assignment = ChannelAssignment::from_code(channel_code)
-        .ok_or(FlacError::InvalidChannelAssignment(channel_code))?;
+    let channel_assignment =
+        ChannelAssignment::from_code(channel_code).ok_or(FlacError::InvalidChannelAssignment(channel_code))?;
 
     let bits_per_sample = if sample_size_code == 0 {
         streaminfo_bits_per_sample
@@ -348,7 +344,7 @@ pub(crate) fn decode_frame_into_channels(
             for ch in out_channels.iter_mut().take(num_channels) {
                 decode_subframe_into(&mut reader, block_size, bits_per_sample, ch)?;
             }
-        }
+        },
         ChannelAssignment::LeftSide => {
             // subframe 0 = left (normal bps), subframe 1 = side (bps+1)
             // right = left - side; transform side → right in-place, then bulk copy.
@@ -362,7 +358,7 @@ pub(crate) fn decode_frame_into_channels(
             let (a, b) = out_channels.split_at_mut(1);
             a[0].extend_from_slice(&scratch.0);
             b[0].extend_from_slice(&scratch.1);
-        }
+        },
         ChannelAssignment::RightSide => {
             // subframe 0 = side (bps+1), subframe 1 = right (normal bps)
             // left = side + right; transform side → left in-place, then bulk copy.
@@ -376,7 +372,7 @@ pub(crate) fn decode_frame_into_channels(
             let (a, b) = out_channels.split_at_mut(1);
             a[0].extend_from_slice(&scratch.0);
             b[0].extend_from_slice(&scratch.1);
-        }
+        },
         ChannelAssignment::MidSide => {
             // subframe 0 = mid (normal bps), subframe 1 = side (bps+1)
             // Decorrelate in-place on scratch (L1-hot), then bulk-copy (SIMD memcpy).
@@ -393,7 +389,7 @@ pub(crate) fn decode_frame_into_channels(
             let (a, b) = out_channels.split_at_mut(1);
             a[0].extend_from_slice(&scratch.0);
             b[0].extend_from_slice(&scratch.1);
-        }
+        },
     }
 
     reader.align_to_byte();
@@ -450,8 +446,8 @@ pub(crate) fn decode_frame_into_scratch(
         return Err(FlacError::ReservedBitsPerSampleCode);
     }
 
-    let channel_assignment = ChannelAssignment::from_code(channel_code)
-        .ok_or(FlacError::InvalidChannelAssignment(channel_code))?;
+    let channel_assignment =
+        ChannelAssignment::from_code(channel_code).ok_or(FlacError::InvalidChannelAssignment(channel_code))?;
 
     let bits_per_sample = if sample_size_code == 0 {
         streaminfo_bits_per_sample
@@ -501,43 +497,28 @@ pub(crate) fn decode_frame_into_scratch(
             for ch in scratch.iter_mut().take(num_channels) {
                 decode_subframe_into(&mut reader, block_size, bits_per_sample, ch)?;
             }
-        }
+        },
         ChannelAssignment::LeftSide => {
             // scratch[0] = left, scratch[1] = side → decorate in-place to right
             decode_subframe_into(&mut reader, block_size, bits_per_sample, &mut scratch[0])?;
-            decode_subframe_into(
-                &mut reader,
-                block_size,
-                bits_per_sample + 1,
-                &mut scratch[1],
-            )?;
+            decode_subframe_into(&mut reader, block_size, bits_per_sample + 1, &mut scratch[1])?;
             let (left, rest) = scratch.split_at_mut(1);
             for (s, &l) in rest[0].iter_mut().zip(left[0].iter()) {
                 *s = l - *s;
             }
-        }
+        },
         ChannelAssignment::RightSide => {
             // scratch[0] = side → left, scratch[1] = right
-            decode_subframe_into(
-                &mut reader,
-                block_size,
-                bits_per_sample + 1,
-                &mut scratch[0],
-            )?;
+            decode_subframe_into(&mut reader, block_size, bits_per_sample + 1, &mut scratch[0])?;
             decode_subframe_into(&mut reader, block_size, bits_per_sample, &mut scratch[1])?;
             let (side, rest) = scratch.split_at_mut(1);
             for (s, &r) in side[0].iter_mut().zip(rest[0].iter()) {
                 *s += r;
             }
-        }
+        },
         ChannelAssignment::MidSide => {
             decode_subframe_into(&mut reader, block_size, bits_per_sample, &mut scratch[0])?;
-            decode_subframe_into(
-                &mut reader,
-                block_size,
-                bits_per_sample + 1,
-                &mut scratch[1],
-            )?;
+            decode_subframe_into(&mut reader, block_size, bits_per_sample + 1, &mut scratch[1])?;
             let (mid_slice, side_slice) = scratch.split_at_mut(1);
             for (m, s) in mid_slice[0].iter_mut().zip(side_slice[0].iter_mut()) {
                 let mid = (*m << 1) | (*s & 1);
@@ -545,7 +526,7 @@ pub(crate) fn decode_frame_into_scratch(
                 *m = (mid + side) >> 1;
                 *s = (mid - side) >> 1;
             }
-        }
+        },
     }
 
     reader.align_to_byte();
@@ -659,7 +640,7 @@ fn encode_frame_header(
     match bs_extra {
         1 => writer.write_bits((block_size - 1) as u32, 8),
         2 => writer.write_bits((block_size - 1) as u32, 16),
-        _ => {}
+        _ => {},
     }
 
     // Extra sample rate bytes
@@ -667,7 +648,7 @@ fn encode_frame_header(
         1 => writer.write_bits(sample_rate / 1000, 8),
         2 => writer.write_bits(sample_rate, 16),
         3 => writer.write_bits(sample_rate / 10, 16),
-        _ => {}
+        _ => {},
     }
 
     Ok(())
@@ -683,16 +664,8 @@ fn encode_frame_header(
 fn find_best_stereo_mode(left: &[i32], right: &[i32]) -> (ChannelAssignment, Vec<Vec<i32>>) {
     let n = left.len() as u64;
 
-    let side: Vec<i32> = left
-        .iter()
-        .zip(right.iter())
-        .map(|(&l, &r)| l - r)
-        .collect();
-    let mid: Vec<i32> = left
-        .iter()
-        .zip(right.iter())
-        .map(|(&l, &r)| (l + r) >> 1)
-        .collect();
+    let side: Vec<i32> = left.iter().zip(right.iter()).map(|(&l, &r)| l - r).collect();
+    let mid: Vec<i32> = left.iter().zip(right.iter()).map(|(&l, &r)| (l + r) >> 1).collect();
 
     let e_left: u64 = left.iter().map(|&s| (s as i64).unsigned_abs()).sum();
     let e_right: u64 = right.iter().map(|&s| (s as i64).unsigned_abs()).sum();
@@ -706,10 +679,7 @@ fn find_best_stereo_mode(left: &[i32], right: &[i32]) -> (ChannelAssignment, Vec
     let score_ms = e_mid + e_side + n;
 
     if score_ind <= score_ls && score_ind <= score_rs && score_ind <= score_ms {
-        (
-            ChannelAssignment::Independent(2),
-            vec![left.to_vec(), right.to_vec()],
-        )
+        (ChannelAssignment::Independent(2), vec![left.to_vec(), right.to_vec()])
     } else if score_ls <= score_rs && score_ls <= score_ms {
         (ChannelAssignment::LeftSide, vec![left.to_vec(), side])
     } else if score_rs <= score_ms {
@@ -745,8 +715,7 @@ pub fn encode_frame_from_channels(
     let mut writer = BitWriter::with_capacity(channel_samples[0].len() * num_channels as usize * 4);
 
     if num_channels == 2 && try_mid_side {
-        let (channel_assignment, owned) =
-            find_best_stereo_mode(channel_samples[0], channel_samples[1]);
+        let (channel_assignment, owned) = find_best_stereo_mode(channel_samples[0], channel_samples[1]);
 
         // Write header before subframe encoding so the sequential path can write
         // subframes directly into the frame writer without an intermediate buffer.
@@ -888,11 +857,7 @@ mod tests {
         for assignment in assignments {
             let code = assignment.code();
             let parsed = ChannelAssignment::from_code(code);
-            assert!(
-                parsed.is_some(),
-                "Failed to parse code for {:?}",
-                assignment
-            );
+            assert!(parsed.is_some(), "Failed to parse code for {:?}", assignment);
             assert_eq!(parsed.unwrap().channels(), assignment.channels());
         }
     }
@@ -946,11 +911,7 @@ mod tests {
         let right = vec![50i32, 150, 250];
 
         // Compute mid and side
-        let mid: Vec<i32> = left
-            .iter()
-            .zip(&right)
-            .map(|(&l, &r)| (l + r) >> 1)
-            .collect();
+        let mid: Vec<i32> = left.iter().zip(&right).map(|(&l, &r)| (l + r) >> 1).collect();
         let side: Vec<i32> = left.iter().zip(&right).map(|(&l, &r)| l - r).collect();
 
         let frame = Frame {
@@ -1008,8 +969,7 @@ mod tests {
 
         assert!(!frame_bytes.is_empty(), "encoded frame must not be empty");
 
-        let (frame, bytes_consumed) =
-            decode_frame(&frame_bytes, 44100, 16, 1).expect("decode_frame should succeed");
+        let (frame, bytes_consumed) = decode_frame(&frame_bytes, 44100, 16, 1).expect("decode_frame should succeed");
 
         assert_eq!(bytes_consumed, frame_bytes.len(), "all bytes consumed");
         assert_eq!(frame.block_size(), block_size as usize, "block size");
@@ -1018,10 +978,7 @@ mod tests {
         let channels = frame.into_channel_samples();
         assert_eq!(channels.len(), 1);
         assert_eq!(channels[0].len(), block_size as usize);
-        assert!(
-            channels[0].iter().all(|&s| s == 0),
-            "silence should decode to zeros"
-        );
+        assert!(channels[0].iter().all(|&s| s == 0), "silence should decode to zeros");
     }
 
     /// Encode constant non-zero audio mono.
@@ -1031,10 +988,8 @@ mod tests {
         let dc_value = 1000i32;
         let samples: Vec<i32> = vec![dc_value; block_size as usize];
 
-        let frame_bytes = encode_frame(
-            &samples, 1, block_size, 44100, 16, 0, 0, 12, 0, 3, false, false,
-        )
-        .expect("encode");
+        let frame_bytes =
+            encode_frame(&samples, 1, block_size, 44100, 16, 0, 0, 12, 0, 3, false, false).expect("encode");
 
         let (frame, _) = decode_frame(&frame_bytes, 44100, 16, 1).expect("decode");
         let channels = frame.into_channel_samples();
@@ -1052,13 +1007,10 @@ mod tests {
         let block_size = 4096u32;
         let samples: Vec<i32> = vec![0i32; block_size as usize];
 
-        let frame_bytes = encode_frame(
-            &samples, 1, block_size, 48000, 16, 5, 0, 12, 0, 4, false, false,
-        )
-        .expect("encode large block");
+        let frame_bytes =
+            encode_frame(&samples, 1, block_size, 48000, 16, 5, 0, 12, 0, 4, false, false).expect("encode large block");
 
-        let (frame, consumed) =
-            decode_frame(&frame_bytes, 48000, 16, 1).expect("decode large block");
+        let (frame, consumed) = decode_frame(&frame_bytes, 48000, 16, 1).expect("decode large block");
         assert_eq!(consumed, frame_bytes.len());
         assert_eq!(frame.block_size(), block_size as usize);
     }
@@ -1086,8 +1038,8 @@ mod tests {
             )
             .unwrap_or_else(|e| panic!("encode frame {frame_number}: {e}"));
 
-            let (frame, _) = decode_frame(&frame_bytes, 44100, 16, 1)
-                .unwrap_or_else(|e| panic!("decode frame {frame_number}: {e}"));
+            let (frame, _) =
+                decode_frame(&frame_bytes, 44100, 16, 1).unwrap_or_else(|e| panic!("decode frame {frame_number}: {e}"));
             assert_eq!(
                 frame.header.frame_or_sample_number, frame_number,
                 "frame number should match"
@@ -1102,19 +1054,13 @@ mod tests {
         let samples: Vec<i32> = vec![0i32; block_size as usize];
 
         for sr in [44100u32, 48000, 96000] {
-            let frame_bytes = encode_frame(
-                &samples, 1, block_size, sr, 16, 0, 0, 12, 0, 3, false, false,
-            )
-            .unwrap_or_else(|e| panic!("encode sr={sr}: {e}"));
+            let frame_bytes = encode_frame(&samples, 1, block_size, sr, 16, 0, 0, 12, 0, 3, false, false)
+                .unwrap_or_else(|e| panic!("encode sr={sr}: {e}"));
 
-            let (frame, _) = decode_frame(&frame_bytes, sr, 16, 1)
-                .unwrap_or_else(|e| panic!("decode sr={sr}: {e}"));
+            let (frame, _) = decode_frame(&frame_bytes, sr, 16, 1).unwrap_or_else(|e| panic!("decode sr={sr}: {e}"));
 
             // Sample rate is encoded in the frame header; verify it survives
-            assert_eq!(
-                frame.header.sample_rate, sr,
-                "sample rate should be preserved"
-            );
+            assert_eq!(frame.header.sample_rate, sr, "sample rate should be preserved");
         }
     }
 

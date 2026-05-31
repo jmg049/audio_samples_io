@@ -95,10 +95,8 @@ impl DecodedAudio {
                     flat.push(self.convert_one_sample::<T>(s));
                 }
             }
-            let arr =
-                Array2::from_shape_vec((num_channels, samples_per_channel), flat).map_err(|e| {
-                    AudioIOError::corrupted_data_simple("Array shape error", e.to_string())
-                })?;
+            let arr = Array2::from_shape_vec((num_channels, samples_per_channel), flat)
+                .map_err(|e| AudioIOError::corrupted_data_simple("Array shape error", e.to_string()))?;
             AudioSamples::new_multi_channel(arr, sample_rate).map_err(Into::into)
         }
     }
@@ -114,7 +112,7 @@ impl DecodedAudio {
             1..=8 => {
                 let shift = 16 - self.bits_per_sample;
                 T::convert_from((s << shift) as i16)
-            }
+            },
             9..=16 => T::convert_from(s as i16),
             17..=24 => T::convert_from(I24::wrapping_from_i32(s)),
             _ => T::convert_from(s),
@@ -145,11 +143,7 @@ impl DecodedAudio {
         let samples = self.channels.get(channel).ok_or_else(|| {
             AudioIOError::corrupted_data_simple(
                 "Channel index out of bounds",
-                format!(
-                    "Requested channel {}, have {}",
-                    channel,
-                    self.num_channels()
-                ),
+                format!("Requested channel {}, have {}", channel, self.num_channels()),
             )
         })?;
 
@@ -206,22 +200,22 @@ impl DecodedAudio {
                         T::convert_from(scaled)
                     })
                     .collect())
-            }
+            },
             9..=16 => {
                 // 9-16 bit: treat as i16
                 Ok(samples.iter().map(|&s| T::convert_from(s as i16)).collect())
-            }
+            },
             17..=24 => {
                 // 17-24 bit: convert via I24
                 Ok(samples
                     .iter()
                     .map(|&s| T::convert_from(I24::wrapping_from_i32(s)))
                     .collect())
-            }
+            },
             25..=32 => {
                 // 25-32 bit: use full i32
                 Ok(samples.iter().map(|&s| T::convert_from(s)).collect())
-            }
+            },
             _ => Err(AudioIOError::corrupted_data_simple(
                 "Invalid bits per sample",
                 format!("{} bits", self.bits_per_sample),
@@ -344,10 +338,7 @@ mod tests {
         let audio = DecodedAudio::new(vec![vec![]], 16, 44100);
         let sample_rate = NonZeroU32::new(44100).unwrap();
         let result: Result<AudioSamples<'static, i16>, _> = audio.read_samples(sample_rate);
-        assert!(
-            result.is_err(),
-            "zero samples_per_channel should return error"
-        );
+        assert!(result.is_err(), "zero samples_per_channel should return error");
     }
 
     #[test]
@@ -371,21 +362,9 @@ mod tests {
 
         let samples: AudioSamples<'static, f32> = audio.read_samples(sample_rate).unwrap();
         let iv = samples.to_interleaved_vec();
-        assert!(
-            iv[0].abs() > 0.9,
-            "max i16 should map to near 1.0 in f32: {}",
-            iv[0]
-        );
-        assert!(
-            iv[1] < -0.9,
-            "min i16 should map to near -1.0 in f32: {}",
-            iv[1]
-        );
-        assert!(
-            iv[2].abs() < 1e-6,
-            "zero should map to zero in f32: {}",
-            iv[2]
-        );
+        assert!(iv[0].abs() > 0.9, "max i16 should map to near 1.0 in f32: {}", iv[0]);
+        assert!(iv[1] < -0.9, "min i16 should map to near -1.0 in f32: {}", iv[1]);
+        assert!(iv[2].abs() < 1e-6, "zero should map to zero in f32: {}", iv[2]);
     }
 
     #[test]

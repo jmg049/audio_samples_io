@@ -48,15 +48,13 @@ mod streaming;
 mod streaming_writer;
 
 // Re-exports
+use core::fmt::{Display, Formatter, Result as FmtResult};
+
 pub use error::FlacError;
 pub use flac_file::{FlacFile, FlacFileInfo, write_flac};
-pub use metadata::{
-    MetadataBlock, MetadataBlockType, SeekPoint, SeekTable, StreamInfo, VorbisComment,
-};
+pub use metadata::{MetadataBlock, MetadataBlockType, SeekPoint, SeekTable, StreamInfo, VorbisComment};
 pub use streaming::StreamedFlacFile;
 pub use streaming_writer::StreamedFlacWriter;
-
-use core::fmt::{Display, Formatter, Result as FmtResult};
 
 /// FLAC compression levels (0-8, matching reference encoder)
 ///
@@ -205,9 +203,7 @@ impl ChannelAssignment {
     pub const fn channels(self) -> u8 {
         match self {
             ChannelAssignment::Independent(n) => n,
-            ChannelAssignment::LeftSide
-            | ChannelAssignment::RightSide
-            | ChannelAssignment::MidSide => 2,
+            ChannelAssignment::LeftSide | ChannelAssignment::RightSide | ChannelAssignment::MidSide => 2,
         }
     }
 

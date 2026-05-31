@@ -8,12 +8,7 @@
 //! - Uses `ValidatedSampleType` and the `ConvertTo` traits for sample conversion
 //! - Delegates to `DataChunk`-style abstractions for raw sample access
 
-use audio_samples::{
-    AudioSamples, I24, SampleType,
-    traits::{ConvertFrom, StandardSample},
-};
 use core::fmt::{Display, Formatter, Result as FmtResult};
-use memmap2::MmapOptions;
 use std::{
     fs::File,
     io::{BufReader, BufWriter, Read, Write},
@@ -23,13 +18,11 @@ use std::{
     time::Duration,
 };
 
-use crate::{
-    MAX_MMAP_SIZE,
-    error::{AudioIOError, AudioIOResult, ErrorPosition},
-    flac::frame::encode_frame_from_channels,
-    traits::{AudioFile, AudioFileMetadata, AudioFileRead, AudioFileWrite, AudioInfoMarker},
-    types::{AudioDataSource, BaseAudioInfo, FileType, OpenOptions, ValidatedSampleType},
+use audio_samples::{
+    AudioSamples, I24, SampleType,
+    traits::{ConvertFrom, StandardSample},
 };
+use memmap2::MmapOptions;
 
 use super::{
     CompressionLevel,
@@ -38,6 +31,13 @@ use super::{
     error::FlacError,
     frame::{decode_frame_into_channels, decode_frame_into_scratch},
     metadata::{MetadataBlockType, StreamInfo},
+};
+use crate::{
+    MAX_MMAP_SIZE,
+    error::{AudioIOError, AudioIOResult, ErrorPosition},
+    flac::frame::encode_frame_from_channels,
+    traits::{AudioFile, AudioFileMetadata, AudioFileRead, AudioFileWrite, AudioInfoMarker},
+    types::{AudioDataSource, BaseAudioInfo, FileType, OpenOptions, ValidatedSampleType},
 };
 
 /// Maximum FLAC file size we'll handle (4GB)
@@ -63,17 +63,9 @@ pub struct FlacFileInfo {
 impl Display for FlacFileInfo {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         writeln!(f, "FLAC File Info:")?;
-        writeln!(
-            f,
-            "Block Size: {}-{} samples",
-            self.min_block_size, self.max_block_size
-        )?;
+        writeln!(f, "Block Size: {}-{} samples", self.min_block_size, self.max_block_size)?;
         if self.min_frame_size > 0 {
-            writeln!(
-                f,
-                "Frame Size: {}-{} bytes",
-                self.min_frame_size, self.max_frame_size
-            )?;
+            writeln!(f, "Frame Size: {}-{} bytes", self.min_frame_size, self.max_frame_size)?;
         }
         writeln!(f, "Metadata Blocks: {:?}", self.metadata_blocks)?;
         if let Some(md5) = &self.md5_signature {
@@ -135,17 +127,12 @@ impl<'a> FlacFile<'a> {
         };
 
         // Pre-allocate channel buffers
-        let mut channels: Vec<Vec<i32>> = (0..num_channels)
-            .map(|_| Vec::with_capacity(total_frames))
-            .collect();
+        let mut channels: Vec<Vec<i32>> = (0..num_channels).map(|_| Vec::with_capacity(total_frames)).collect();
 
         // Scratch buffers for stereo decorrelation (reused across frames, never reallocated
         // after the first frame grows them to block_size).
         let block_size_hint = self.stream_info.max_block_size as usize;
-        let mut scratch = (
-            Vec::with_capacity(block_size_hint),
-            Vec::with_capacity(block_size_hint),
-        );
+        let mut scratch = (Vec::with_capacity(block_size_hint), Vec::with_capacity(block_size_hint));
 
         let data = self.audio_data();
         let mut offset = 0;
@@ -173,10 +160,10 @@ impl<'a> FlacFile<'a> {
             ) {
                 Ok(bytes_consumed) => {
                     offset += bytes_consumed;
-                }
+                },
                 Err(FlacError::InvalidFrameSync { .. }) => {
                     offset += 1;
-                }
+                },
                 Err(e) => return Err(e),
             }
         }
@@ -212,16 +199,12 @@ impl<'a> FlacFile<'a> {
 
         // Per-channel typed output: one Vec<T> per channel, capacity = total_spc.
         // Written frame by frame; flattened into planar layout at the end.
-        let mut ch_out: Vec<Vec<T>> = (0..num_channels)
-            .map(|_| Vec::with_capacity(total_spc))
-            .collect();
+        let mut ch_out: Vec<Vec<T>> = (0..num_channels).map(|_| Vec::with_capacity(total_spc)).collect();
 
         // Per-channel i32 scratch: pre-allocated to max_block_size.
         // For 2ch/4096: 2 × 16 KB = 32 KB → fits in L1 cache.
         // Predictor restoration and stereo decorrelation run on these hot buffers.
-        let mut scratch: Vec<Vec<i32>> = (0..num_channels)
-            .map(|_| Vec::with_capacity(block_size_hint))
-            .collect();
+        let mut scratch: Vec<Vec<i32>> = (0..num_channels).map(|_| Vec::with_capacity(block_size_hint)).collect();
 
         // Inline conversion closure: resolved at monomorphisation time, so the match
         // on `bits` is hoisted out of the inner loop by LLVM's LICM pass.
@@ -261,10 +244,10 @@ impl<'a> FlacFile<'a> {
                         ch_out[ch].extend(scratch[ch].iter().map(|&s| convert(s)));
                     }
                     offset += bytes_consumed;
-                }
+                },
                 Err(FlacError::InvalidFrameSync { .. }) => {
                     offset += 1;
-                }
+                },
                 Err(e) => return Err(e),
             }
         }
@@ -296,17 +279,15 @@ impl<'a> AudioFileMetadata for FlacFile<'a> {
         let bits_per_sample = si.bits_per_sample as u16;
         let bytes_per_sample = bits_per_sample.div_ceil(8);
         let block_align = channels * bytes_per_sample;
-        let sample_rate = NonZeroU32::new(si.sample_rate).ok_or_else(|| {
-            AudioIOError::corrupted_data_simple("Invalid sample rate", "sample rate cannot be zero")
-        })?;
+        let sample_rate = NonZeroU32::new(si.sample_rate)
+            .ok_or_else(|| AudioIOError::corrupted_data_simple("Invalid sample rate", "sample rate cannot be zero"))?;
         let byte_rate = sample_rate.get() * block_align as u32;
 
         // In FLAC STREAMINFO, `total_samples` is ALREADY the per-channel sample count
         // (the FLAC spec calls this "inter-channel samples").
         let samples_per_channel = si.total_samples as usize;
         let total_all_channels = samples_per_channel.saturating_mul(channels as usize);
-        let duration =
-            Duration::from_secs_f64(samples_per_channel as f64 / sample_rate.get() as f64);
+        let duration = Duration::from_secs_f64(samples_per_channel as f64 / sample_rate.get() as f64);
 
         Ok(BaseAudioInfo::new(
             sample_rate,
@@ -372,10 +353,7 @@ impl<'a> AudioFile for FlacFile<'a> {
         if file_size > MAX_FLAC_SIZE {
             return Err(AudioIOError::corrupted_data_simple(
                 "File too large",
-                format!(
-                    "File size {} exceeds maximum {} bytes",
-                    file_size, MAX_FLAC_SIZE
-                ),
+                format!("File size {} exceeds maximum {} bytes", file_size, MAX_FLAC_SIZE),
             ));
         }
 
@@ -401,9 +379,9 @@ impl<'a> AudioFile for FlacFile<'a> {
             ));
         }
 
-        let marker: [u8; 4] = bytes[0..4].try_into().map_err(|_| {
-            AudioIOError::corrupted_data_simple("Cannot read FLAC marker", "Insufficient data")
-        })?;
+        let marker: [u8; 4] = bytes[0..4]
+            .try_into()
+            .map_err(|_| AudioIOError::corrupted_data_simple("Cannot read FLAC marker", "Insufficient data"))?;
 
         if marker != FLAC_MARKER {
             return Err(AudioIOError::FlacError(FlacError::invalid_marker(marker)));
@@ -427,17 +405,13 @@ impl<'a> AudioFile for FlacFile<'a> {
             let header_byte = bytes[offset];
             is_last = (header_byte & 0x80) != 0;
             let block_type = header_byte & 0x7F;
-            let block_size =
-                u32::from_be_bytes([0, bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]])
-                    as usize;
+            let block_size = u32::from_be_bytes([0, bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]) as usize;
 
             let block_type_enum = MetadataBlockType::from_byte(block_type);
 
             // Check for reserved/invalid types
             if matches!(block_type_enum, MetadataBlockType::Reserved(n) if n > 126) {
-                return Err(AudioIOError::FlacError(
-                    FlacError::InvalidMetadataBlockType(block_type),
-                ));
+                return Err(AudioIOError::FlacError(FlacError::InvalidMetadataBlockType(block_type)));
             }
 
             let data_start = offset + 4;
@@ -455,16 +429,14 @@ impl<'a> AudioFile for FlacFile<'a> {
 
             // Parse STREAMINFO (required, must be first)
             if block_type_enum == MetadataBlockType::StreamInfo {
-                stream_info =
-                    Some(StreamInfo::from_bytes(block_data).map_err(AudioIOError::FlacError)?);
+                stream_info = Some(StreamInfo::from_bytes(block_data).map_err(AudioIOError::FlacError)?);
             }
 
             metadata_blocks.push((block_type_enum, data_start..data_end));
             offset = data_end;
         }
 
-        let stream_info =
-            stream_info.ok_or(AudioIOError::FlacError(FlacError::MissingStreamInfo))?;
+        let stream_info = stream_info.ok_or(AudioIOError::FlacError(FlacError::MissingStreamInfo))?;
 
         // Determine sample type from bits per sample
         let sample_type = match stream_info.bits_per_sample {
@@ -475,7 +447,7 @@ impl<'a> AudioFile for FlacFile<'a> {
                 return Err(AudioIOError::FlacError(FlacError::InvalidBitsPerSample {
                     bits: stream_info.bits_per_sample,
                 }));
-            }
+            },
         };
 
         let total_samples = stream_info.total_samples;
@@ -501,23 +473,19 @@ impl<'a> AudioFileRead<'a> for FlacFile<'a> {
     where
         T: StandardSample + 'static,
     {
-        let sample_rate = NonZeroU32::new(self.stream_info.sample_rate).ok_or_else(|| {
-            AudioIOError::corrupted_data_simple("Invalid sample rate", "sample rate cannot be zero")
-        })?;
+        let sample_rate = NonZeroU32::new(self.stream_info.sample_rate)
+            .ok_or_else(|| AudioIOError::corrupted_data_simple("Invalid sample rate", "sample rate cannot be zero"))?;
 
         let num_channels = self.stream_info.channels as usize;
-        let flat = self
-            .decode_all_frames_typed::<T>()
-            .map_err(AudioIOError::FlacError)?;
+        let flat = self.decode_all_frames_typed::<T>().map_err(AudioIOError::FlacError)?;
 
         if num_channels == 1 {
             let arr = ndarray::Array1::from_vec(flat);
             AudioSamples::new_mono(arr, sample_rate).map_err(Into::into)
         } else {
             let spc = flat.len() / num_channels;
-            let arr = ndarray::Array2::from_shape_vec((num_channels, spc), flat).map_err(|e| {
-                AudioIOError::corrupted_data_simple("Array shape error", e.to_string())
-            })?;
+            let arr = ndarray::Array2::from_shape_vec((num_channels, spc), flat)
+                .map_err(|e| AudioIOError::corrupted_data_simple("Array shape error", e.to_string()))?;
             AudioSamples::new_multi_channel(arr, sample_rate).map_err(Into::into)
         }
     }
@@ -557,9 +525,8 @@ impl<'a> AudioFileRead<'a> for FlacFile<'a> {
 
         // Use DecodedAudio's conversion to get planar samples
         let planar_data = decoded.read_samples_planar::<T>()?;
-        let non_empty = non_empty_slice::NonEmptyVec::try_from(planar_data).map_err(|_| {
-            AudioIOError::corrupted_data_simple("Empty planar data", "No samples to replace with")
-        })?;
+        let non_empty = non_empty_slice::NonEmptyVec::try_from(planar_data)
+            .map_err(|_| AudioIOError::corrupted_data_simple("Empty planar data", "No samples to replace with"))?;
         audio.replace_with_vec(&non_empty).map_err(Into::into)
     }
 }
@@ -586,13 +553,9 @@ impl<'a> AudioFileWrite for FlacFile<'a> {
 /// FLAC only supports integer PCM audio with 4-24 bits per sample.
 /// - For f32/f64 input: automatically converts to 24-bit integers
 /// - For i16 input: writes as 16-bit
-/// - For I24 input: writes as 24-bit  
+/// - For I24 input: writes as 24-bit
 /// - For i32 input: writes as 24-bit (truncated from 32-bit)
-pub fn write_flac<W: Write, T>(
-    mut writer: W,
-    audio: &AudioSamples<T>,
-    level: CompressionLevel,
-) -> AudioIOResult<()>
+pub fn write_flac<W: Write, T>(mut writer: W, audio: &AudioSamples<T>, level: CompressionLevel) -> AudioIOResult<()>
 where
     T: StandardSample + 'static,
 {
@@ -703,9 +666,7 @@ where
     let num_channels = audio.num_channels().get() as usize;
     let samples_per_channel = audio.samples_per_channel().get();
     let n_ch = num_channels;
-    let mut channel_samples: Vec<Vec<i32>> = (0..n_ch)
-        .map(|_| Vec::with_capacity(samples_per_channel))
-        .collect();
+    let mut channel_samples: Vec<Vec<i32>> = (0..n_ch).map(|_| Vec::with_capacity(samples_per_channel)).collect();
 
     // Helper: fill channel_samples from a planar slice (channel-major, contiguous).
     macro_rules! fill_planar {
@@ -820,10 +781,12 @@ impl Display for FlacFile<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use audio_samples::{AudioTypeConversion, sample_rate, sine_wave};
     use std::fs;
     use std::time::Duration as StdDuration;
+
+    use audio_samples::{AudioTypeConversion, sample_rate, sine_wave};
+
+    use super::*;
 
     // -------------------------------------------------------------------------
     // Helpers
@@ -848,10 +811,7 @@ mod tests {
     #[test]
     fn test_flac_file_info_display() {
         let info = FlacFileInfo {
-            metadata_blocks: vec![
-                MetadataBlockType::StreamInfo,
-                MetadataBlockType::VorbisComment,
-            ],
+            metadata_blocks: vec![MetadataBlockType::StreamInfo, MetadataBlockType::VorbisComment],
             md5_signature: Some([0; 16]),
             min_block_size: 4096,
             max_block_size: 4096,
@@ -866,8 +826,8 @@ mod tests {
     #[test]
     fn test_read_wave_flac_as_i16() {
         let flac_path = Path::new("resources/test.flac");
-        let flac_file = FlacFile::open_with_options(flac_path, OpenOptions::default())
-            .expect("Failed to open test FLAC file");
+        let flac_file =
+            FlacFile::open_with_options(flac_path, OpenOptions::default()).expect("Failed to open test FLAC file");
         let audio = flac_file.read::<i16>().expect("read as i16");
         assert!(audio.num_channels().get() > 0);
         assert!(audio.sample_rate().get() > 0);
@@ -881,8 +841,8 @@ mod tests {
     #[test]
     fn test_read_wave_flac_as_i32() {
         let flac_path = Path::new("resources/test.flac");
-        let flac_file = FlacFile::open_with_options(flac_path, OpenOptions::default())
-            .expect("Failed to open test FLAC file");
+        let flac_file =
+            FlacFile::open_with_options(flac_path, OpenOptions::default()).expect("Failed to open test FLAC file");
         let audio = flac_file.read::<i32>().expect("read as i32");
         assert!(audio.num_channels().get() > 0);
         assert!(audio.sample_rate().get() > 0);
@@ -892,8 +852,8 @@ mod tests {
     #[test]
     fn test_read_wave_flac_as_f32() {
         let flac_path = Path::new("resources/test.flac");
-        let flac_file = FlacFile::open_with_options(flac_path, OpenOptions::default())
-            .expect("Failed to open test FLAC file");
+        let flac_file =
+            FlacFile::open_with_options(flac_path, OpenOptions::default()).expect("Failed to open test FLAC file");
         let audio = flac_file.read::<f32>().expect("read as f32");
         assert!(audio.num_channels().get() > 0);
         assert!(audio.sample_rate().get() > 0);
@@ -903,8 +863,8 @@ mod tests {
     #[test]
     fn test_read_wave_flac_as_f64() {
         let flac_path = Path::new("resources/test.flac");
-        let flac_file = FlacFile::open_with_options(flac_path, OpenOptions::default())
-            .expect("Failed to open test FLAC file");
+        let flac_file =
+            FlacFile::open_with_options(flac_path, OpenOptions::default()).expect("Failed to open test FLAC file");
         let audio = flac_file.read::<f64>().expect("read as f64");
         assert!(audio.num_channels().get() > 0);
         assert!(audio.sample_rate().get() > 0);
@@ -914,8 +874,8 @@ mod tests {
     #[test]
     fn test_read_wave_flac_as_i24() {
         let flac_path = Path::new("resources/test.flac");
-        let flac_file = FlacFile::open_with_options(flac_path, OpenOptions::default())
-            .expect("Failed to open test FLAC file");
+        let flac_file =
+            FlacFile::open_with_options(flac_path, OpenOptions::default()).expect("Failed to open test FLAC file");
         let audio = flac_file.read::<I24>().expect("read as I24");
         assert!(audio.num_channels().get() > 0);
         assert!(audio.sample_rate().get() > 0);
@@ -958,10 +918,7 @@ mod tests {
         let i16_as_f64: Vec<f64> = interleaved_i16.iter().copied().map(i16_to_f64).collect();
 
         let err = mse(&i16_as_f64, &interleaved_f64);
-        assert!(
-            err < 1e-3,
-            "MSE between i16-converted-to-f64 and raw f64 was {err}"
-        );
+        assert!(err < 1e-3, "MSE between i16-converted-to-f64 and raw f64 was {err}");
     }
 
     #[test]
@@ -985,8 +942,7 @@ mod tests {
         let info = flac_file.base_info().unwrap();
         let audio = flac_file.read::<i16>().unwrap();
 
-        let expected_total =
-            audio.num_channels().get() as usize * audio.samples_per_channel().get();
+        let expected_total = audio.num_channels().get() as usize * audio.samples_per_channel().get();
         assert_eq!(
             info.total_samples, expected_total,
             "base_info total_samples should equal channels * samples_per_channel"
@@ -1042,8 +998,7 @@ mod tests {
     #[test]
     fn test_roundtrip_i24() {
         let sr = sample_rate!(44100);
-        let sine_i24 =
-            sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.25), sr, 0.5).to_format::<I24>();
+        let sine_i24 = sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.25), sr, 0.5).to_format::<I24>();
 
         let out_path = std::env::temp_dir().join("flac_rt_i24.flac");
         {
@@ -1062,8 +1017,7 @@ mod tests {
     #[test]
     fn test_roundtrip_i32() {
         let sr = sample_rate!(44100);
-        let sine_i32 =
-            sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.25), sr, 0.5).to_format::<i32>();
+        let sine_i32 = sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.25), sr, 0.5).to_format::<i32>();
 
         let out_path = std::env::temp_dir().join("flac_rt_i32.flac");
         {
@@ -1101,8 +1055,7 @@ mod tests {
     #[test]
     fn test_roundtrip_f64() {
         let sr = sample_rate!(44100);
-        let sine_f64 =
-            sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.25), sr, 0.5).to_format::<f64>();
+        let sine_f64 = sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.25), sr, 0.5).to_format::<f64>();
 
         let out_path = std::env::temp_dir().join("flac_rt_f64.flac");
         {
@@ -1125,8 +1078,7 @@ mod tests {
     #[ignore = "known: FIXED predictor decoder has precision issues with sine waves"]
     fn test_roundtrip_i16_content_fidelity() {
         let sr = sample_rate!(44100);
-        let sine_i16 =
-            sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.25), sr, 0.5).to_format::<i16>();
+        let sine_i16 = sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.25), sr, 0.5).to_format::<i16>();
 
         let out_path = std::env::temp_dir().join("flac_rt_i16_content.flac");
         {
@@ -1141,11 +1093,7 @@ mod tests {
             .iter()
             .map(|&s| s as f64 / 32768.0)
             .collect();
-        let got: Vec<f64> = back
-            .to_interleaved_vec()
-            .iter()
-            .map(|&s| s as f64 / 32768.0)
-            .collect();
+        let got: Vec<f64> = back.to_interleaved_vec().iter().map(|&s| s as f64 / 32768.0).collect();
         let err = mse(&orig, &got);
         assert!(err < 1e-6, "i16 content fidelity MSE: {err}");
 
@@ -1192,11 +1140,7 @@ mod tests {
         let flac = FlacFile::open_with_options(&out_path, OpenOptions::default()).unwrap();
         let back = flac.read::<i16>().expect("read stereo DEFAULT (1)");
         assert_eq!(back.num_channels().get(), 2, "should have 2 channels");
-        assert_eq!(
-            back.samples_per_channel(),
-            stereo.samples_per_channel(),
-            "sample count"
-        );
+        assert_eq!(back.samples_per_channel(), stereo.samples_per_channel(), "sample count");
         fs::remove_file(&out_path).ok();
 
         // Find minimal failing case: test with different durations
@@ -1262,22 +1206,12 @@ mod tests {
         let out_path2 = std::env::temp_dir().join("flac_rt_stereo_bench.flac");
         {
             let file = File::create(&out_path2).expect("create");
-            write_flac(
-                BufWriter::new(file),
-                &bench_stereo,
-                CompressionLevel::DEFAULT,
-            )
-            .expect("write bench");
+            write_flac(BufWriter::new(file), &bench_stereo, CompressionLevel::DEFAULT).expect("write bench");
         }
         let flac2 = FlacFile::open_with_options(&out_path2, OpenOptions::default()).unwrap();
-        let back2 = flac2
-            .read::<i16>()
-            .expect("read stereo DEFAULT bench scenario");
+        let back2 = flac2.read::<i16>().expect("read stereo DEFAULT bench scenario");
         assert_eq!(back2.num_channels().get(), 2);
-        assert_eq!(
-            back2.samples_per_channel(),
-            bench_stereo.samples_per_channel()
-        );
+        assert_eq!(back2.samples_per_channel(), bench_stereo.samples_per_channel());
         fs::remove_file(&out_path2).ok();
     }
 
@@ -1304,11 +1238,11 @@ mod tests {
             Ok(back) => {
                 assert_eq!(back.num_channels().get(), 2);
                 assert_eq!(back.samples_per_channel(), stereo.samples_per_channel());
-            }
+            },
             Err(e) => {
                 // Known decoder issue with multi-channel FIXED predictor frames
                 eprintln!("stereo decode known issue: {e}");
-            }
+            },
         }
 
         fs::remove_file(&out_path).ok();
@@ -1386,8 +1320,7 @@ mod tests {
 
     fn roundtrip_sample_rate(hz: u32) {
         let sr = std::num::NonZeroU32::new(hz).unwrap();
-        let sine =
-            sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.1), sr, 0.5).to_format::<i16>();
+        let sine = sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.1), sr, 0.5).to_format::<i16>();
 
         let tag = format!("sr_{hz}");
         let out_path = std::env::temp_dir().join(format!("flac_rt_{tag}.flac"));
@@ -1397,11 +1330,7 @@ mod tests {
         }
         let flac = FlacFile::open_with_options(&out_path, OpenOptions::default()).unwrap();
         let back = flac.read::<i16>().unwrap();
-        assert_eq!(
-            back.sample_rate().get(),
-            hz,
-            "sample rate should be preserved"
-        );
+        assert_eq!(back.sample_rate().get(), hz, "sample rate should be preserved");
         assert_eq!(back.samples_per_channel(), sine.samples_per_channel());
         fs::remove_file(&out_path).ok();
     }
@@ -1429,8 +1358,7 @@ mod tests {
     fn test_short_file_single_block() {
         // Just a handful of samples — less than one typical block
         let sr = sample_rate!(44100);
-        let sine =
-            sine_wave::<f32>(440.0, StdDuration::from_millis(10), sr, 0.5).to_format::<i16>();
+        let sine = sine_wave::<f32>(440.0, StdDuration::from_millis(10), sr, 0.5).to_format::<i16>();
 
         let out_path = std::env::temp_dir().join("flac_edge_short.flac");
         {
@@ -1508,10 +1436,7 @@ mod tests {
         let back = flac.read::<i16>().unwrap();
 
         let back_v: Vec<i16> = back.to_interleaved_vec().into_iter().collect();
-        assert_eq!(
-            back_v, samples,
-            "max-amplitude i16 values should round-trip exactly"
-        );
+        assert_eq!(back_v, samples, "max-amplitude i16 values should round-trip exactly");
         fs::remove_file(&out_path).ok();
     }
 
@@ -1522,8 +1447,7 @@ mod tests {
     #[test]
     fn test_compression_levels_produce_valid_files() {
         let sr = sample_rate!(44100);
-        let sine =
-            sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.25), sr, 0.5).to_format::<i16>();
+        let sine = sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.25), sr, 0.5).to_format::<i16>();
 
         for level in [
             CompressionLevel::FASTEST,
@@ -1551,12 +1475,7 @@ mod tests {
                 "level {:?} sample count mismatch",
                 level
             );
-            assert_eq!(
-                back.sample_rate(),
-                sr,
-                "level {:?} sample rate mismatch",
-                level
-            );
+            assert_eq!(back.sample_rate(), sr, "level {:?} sample rate mismatch", level);
             assert_eq!(
                 back.num_channels(),
                 sine.num_channels(),
@@ -1624,12 +1543,7 @@ mod tests {
         // symphonia 0.6: `probe()` returns the `FormatReader` directly (no `ProbeResult`),
         // and takes the options by value.
         let mut format = symphonia::default::get_probe()
-            .probe(
-                &hint,
-                mss,
-                FormatOptions::default(),
-                MetadataOptions::default(),
-            )
+            .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
             .expect("symphonia probe");
 
         // symphonia 0.6: `default_track` takes a `TrackType`; codec params are a typed enum.
@@ -1663,8 +1577,7 @@ mod tests {
     #[test]
     fn test_oracle_symphonia_mono_sine() {
         let sr = sample_rate!(44100);
-        let sine =
-            sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.1), sr, 0.5).to_format::<i16>();
+        let sine = sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.1), sr, 0.5).to_format::<i16>();
         let expected_samples = sine.samples_per_channel().get();
 
         let out_path = std::env::temp_dir().join("flac_oracle_sym_mono.flac");
@@ -1698,10 +1611,7 @@ mod tests {
         assert_eq!(sym_sr, 44100, "symphonia sample rate");
         assert_eq!(sym_ch, 2, "symphonia channels");
         // symphonia reports frames (samples per channel)
-        assert_eq!(
-            sym_samples, expected_samples_per_ch,
-            "symphonia frame count"
-        );
+        assert_eq!(sym_samples, expected_samples_per_ch, "symphonia frame count");
 
         fs::remove_file(&out_path).ok();
     }
@@ -1744,8 +1654,7 @@ mod tests {
         // Use write_flac with FASTEST to get lossless i16 content verification.
         // crate::write() uses CompressionLevel::DEFAULT which engages LPC.
         let sr = sample_rate!(44100);
-        let sine =
-            sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.1), sr, 0.5).to_format::<i16>();
+        let sine = sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.1), sr, 0.5).to_format::<i16>();
 
         let out_path = std::env::temp_dir().join("flac_lib_rw.flac");
         {
@@ -1775,40 +1684,27 @@ mod tests {
 
     #[test]
     fn test_open_nonexistent_file_fails() {
-        let result = FlacFile::open_with_options(
-            Path::new("resources/does_not_exist.flac"),
-            OpenOptions::default(),
-        );
+        let result = FlacFile::open_with_options(Path::new("resources/does_not_exist.flac"), OpenOptions::default());
         assert!(result.is_err(), "opening nonexistent file should fail");
     }
 
     #[test]
     fn test_open_wav_as_flac_fails() {
         // Pass a WAV file to FlacFile — should fail because FLAC marker is missing
-        let result =
-            FlacFile::open_with_options(Path::new("resources/test.wav"), OpenOptions::default());
-        assert!(
-            result.is_err(),
-            "opening a WAV as a FLAC should return an error"
-        );
+        let result = FlacFile::open_with_options(Path::new("resources/test.wav"), OpenOptions::default());
+        assert!(result.is_err(), "opening a WAV as a FLAC should return an error");
     }
 
     #[test]
     fn test_lib_read_nonexistent_flac_fails() {
         let result = crate::read::<_, i16>("resources/no_such_file.flac");
-        assert!(
-            result.is_err(),
-            "lib::read of nonexistent .flac should fail"
-        );
+        assert!(result.is_err(), "lib::read of nonexistent .flac should fail");
     }
 
     #[test]
     fn test_lib_read_unsupported_extension_fails() {
         let result = crate::read::<_, i16>("resources/audio.mp3");
-        assert!(
-            result.is_err(),
-            "lib::read of .mp3 should fail with unsupported format"
-        );
+        assert!(result.is_err(), "lib::read of .mp3 should fail with unsupported format");
     }
 
     // =========================================================================
@@ -1818,22 +1714,14 @@ mod tests {
     #[test]
     fn test_flac_open_read_i16() {
         let flac_path = Path::new("resources/test.flac");
-        let flac_file = FlacFile::open_with_options(flac_path, OpenOptions::default())
-            .expect("Failed to open test FLAC file");
+        let flac_file =
+            FlacFile::open_with_options(flac_path, OpenOptions::default()).expect("Failed to open test FLAC file");
 
-        let audio = flac_file
-            .read::<i16>()
-            .expect("Failed to read FLAC samples as i16");
+        let audio = flac_file.read::<i16>().expect("Failed to read FLAC samples as i16");
 
         assert!(audio.num_channels().get() > 0, "expected non-zero channels");
-        assert!(
-            audio.sample_rate().get() > 0,
-            "expected non-zero sample rate"
-        );
-        assert!(
-            audio.total_samples().get() > 0,
-            "expected non-empty samples"
-        );
+        assert!(audio.sample_rate().get() > 0, "expected non-zero sample rate");
+        assert!(audio.total_samples().get() > 0, "expected non-empty samples");
     }
 
     #[test]
@@ -1849,15 +1737,11 @@ mod tests {
             write_flac(writer, &sine_i16, CompressionLevel::FASTEST).expect("write_flac");
         }
 
-        let flac = FlacFile::open_with_options(&out_path, OpenOptions::default())
-            .expect("open roundtrip file");
+        let flac = FlacFile::open_with_options(&out_path, OpenOptions::default()).expect("open roundtrip file");
         let read_back = flac.read::<i16>().expect("read i16");
 
         assert_eq!(read_back.sample_rate(), sr);
-        assert_eq!(
-            read_back.num_channels().get(),
-            sine_i16.num_channels().get(),
-        );
+        assert_eq!(read_back.num_channels().get(), sine_i16.num_channels().get(),);
         assert_eq!(
             read_back.samples_per_channel().get(),
             sine_i16.samples_per_channel().get(),
