@@ -1,6 +1,6 @@
-[package]
+    [package]
 name = "audio_samples_io"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
 license = "MIT"

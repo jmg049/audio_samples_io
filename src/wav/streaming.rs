@@ -73,23 +73,23 @@ where
     /// Cached format code
     format_code: FormatCode,
     /// Sample rate in Hz
-    sample_rate: NonZeroU32,
+    pub sample_rate: NonZeroU32,
     /// Number of channels
-    channels: u16,
+    pub channels: u16,
     /// Bits per sample
-    bits_per_sample: u16,
+    pub bits_per_sample: u16,
     /// Bytes per sample
-    bytes_per_sample: u16,
+    pub bytes_per_sample: u16,
     /// Byte rate
-    byte_rate: u32,
+    pub byte_rate: u32,
     /// Block align (bytes per frame)
-    block_align: u16,
+    pub block_align: u16,
     /// Validated sample type
-    sample_type: ValidatedSampleType,
+    pub sample_type: ValidatedSampleType,
     /// Total number of samples (all channels)
-    total_samples: usize,
+    pub total_samples: usize,
     /// Total number of frames
-    total_frames: usize,
+    pub total_frames: usize,
     /// Byte offset where audio data starts (absolute file position)
     data_offset: u64,
     /// Current frame position (0-indexed)
