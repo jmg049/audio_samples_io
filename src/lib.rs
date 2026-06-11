@@ -16,6 +16,12 @@ pub mod flac;
 #[cfg(feature = "flac")]
 pub use crate::flac::{CompressionLevel, StreamedFlacFile, StreamedFlacWriter};
 
+#[cfg(feature = "aiff")]
+pub mod aiff;
+
+#[cfg(feature = "aiff")]
+pub use crate::aiff::{AiffFile, write_aiff};
+
 #[cfg(any(feature = "wav", feature = "flac"))]
 pub mod streaming;
 #[cfg(any(feature = "wav", feature = "flac"))]
@@ -106,6 +112,18 @@ pub fn peek_native_type<P: AsRef<Path>>(fp: P) -> AudioIOResult<ValidatedSampleT
                 })
             }
         },
+        FileType::AIFF => {
+            #[cfg(not(feature = "aiff"))]
+            return Err(crate::error::AudioIOError::missing_feature(
+                "'aiff' feature must be enabled to peek AIFF files",
+            ));
+
+            #[cfg(feature = "aiff")]
+            {
+                let aiff_file = AiffFile::open_metadata(path)?;
+                Ok(aiff_file.sample_type())
+            }
+        },
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
             "peek_native_type does not support: {other:?}"
         ))),
@@ -144,6 +162,18 @@ pub fn info<P: AsRef<Path>>(fp: P) -> AudioIOResult<BaseAudioInfo> {
                 use crate::traits::AudioFileMetadata;
                 let flac_file = FlacFile::open_metadata(path)?;
                 flac_file.base_info()
+            }
+        },
+        FileType::AIFF => {
+            #[cfg(not(feature = "aiff"))]
+            return Err(crate::error::AudioIOError::missing_feature(
+                "'aiff' feature must be enabled to read AIFF files",
+            ));
+
+            #[cfg(feature = "aiff")]
+            {
+                let aiff_file = AiffFile::open_metadata(path)?;
+                aiff_file.base_info()
             }
         },
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
@@ -190,6 +220,19 @@ where
                 use crate::traits::{AudioFile, AudioFileRead};
                 let flac_file = FlacFile::open_with_options(path, OpenOptions::default())?;
                 let samples = flac_file.read::<T>()?;
+                Ok(samples.into_owned())
+            }
+        },
+        FileType::AIFF => {
+            #[cfg(not(feature = "aiff"))]
+            return Err(crate::error::AudioIOError::missing_feature(
+                "'aiff' feature must be enabled to read AIFF files",
+            ));
+
+            #[cfg(feature = "aiff")]
+            {
+                let aiff_file = AiffFile::open_with_options(path, OpenOptions::default())?;
+                let samples = aiff_file.read::<T>()?;
                 Ok(samples.into_owned())
             }
         },
@@ -789,6 +832,18 @@ where
                 Ok(Box::new(flac_file))
             }
         },
+        FileType::AIFF => {
+            #[cfg(not(feature = "aiff"))]
+            return Err(crate::error::AudioIOError::missing_feature(
+                "'aiff' feature must be enabled to open AIFF files",
+            ));
+
+            #[cfg(feature = "aiff")]
+            {
+                let aiff_file = AiffFile::open_with_options(path, OpenOptions::default())?;
+                Ok(Box::new(aiff_file))
+            }
+        },
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
             "Unsupported file format: {other:?}"
         ))),
@@ -849,6 +904,19 @@ where
                 let file = std::fs::File::create(path)?;
                 let buf_writer = std::io::BufWriter::with_capacity(opts.write_buf_capacity, file);
                 crate::flac::write_flac(buf_writer, audio, CompressionLevel::default())
+            }
+        },
+        FileType::AIFF => {
+            #[cfg(not(feature = "aiff"))]
+            return Err(crate::error::AudioIOError::missing_feature(
+                "'aiff' feature must be enabled to write AIFF files",
+            ));
+
+            #[cfg(feature = "aiff")]
+            {
+                let file = std::fs::File::create(path)?;
+                let buf_writer = std::io::BufWriter::with_capacity(opts.write_buf_capacity, file);
+                crate::aiff::write_aiff(buf_writer, audio)
             }
         },
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
@@ -974,6 +1042,17 @@ where
             #[cfg(feature = "flac")]
             {
                 crate::flac::write_flac(writer, audio, CompressionLevel::default())
+            }
+        },
+        FileType::AIFF => {
+            #[cfg(not(feature = "aiff"))]
+            return Err(crate::error::AudioIOError::missing_feature(
+                "'aiff' feature must be enabled to write AIFF files",
+            ));
+
+            #[cfg(feature = "aiff")]
+            {
+                crate::aiff::write_aiff(writer, audio)
             }
         },
         other => Err(crate::error::AudioIOError::unsupported_format(format!(

@@ -39,12 +39,11 @@ audio_samples
 
 ## NOTE: Still under development
 
-Currently supports `.wav` (including RF64/BW64 64-bit variants for files over 4 GiB) and `.flac` files. Read paths detect the container from the file's magic bytes, falling back to the extension.
+Currently supports `.wav` (including RF64/BW64 64-bit variants for files over 4 GiB), `.flac`, and `.aiff`/AIFF-C files. Read paths detect the container from the file's magic bytes, falling back to the extension.
 
 Planned:
 
 - opus / ogg
-- aiff
 - mp3
 
 ## Quick start

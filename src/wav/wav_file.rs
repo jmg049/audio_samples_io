@@ -748,11 +748,11 @@ impl<'a> AudioFileRead<'a> for WavFile<'a> {
         }
 
         match self.sample_type {
-            ValidatedSampleType::U8 => read_into_typed_internal::<u8, T>(&data_chunk, audio), /* technicaly not part
-            * of the wav spec,
-             * but it does not
-             * disallow it either,
-             * so we support it */
+            ValidatedSampleType::U8 => read_into_typed_internal::<u8, T>(&data_chunk, audio), // technicaly not part
+            // of the wav spec,
+            // but it does not
+            // disallow it either,
+            // so we support it
             ValidatedSampleType::I16 => read_into_typed_internal::<i16, T>(&data_chunk, audio),
             ValidatedSampleType::I24 => read_into_typed_internal::<I24, T>(&data_chunk, audio),
             ValidatedSampleType::I32 => read_into_typed_internal::<i32, T>(&data_chunk, audio),
