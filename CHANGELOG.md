@@ -9,6 +9,9 @@ All notable changes to this project will be documented in this file.
 - WAV: tolerate real-world/streaming files — over-declared RIFF/`data` size fields (including the `0xFFFFFFFF` placeholder written by streaming encoders) are clamped to the bytes actually present, and a ragged `data` chunk decodes its whole frames instead of erroring
 - Streaming: `AudioStreamReader` now exposes `num_channels()`, allowing `Box<dyn AudioStreamReader>` callers to allocate read buffers without a separate `info()` call (eliminating the probe → drop → reopen two-pass latency)
 
+### Removed
+- Dead `format_conversion` module (never compiled into the crate); transcoding is covered by `read()` + `write()`
+
 ### Changed
 - Docs: FLAC streaming examples now compile — they import the `AudioStreamRead`/`AudioStreamReader` traits their method calls require
 
