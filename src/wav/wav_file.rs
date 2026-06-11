@@ -571,6 +571,9 @@ pub fn parse_wav_header_streaming<R: Read + Seek>(reader: &mut R) -> AudioIOResu
             // reported sample count stays accurate instead of astronomically large.
             let stream_end = reader.seek(SeekFrom::End(0)).map_err(AudioIOError::from)?;
             let avail = stream_end.saturating_sub(offset) as usize;
+            // Restore the documented contract: the reader is left positioned at the first
+            // byte of audio data, so callers can read the payload without seeking.
+            reader.seek(SeekFrom::Start(offset)).map_err(AudioIOError::from)?;
             data_byte_offset = Some(offset);
             data_byte_count = Some(size.min(avail));
             break; // we have everything we need
@@ -690,10 +693,10 @@ impl<'a> AudioFileRead<'a> for WavFile<'a> {
 
         match self.sample_type {
             ValidatedSampleType::U8 => read_into_typed_internal::<u8, T>(&data_chunk, audio), /* technicaly not part
-                                                                                                * of the wav spec,
-                                                                                                * but it does not
-                                                                                                * disallow it either,
-                                                                                                * so we support it */
+            * of the wav spec,
+             * but it does not
+             * disallow it either,
+             * so we support it */
             ValidatedSampleType::I16 => read_into_typed_internal::<i16, T>(&data_chunk, audio),
             ValidatedSampleType::I24 => read_into_typed_internal::<I24, T>(&data_chunk, audio),
             ValidatedSampleType::I32 => read_into_typed_internal::<i32, T>(&data_chunk, audio),

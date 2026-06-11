@@ -378,10 +378,8 @@ where
 
     let bytes = unsafe { std::slice::from_raw_parts_mut(vec.as_mut_ptr().cast::<u8>(), byte_count) };
 
-    // No explicit seek needed: parse_wav_header_streaming stops reading at the first byte of the
-    // data payload, leaving the BufReader positioned there.  Its internal buffer already holds
-    // the first ≤8 KiB of audio data (read as part of the initial header scan), so we drain
-    // those cached bytes first and then read the remaining payload in one large kernel call.
+    // No explicit seek needed: parse_wav_header_streaming leaves the BufReader positioned at
+    // the first byte of the data payload.
     let _ = data_byte_offset; // used only for the type-conversion fallback check above
     reader.read_exact(bytes).map_err(AudioIOError::from)?;
 
