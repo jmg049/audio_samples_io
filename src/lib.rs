@@ -295,7 +295,7 @@ where
 ///
 /// ```no_run
 /// use audio_samples_io::open_streamed_flac;
-/// use audio_samples_io::traits::AudioFileMetadata;
+/// use audio_samples_io::traits::{AudioFileMetadata, AudioStreamRead, AudioStreamReader};
 /// use audio_samples::{AudioSamples, nzu};
 /// use std::num::NonZeroU32;
 ///

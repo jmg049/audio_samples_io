@@ -9,6 +9,9 @@ All notable changes to this project will be documented in this file.
 - WAV: tolerate real-world/streaming files — over-declared RIFF/`data` size fields (including the `0xFFFFFFFF` placeholder written by streaming encoders) are clamped to the bytes actually present, and a ragged `data` chunk decodes its whole frames instead of erroring
 - Streaming: `AudioStreamReader` now exposes `num_channels()`, allowing `Box<dyn AudioStreamReader>` callers to allocate read buffers without a separate `info()` call (eliminating the probe → drop → reopen two-pass latency)
 
+### Changed
+- Docs: FLAC streaming examples now compile — they import the `AudioStreamRead`/`AudioStreamReader` traits their method calls require
+
 ### Added
 - FLAC: streaming writer (`create_streamed_flac`/`create_streamed_flac_writer`) for incremental, low-memory encoding, plus a format-agnostic `StreamedAudioWriter` so `create_streamed` selects WAV or FLAC by file extension (`create_streamed_with` for an explicit format)
 - WAV: decode mu-law/a-law (G.711) and Microsoft/IMA ADPCM to 16-bit linear PCM; reader also accepts 18-byte PCM `fmt ` headers
