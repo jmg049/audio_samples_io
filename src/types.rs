@@ -141,6 +141,77 @@ impl FileType {
 
         ext.parse().unwrap_or(FileType::Unknown)
     }
+
+    /// Number of leading bytes [`FileType::from_magic_bytes`] needs to classify
+    /// any supported container.
+    pub const MAGIC_LEN: usize = 12;
+
+    /// Detect file type from the leading bytes of the file contents.
+    ///
+    /// Recognises the magic numbers of every supported container:
+    ///
+    /// | Signature | Detected type |
+    /// |---|---|
+    /// | `RIFF....WAVE`, `RF64....WAVE`, `BW64....WAVE` | [`FileType::WAV`] |
+    /// | `fLaC` | [`FileType::FLAC`] |
+    /// | `FORM....AIFF`, `FORM....AIFC` | [`FileType::AIFF`] |
+    /// | `OggS` | [`FileType::OGG`] |
+    /// | `ID3` tag or an MPEG frame sync (`0xFF 0xEx/0xFx`) | [`FileType::MP3`] |
+    ///
+    /// Returns [`FileType::Unknown`] when `header` is too short or matches no
+    /// known signature. Pass at least [`FileType::MAGIC_LEN`] bytes when available.
+    pub const fn from_magic_bytes(header: &[u8]) -> Self {
+        match header {
+            // 32-bit RIFF and the RF64/BW64 64-bit variants share the WAVE form type.
+            [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'A', b'V', b'E', ..]
+            | [b'R', b'F', b'6', b'4', _, _, _, _, b'W', b'A', b'V', b'E', ..]
+            | [b'B', b'W', b'6', b'4', _, _, _, _, b'W', b'A', b'V', b'E', ..] => FileType::WAV,
+            [b'f', b'L', b'a', b'C', ..] => FileType::FLAC,
+            [b'F', b'O', b'R', b'M', _, _, _, _, b'A', b'I', b'F', b'F', ..]
+            | [b'F', b'O', b'R', b'M', _, _, _, _, b'A', b'I', b'F', b'C', ..] => FileType::AIFF,
+            [b'O', b'g', b'g', b'S', ..] => FileType::OGG,
+            [b'I', b'D', b'3', ..] => FileType::MP3,
+            // Bare MPEG audio frame sync: 11 set bits across the first two bytes.
+            [0xFF, b1, ..] if *b1 & 0xE0 == 0xE0 => FileType::MP3,
+            _ => FileType::Unknown,
+        }
+    }
+
+    /// Detect file type from contents first, falling back to the extension.
+    ///
+    /// Reads up to [`FileType::MAGIC_LEN`] bytes from `path` and matches them with
+    /// [`FileType::from_magic_bytes`]. When the file cannot be opened (e.g. it does
+    /// not exist yet) or its leading bytes match no known signature, the result of
+    /// [`FileType::from_path`] is returned instead, so extension-only behaviour is
+    /// preserved for paths that cannot be sniffed.
+    pub fn detect<P: AsRef<Path>>(path: P) -> Self {
+        use std::io::Read;
+
+        let path = path.as_ref();
+        let mut header = [0u8; Self::MAGIC_LEN];
+        let sniffed = std::fs::File::open(path)
+            .and_then(|mut f| {
+                let mut filled = 0;
+                // A regular file returns everything in one read, but loop for
+                // correctness on short reads from special files.
+                loop {
+                    match f.read(&mut header[filled..])? {
+                        0 => break,
+                        n => filled += n,
+                    }
+                    if filled == header.len() {
+                        break;
+                    }
+                }
+                Ok(Self::from_magic_bytes(&header[..filled]))
+            })
+            .unwrap_or(FileType::Unknown);
+
+        match sniffed {
+            FileType::Unknown => Self::from_path(path),
+            known => known,
+        }
+    }
 }
 
 impl Display for FileType {
@@ -527,4 +598,52 @@ const fn _assert_send_sync()
 where
     AudioDataSource<'static>: Send + Sync,
 {
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FileType;
+
+    #[test]
+    fn magic_bytes_classify_known_signatures() {
+        assert_eq!(FileType::from_magic_bytes(b"RIFF\x24\x08\x00\x00WAVE"), FileType::WAV);
+        assert_eq!(FileType::from_magic_bytes(b"RF64\xFF\xFF\xFF\xFFWAVE"), FileType::WAV);
+        assert_eq!(FileType::from_magic_bytes(b"BW64\xFF\xFF\xFF\xFFWAVE"), FileType::WAV);
+        assert_eq!(FileType::from_magic_bytes(b"fLaC\x00\x00\x00\x22"), FileType::FLAC);
+        assert_eq!(FileType::from_magic_bytes(b"FORM\x00\x00\x10\x00AIFF"), FileType::AIFF);
+        assert_eq!(FileType::from_magic_bytes(b"FORM\x00\x00\x10\x00AIFC"), FileType::AIFF);
+        assert_eq!(
+            FileType::from_magic_bytes(b"OggS\x00\x02\x00\x00\x00\x00\x00\x00"),
+            FileType::OGG
+        );
+        assert_eq!(
+            FileType::from_magic_bytes(b"ID3\x04\x00\x00\x00\x00\x00\x00"),
+            FileType::MP3
+        );
+        assert_eq!(FileType::from_magic_bytes(&[0xFF, 0xFB, 0x90, 0x00]), FileType::MP3);
+        assert_eq!(FileType::from_magic_bytes(&[0xFF, 0xE3, 0x18, 0xC4]), FileType::MP3);
+    }
+
+    #[test]
+    fn magic_bytes_reject_non_signatures() {
+        assert_eq!(FileType::from_magic_bytes(b""), FileType::Unknown);
+        assert_eq!(FileType::from_magic_bytes(b"RIFF"), FileType::Unknown); // too short for form type
+        assert_eq!(
+            FileType::from_magic_bytes(b"RIFF\x00\x00\x00\x00AVI "),
+            FileType::Unknown
+        ); // RIFF but not WAVE
+        assert_eq!(
+            FileType::from_magic_bytes(b"FORM\x00\x00\x00\x008SVX"),
+            FileType::Unknown
+        ); // IFF but not AIFF
+        assert_eq!(FileType::from_magic_bytes(&[0xFF, 0x7F, 0x00, 0x00]), FileType::Unknown); // bad MPEG sync
+        assert_eq!(FileType::from_magic_bytes(b"random bytes"), FileType::Unknown);
+    }
+
+    #[test]
+    fn detect_falls_back_to_extension_for_missing_file() {
+        assert_eq!(FileType::detect("/nonexistent/path/audio.wav"), FileType::WAV);
+        assert_eq!(FileType::detect("/nonexistent/path/audio.flac"), FileType::FLAC);
+        assert_eq!(FileType::detect("/nonexistent/path/audio.xyz"), FileType::Unknown);
+    }
 }

@@ -71,7 +71,7 @@ impl<WS> WriteSeek for WS where WS: Write + Seek {}
 pub fn peek_native_type<P: AsRef<Path>>(fp: P) -> AudioIOResult<ValidatedSampleType> {
     let path = fp.as_ref();
 
-    match FileType::from_path(path) {
+    match FileType::detect(path) {
         FileType::WAV => {
             #[cfg(not(feature = "wav"))]
             return Err(crate::error::AudioIOError::missing_feature(
@@ -119,7 +119,7 @@ pub fn peek_native_type<P: AsRef<Path>>(fp: P) -> AudioIOResult<ValidatedSampleT
 pub fn info<P: AsRef<Path>>(fp: P) -> AudioIOResult<BaseAudioInfo> {
     let path = fp.as_ref();
 
-    match FileType::from_path(path) {
+    match FileType::detect(path) {
         FileType::WAV => {
             #[cfg(not(feature = "wav"))]
             return Err(crate::error::AudioIOError::missing_feature(
@@ -164,7 +164,7 @@ where
 {
     let path = fp.as_ref();
 
-    match FileType::from_path(path) {
+    match FileType::detect(path) {
         FileType::WAV => {
             #[cfg(not(feature = "wav"))]
             return Err(crate::error::AudioIOError::missing_feature(
@@ -246,7 +246,7 @@ where
 {
     let path = fp.as_ref();
 
-    match FileType::from_path(path) {
+    match FileType::detect(path) {
         FileType::WAV => {
             let file = File::open(path)?;
             let reader = BufReader::new(file);
@@ -316,7 +316,7 @@ where
     P: AsRef<Path>,
 {
     let path = fp.as_ref();
-    match FileType::from_path(path) {
+    match FileType::detect(path) {
         FileType::FLAC => {
             let file = File::open(path)?;
             let reader = BufReader::new(file);
@@ -385,7 +385,7 @@ where
 {
     let path = fp.as_ref();
 
-    match FileType::from_path(path) {
+    match FileType::detect(path) {
         FileType::WAV => {
             #[cfg(not(feature = "wav"))]
             return Err(crate::error::AudioIOError::missing_feature(
@@ -762,7 +762,7 @@ where
 {
     let path = fp.as_ref();
 
-    match FileType::from_path(path) {
+    match FileType::detect(path) {
         FileType::WAV => {
             #[cfg(not(feature = "wav"))]
             return Err(crate::error::AudioIOError::missing_feature(
