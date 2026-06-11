@@ -106,6 +106,12 @@ pub trait ChunkAccessor {
 }
 
 pub const RIFF_CHUNK: ChunkID = ChunkID::new(b"RIFF");
+/// 64-bit RIFF variant (EBU Tech 3306) for WAV files larger than 4 GiB.
+pub const RF64_CHUNK: ChunkID = ChunkID::new(b"RF64");
+/// ITU-R BS.2088 successor to RF64; identical layout, different form id.
+pub const BW64_CHUNK: ChunkID = ChunkID::new(b"BW64");
+/// Mandatory first chunk of an RF64/BW64 file carrying the 64-bit sizes.
+pub const DS64_CHUNK: ChunkID = ChunkID::new(b"ds64");
 pub const WAVE_CHUNK: ChunkID = ChunkID::new(b"WAVE");
 pub const FMT_CHUNK: ChunkID = ChunkID::new(b"fmt ");
 pub const DATA_CHUNK: ChunkID = ChunkID::new(b"data");

@@ -21,7 +21,10 @@ use crate::{
     types::{BaseAudioInfo, FileType, ValidatedSampleType},
     wav::{
         FormatCode,
-        chunks::{ChunkDesc, ChunkID, DATA_CHUNK, FMT_CHUNK, RIFF_CHUNK, WAVE_CHUNK},
+        chunks::{
+            BW64_CHUNK, ChunkDesc, ChunkID, DATA_CHUNK, DS64_CHUNK, FMT_CHUNK, RF64_CHUNK, RIFF_CHUNK, WAVE_CHUNK,
+        },
+        ds64::Ds64,
         fmt::FmtChunk,
         wav_file::WavFileInfo,
     },
@@ -149,12 +152,13 @@ where
             )
         })?;
         let riff = ChunkID::new(&riff_bytes);
+        let is_rf64 = riff == RF64_CHUNK || riff == BW64_CHUNK;
 
-        if riff != RIFF_CHUNK {
+        if riff != RIFF_CHUNK && !is_rf64 {
             return Err(AudioIOError::corrupted_data(
                 "Data does not start with RIFF header",
                 format!("Found: {riff:?}"),
-                ErrorPosition::new(0).with_description("RIFF header at file start"),
+                ErrorPosition::new(0).with_description("RIFF/RF64/BW64 header at file start"),
             ));
         }
 
@@ -201,6 +205,8 @@ where
 
         let mut fmt_chunk_data: Option<Vec<u8>> = None;
         let mut data_chunk_desc: Option<ChunkDesc> = None;
+        // RF64/BW64: true 64-bit sizes from the mandatory ds64 chunk.
+        let mut ds64: Option<Ds64> = None;
         let mut offset = 12usize;
 
         // Parse chunks from buffer, seeking for more data if needed
@@ -226,13 +232,20 @@ where
                 AudioIOError::corrupted_data("Cannot read chunk ID", "Insufficient data", ErrorPosition::new(offset))
             })?);
 
-            let size = u32::from_le_bytes(header_buf[offset + 4..offset + 8].try_into().map_err(|_| {
+            let declared_size_32 = u32::from_le_bytes(header_buf[offset + 4..offset + 8].try_into().map_err(|_| {
                 AudioIOError::corrupted_data(
                     "Cannot read chunk size",
                     "Insufficient data",
                     ErrorPosition::new(offset + 4),
                 )
-            })?) as usize;
+            })?);
+
+            // In an RF64/BW64 file, a chunk declaring 0xFFFFFFFF stores its true
+            // 64-bit size in the ds64 chunk (the data chunk always; others via table).
+            let size = match &ds64 {
+                Some(ds) => usize::try_from(ds.resolve(id, declared_size_32)).unwrap_or(usize::MAX),
+                None => declared_size_32 as usize,
+            };
 
             let padded = size + (size & 1);
             let header_and_data_size = 8 + padded;
@@ -243,6 +256,29 @@ where
                 logical_size: size,
                 total_size: header_and_data_size,
             });
+
+            // Handle ds64 chunk (RF64/BW64) - need its content before any chunk
+            // that declares the 0xFFFFFFFF size placeholder can be resolved
+            if is_rf64 && id == DS64_CHUNK {
+                let body_start = offset + 8;
+                let body_end = body_start + size;
+
+                while body_end > header_buf.len() {
+                    let current_len = header_buf.len();
+                    header_buf.resize(current_len + 4096, 0);
+                    let additional = reader.read(&mut header_buf[current_len..])?;
+                    if additional == 0 {
+                        return Err(AudioIOError::corrupted_data(
+                            "Unexpected EOF reading ds64 chunk",
+                            format!("Need {} bytes, have {}", body_end, header_buf.len()),
+                            ErrorPosition::new(body_start),
+                        ));
+                    }
+                    header_buf.truncate(current_len + additional);
+                }
+
+                ds64 = Some(Ds64::from_bytes(&header_buf[body_start..body_end])?);
+            }
 
             // Handle fmt chunk - need to read its content
             if id == FMT_CHUNK {

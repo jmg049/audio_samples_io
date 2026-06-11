@@ -4,6 +4,7 @@ pub mod chunks;
 pub mod companding;
 pub mod cue;
 pub mod data;
+pub mod ds64;
 pub mod error;
 pub mod fact;
 pub mod fmt;
@@ -20,6 +21,7 @@ pub use bext::BextChunk;
 pub use companding::Companding;
 pub use cue::cue_chunk_bytes;
 pub use cue::{CueChunk, CuePoint};
+pub use ds64::Ds64;
 pub use fact::FactChunk;
 pub use header::{
     build_wav_header, build_wav_header_infinite, needs_extensible, wav_data_len, wav_file_len, wav_header_len,

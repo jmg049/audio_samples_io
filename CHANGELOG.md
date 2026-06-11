@@ -17,6 +17,7 @@ All notable changes to this project will be documented in this file.
 - Docs: FLAC streaming examples now compile — they import the `AudioStreamRead`/`AudioStreamReader` traits their method calls require
 
 ### Added
+- WAV: read RF64/BW64 files (the 64-bit RIFF variants used for >4 GiB broadcast audio) — all read paths resolve the `0xFFFFFFFF` size placeholders through the `ds64` chunk
 - Format detection: `read()`, `info()`, `peek_native_type()`, `open()`, and the streamed-open functions now sniff the file's magic bytes (`FileType::from_magic_bytes`/`FileType::detect`) and fall back to the extension, so mismatched or missing extensions no longer break reads
 - FLAC: streaming writer (`create_streamed_flac`/`create_streamed_flac_writer`) for incremental, low-memory encoding, plus a format-agnostic `StreamedAudioWriter` so `create_streamed` selects WAV or FLAC by file extension (`create_streamed_with` for an explicit format)
 - WAV: decode mu-law/a-law (G.711) and Microsoft/IMA ADPCM to 16-bit linear PCM; reader also accepts 18-byte PCM `fmt ` headers

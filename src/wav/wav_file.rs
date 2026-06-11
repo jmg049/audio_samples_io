@@ -27,11 +27,12 @@ use crate::{
         Companding, FormatCode,
         bext::BextChunk,
         chunks::{
-            BEXT_CHUNK, CUE_CHUNK, ChunkDesc, ChunkID, DATA_CHUNK, FACT_CHUNK, FMT_CHUNK, LIST_CHUNK, RIFF_CHUNK,
-            SMPL_CHUNK, WAVE_CHUNK,
+            BEXT_CHUNK, BW64_CHUNK, CUE_CHUNK, ChunkDesc, ChunkID, DATA_CHUNK, DS64_CHUNK, FACT_CHUNK, FMT_CHUNK,
+            LIST_CHUNK, RF64_CHUNK, RIFF_CHUNK, SMPL_CHUNK, WAVE_CHUNK,
         },
         cue::{CueChunk, CuePoint, cue_chunk_bytes},
         data::DataChunk,
+        ds64::Ds64,
         error::WavError,
         fact::FactChunk,
         fmt::FmtChunk,
@@ -334,25 +335,23 @@ impl<'a> AudioFile for WavFile<'a> {
         }
 
         // 1. Parse the RIFF header + File size + WAVE identifier
-        // Assume the first 12 bytes are the RIFF header
+        // Assume the first 12 bytes are the RIFF header. RF64/BW64 are the 64-bit
+        // variants of RIFF (EBU Tech 3306 / ITU-R BS.2088): same layout, but the
+        // 32-bit size fields hold 0xFFFFFFFF and the true sizes live in a `ds64`
+        // chunk that must directly follow the WAVE identifier.
         let riff = ChunkID::new(bytes[0..4].try_into().expect("Guaranteed to be at least 12 bytes now"));
+        let is_rf64 = riff == RF64_CHUNK || riff == BW64_CHUNK;
 
-        if riff != RIFF_CHUNK {
+        if riff != RIFF_CHUNK && !is_rf64 {
             return Err(AudioIOError::corrupted_data(
                 "Data does not start with RIFF header",
                 format!("Found: {riff:?}"),
-                ErrorPosition::new(0).with_description("RIFF header at file start"),
+                ErrorPosition::new(0).with_description("RIFF/RF64/BW64 header at file start"),
             ));
         }
 
-        let declared_file_size =
-            u32::from_le_bytes(bytes[4..8].try_into().expect("Guaranteed to be at least 12 bytes now")) as usize;
-
-        // Streaming producers (ffmpeg, live capture) cannot know the final length up front and
-        // write a placeholder RIFF size — commonly 0xFFFFFFFF — that overruns the real byte count.
-        // Such files play fine everywhere else, so we tolerate them: clamp the declared size to the
-        // bytes actually present rather than rejecting the file outright.
-        let file_size = declared_file_size.min(bytes.len().saturating_sub(8));
+        let declared_file_size_32 =
+            u32::from_le_bytes(bytes[4..8].try_into().expect("Guaranteed to be at least 12 bytes now"));
 
         let wave = ChunkID::new(bytes[8..12].try_into().expect("Guaranteed to be at least 12 bytes now"));
 
@@ -363,6 +362,33 @@ impl<'a> AudioFile for WavFile<'a> {
                 ErrorPosition::new(8).with_description("WAVE identifier after RIFF header"),
             ));
         }
+
+        // RF64/BW64: the mandatory ds64 chunk is the first chunk after WAVE.
+        let ds64 = if is_rf64 {
+            if bytes.len() < 20 || ChunkID::new(bytes[12..16].try_into().expect("4-byte slice")) != DS64_CHUNK {
+                return Err(AudioIOError::corrupted_data(
+                    "RF64/BW64 file is missing the mandatory ds64 chunk",
+                    "The first chunk after WAVE must be ds64",
+                    ErrorPosition::new(12).with_description("ds64 chunk header"),
+                ));
+            }
+            let ds64_size = u32::from_le_bytes(bytes[16..20].try_into().expect("4-byte slice")) as usize;
+            let end = (20 + ds64_size).min(bytes.len());
+            Some(Ds64::from_bytes(&bytes[20..end])?)
+        } else {
+            None
+        };
+
+        let declared_file_size = match &ds64 {
+            Some(ds) if declared_file_size_32 == u32::MAX => usize::try_from(ds.riff_size).unwrap_or(usize::MAX),
+            _ => declared_file_size_32 as usize,
+        };
+
+        // Streaming producers (ffmpeg, live capture) cannot know the final length up front and
+        // write a placeholder RIFF size — commonly 0xFFFFFFFF — that overruns the real byte count.
+        // Such files play fine everywhere else, so we tolerate them: clamp the declared size to the
+        // bytes actually present rather than rejecting the file outright.
+        let file_size = declared_file_size.min(bytes.len().saturating_sub(8));
 
         let mut chunks: Vec<ChunkDesc> = Vec::new();
         chunks.push(ChunkDesc {
@@ -396,7 +422,13 @@ impl<'a> AudioFile for WavFile<'a> {
                     ErrorPosition::new(offset + 4).with_description("chunk size bytes"),
                 )
             })?;
-            let declared_size = u32::from_le_bytes(size_bytes) as usize;
+            let declared_size_32 = u32::from_le_bytes(size_bytes);
+            // In an RF64/BW64 file, a chunk declaring 0xFFFFFFFF stores its true
+            // 64-bit size in the ds64 chunk (the data chunk always; others via table).
+            let declared_size = match &ds64 {
+                Some(ds) => usize::try_from(ds.resolve(id, declared_size_32)).unwrap_or(usize::MAX),
+                None => declared_size_32 as usize,
+            };
 
             // Bytes physically available for this chunk's body (after its 8-byte header).
             let avail = bytes.len() - (offset + 8);
@@ -513,10 +545,11 @@ pub fn parse_wav_header_streaming<R: Read + Seek>(reader: &mut R) -> AudioIOResu
     // ---- RIFF + WAVE header (12 bytes) ----
     let mut buf12 = [0u8; 12];
     reader.read_exact(&mut buf12).map_err(AudioIOError::from)?;
-    if &buf12[0..4] != RIFF_CHUNK.as_bytes() {
+    let is_rf64 = &buf12[0..4] == b"RF64" || &buf12[0..4] == b"BW64";
+    if &buf12[0..4] != RIFF_CHUNK.as_bytes() && !is_rf64 {
         return Err(AudioIOError::corrupted_data_simple(
             "Not a RIFF file",
-            "First 4 bytes are not 'RIFF'",
+            "First 4 bytes are not 'RIFF', 'RF64', or 'BW64'",
         ));
     }
     if &buf12[8..12] != b"WAVE" {
@@ -532,6 +565,8 @@ pub fn parse_wav_header_streaming<R: Read + Seek>(reader: &mut R) -> AudioIOResu
     let mut have_fmt = false;
     let mut data_byte_offset: Option<u64> = None;
     let mut data_byte_count: Option<usize> = None;
+    // RF64/BW64: true 64-bit data size from the mandatory ds64 chunk.
+    let mut ds64_data_size: Option<u64> = None;
 
     let mut chunk_hdr = [0u8; 8];
 
@@ -563,9 +598,30 @@ pub fn parse_wav_header_streaming<R: Read + Seek>(reader: &mut R) -> AudioIOResu
             }
             fmt_size = size;
             have_fmt = true;
+        } else if is_rf64 && id == b"ds64" {
+            // Read just the fixed 28-byte prefix (we only need the data size here)
+            // and skip the chunk-size table that may follow it.
+            let mut ds64_buf = [0u8; crate::wav::ds64::DS64_MIN_BODY_LEN];
+            if size < ds64_buf.len() {
+                return Err(AudioIOError::corrupted_data_simple(
+                    "ds64 chunk too small",
+                    format!("Expected at least {} bytes, got {size}", ds64_buf.len()),
+                ));
+            }
+            reader.read_exact(&mut ds64_buf).map_err(AudioIOError::from)?;
+            ds64_data_size = Some(u64::from_le_bytes(ds64_buf[8..16].try_into().expect("8-byte slice")));
+            let remaining = padded - ds64_buf.len();
+            reader
+                .seek(SeekFrom::Current(remaining as i64))
+                .map_err(AudioIOError::from)?;
         } else if id == b"data" {
             // Current stream position is now at the first byte of audio data.
             let offset = reader.stream_position().map_err(AudioIOError::from)?;
+            // RF64/BW64 store the true 64-bit data size in ds64 and 0xFFFFFFFF here.
+            let size = match ds64_data_size {
+                Some(ds64_size) if size == u32::MAX as usize => usize::try_from(ds64_size).unwrap_or(usize::MAX),
+                _ => size,
+            };
             // Streaming encoders write a placeholder data size (often 0xFFFFFFFF) when the final
             // length is unknown. Clamp the declared size to the bytes actually present so the
             // reported sample count stays accurate instead of astronomically large.
