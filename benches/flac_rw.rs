@@ -14,7 +14,10 @@ use audio_samples_io::{
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use ndarray::Array2;
 use symphonia::core::{
-    codecs::DecoderOptions, formats::FormatOptions, io::MediaSourceStream, meta::MetadataOptions, probe::Hint,
+    codecs::audio::AudioDecoderOptions,
+    formats::{FormatOptions, TrackType, probe::Hint},
+    io::MediaSourceStream,
+    meta::MetadataOptions,
 };
 
 const SAMPLE_RATES: &[u32] = &[44_100, 96_000];
@@ -129,21 +132,24 @@ fn bench_symphonia_read(
                 let mut hint = Hint::new();
                 hint.with_extension("flac");
                 let mut format = symphonia::default::get_probe()
-                    .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
-                    .expect("probe flac")
-                    .format;
-                let track_id = format.default_track().expect("track").id;
+                    .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
+                    .expect("probe flac");
+                let track = format.default_track(TrackType::Audio).expect("track");
+                let track_id = track.id;
+                let params = track
+                    .codec_params
+                    .as_ref()
+                    .and_then(|p| p.audio())
+                    .expect("audio codec params")
+                    .clone();
                 let mut decoder = symphonia::default::get_codecs()
-                    .make(
-                        &format.default_track().expect("track").codec_params,
-                        &DecoderOptions::default(),
-                    )
+                    .make_audio_decoder(&params, &AudioDecoderOptions::default())
                     .expect("make decoder");
                 loop {
                     let packet = match format.next_packet() {
-                        Ok(p) if p.track_id() == track_id => p,
-                        Ok(_) => continue,
-                        Err(_) => break,
+                        Ok(Some(p)) if p.track_id == track_id => p,
+                        Ok(Some(_)) => continue,
+                        Ok(None) | Err(_) => break,
                     };
                     black_box(decoder.decode(&packet).expect("decode"));
                 }
@@ -196,7 +202,7 @@ where
             frames_per_channel = Some(len);
             planar.reserve(len * channels);
         }
-        planar.extend(arr.into_iter());
+        planar.extend(arr);
     }
 
     let frames = frames_per_channel.expect("at least one channel");

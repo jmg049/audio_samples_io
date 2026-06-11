@@ -243,6 +243,7 @@ const fn flac_bits_for(sample_type: ValidatedSampleType) -> u8 {
 ///
 /// Takes `writer` and `accum` as separate borrows so the caller can pass disjoint fields
 /// of `self`.
+#[allow(clippy::too_many_arguments)]
 fn encode_and_write_block<W: Write>(
     writer: &mut W,
     accum: &[Vec<i32>],

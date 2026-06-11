@@ -559,6 +559,7 @@ pub(crate) fn decode_frame_into_scratch(
 /// * `max_partition_order` - Maximum Rice partition order
 /// * `try_mid_side` - Whether to try mid-side stereo
 /// * `exhaustive_rice` - Use exhaustive Rice parameter search
+#[allow(clippy::too_many_arguments)]
 pub fn encode_frame(
     samples: &[i32],
     channels: u8,
@@ -638,8 +639,8 @@ fn encode_frame_header(
 
     // Extra block size bytes
     match bs_extra {
-        1 => writer.write_bits((block_size - 1) as u32, 8),
-        2 => writer.write_bits((block_size - 1) as u32, 16),
+        1 => writer.write_bits(block_size - 1, 8),
+        2 => writer.write_bits(block_size - 1, 16),
         _ => {},
     }
 
@@ -694,6 +695,7 @@ fn find_best_stereo_mode(left: &[i32], right: &[i32]) -> (ChannelAssignment, Vec
 /// This avoids the interleave→deinterleave round-trip of `encode_frame`.
 /// For independent channels the input slices are encoded directly without
 /// allocating intermediate owned Vecs.
+#[allow(clippy::too_many_arguments)]
 pub fn encode_frame_from_channels(
     channel_samples: &[&[i32]],
     bits_per_sample: u8,
@@ -865,8 +867,8 @@ mod tests {
     #[test]
     fn test_stereo_decorrelation_roundtrip() {
         // Create test stereo data
-        let left: Vec<i32> = (0..100).map(|i| (i * 100) as i32).collect();
-        let right: Vec<i32> = (0..100).map(|i| (i * 50 + 25) as i32).collect();
+        let left: Vec<i32> = (0..100).map(|i| i * 100).collect();
+        let right: Vec<i32> = (0..100).map(|i| i * 50 + 25).collect();
 
         // Interleave
         let mut interleaved = Vec::with_capacity(200);
@@ -1069,8 +1071,8 @@ mod tests {
     #[test]
     fn test_left_side_decorrelation_roundtrip() {
         // Simple ascending samples for predictable encoding
-        let left: Vec<i32> = (0..100).map(|i| i as i32 * 10).collect();
-        let right: Vec<i32> = (0..100).map(|i| i as i32 * 10 + 5).collect();
+        let left: Vec<i32> = (0..100).map(|i| i * 10).collect();
+        let right: Vec<i32> = (0..100).map(|i| i * 10 + 5).collect();
 
         // Manually compute left-side encoded form
         let side: Vec<i32> = left.iter().zip(&right).map(|(&l, &r)| l - r).collect();
@@ -1106,8 +1108,8 @@ mod tests {
     /// Right-side stereo decorrelation roundtrip.
     #[test]
     fn test_right_side_decorrelation_roundtrip() {
-        let left: Vec<i32> = (0..50).map(|i| i as i32 * 20).collect();
-        let right: Vec<i32> = (0..50).map(|i| i as i32 * 20 + 10).collect();
+        let left: Vec<i32> = (0..50).map(|i| i * 20).collect();
+        let right: Vec<i32> = (0..50).map(|i| i * 20 + 10).collect();
         let side: Vec<i32> = left.iter().zip(&right).map(|(&l, &r)| l - r).collect();
 
         let frame = Frame {

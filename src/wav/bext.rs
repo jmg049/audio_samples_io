@@ -149,6 +149,7 @@ fn fixed_str(bytes: &[u8], start: usize, len: usize) -> String {
 mod tests {
     use super::*;
 
+    #[allow(clippy::too_many_arguments)]
     fn make_bext(
         description: &str,
         originator: &str,

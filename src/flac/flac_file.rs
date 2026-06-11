@@ -68,10 +68,10 @@ impl Display for FlacFileInfo {
             writeln!(f, "Frame Size: {}-{} bytes", self.min_frame_size, self.max_frame_size)?;
         }
         writeln!(f, "Metadata Blocks: {:?}", self.metadata_blocks)?;
-        if let Some(md5) = &self.md5_signature {
-            if md5.iter().any(|&b| b != 0) {
-                writeln!(f, "MD5: {:02x?}", md5)?;
-            }
+        if let Some(md5) = &self.md5_signature
+            && md5.iter().any(|&b| b != 0)
+        {
+            writeln!(f, "MD5: {:02x?}", md5)?;
         }
         Ok(())
     }
@@ -1286,7 +1286,7 @@ mod tests {
         // 4 channels with distinct DC values for easy verification
         let mut flat: Vec<i16> = Vec::with_capacity(4 * n);
         for ch in 0..4usize {
-            flat.extend(std::iter::repeat((ch as i16 + 1) * 1000).take(n));
+            flat.extend(std::iter::repeat_n((ch as i16 + 1) * 1000, n));
         }
         let arr = ndarray::Array2::from_shape_vec((4, n), flat).unwrap();
         let audio: AudioSamples<'static, i16> = AudioSamples::new_multi_channel(arr, sr).unwrap();
@@ -1305,9 +1305,9 @@ mod tests {
 
         // Each channel should have its distinct constant value (DC audio decoded exactly)
         let back_iv: Vec<i16> = back.to_interleaved_vec().into_iter().collect();
-        for ch in 0..4usize {
+        for (ch, &got) in back_iv.iter().take(4).enumerate() {
             let expected = (ch as i16 + 1) * 1000;
-            let got = back_iv[ch]; // first frame
+            // first frame
             assert_eq!(got, expected, "channel {ch} first sample mismatch");
         }
 
@@ -1675,7 +1675,7 @@ mod tests {
     #[test]
     fn test_lib_open_wave_flac() {
         let file = crate::open("resources/test.flac").expect("lib::open");
-        assert!(file.len() > 0, "opened file should have non-zero length");
+        assert!(!file.is_empty(), "opened file should have non-zero length");
     }
 
     // =========================================================================

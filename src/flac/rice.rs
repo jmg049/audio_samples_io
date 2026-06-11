@@ -805,7 +805,7 @@ mod tests {
 
     #[test]
     fn test_partition_order() {
-        let residuals: Vec<i32> = (0..4096).map(|i| ((i % 10) as i32) - 5).collect();
+        let residuals: Vec<i32> = (0..4096).map(|i| (i % 10) - 5).collect();
         let block_size = 4096;
         let predictor_order = 4;
 

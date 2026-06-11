@@ -33,8 +33,8 @@ impl SubframeType {
         match value {
             0b000000 => Ok(SubframeType::Constant),
             0b000001 => Ok(SubframeType::Verbatim),
-            0b001000..=0b001100 => Ok(SubframeType::Fixed((value & 0x07) as u8)),
-            0b100000..=0b111111 => Ok(SubframeType::Lpc(((value & 0x1F) + 1) as u8)),
+            0b001000..=0b001100 => Ok(SubframeType::Fixed(value & 0x07)),
+            0b100000..=0b111111 => Ok(SubframeType::Lpc((value & 0x1F) + 1)),
             _ => Err(FlacError::InvalidSubframeType(value)),
         }
     }
@@ -474,6 +474,7 @@ pub struct EncodedSubframe {
 }
 
 /// Write a FIXED subframe (warmup + residuals) directly to `writer`.
+#[allow(clippy::too_many_arguments)]
 fn write_fixed_into(
     writer: &mut BitWriter,
     samples: &[i32],
@@ -553,6 +554,7 @@ fn write_lpc_into(
 /// Used by the sequential frame encoder to avoid per-subframe `BitWriter` allocations.
 /// Returns the `SubframeType` selected.
 #[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_subframe_into(
     writer: &mut BitWriter,
     samples: &[i32],
@@ -674,23 +676,23 @@ pub(crate) fn encode_subframe_into(
         return Ok(SubframeType::Verbatim);
     }
 
-    if lpc_est <= fixed_est {
-        if let Some((order, qlp_coeffs, qlp_shift, residuals, plan, _)) = lpc_state {
-            write_lpc_into(
-                writer,
-                effective_samples,
-                effective_bits,
-                wasted_bits,
-                order,
-                &qlp_coeffs,
-                qlp_shift,
-                qlp_precision,
-                &residuals,
-                &plan,
-                block_size,
-            )?;
-            return Ok(SubframeType::Lpc(order as u8));
-        }
+    if lpc_est <= fixed_est
+        && let Some((order, qlp_coeffs, qlp_shift, residuals, plan, _)) = lpc_state
+    {
+        write_lpc_into(
+            writer,
+            effective_samples,
+            effective_bits,
+            wasted_bits,
+            order,
+            &qlp_coeffs,
+            qlp_shift,
+            qlp_precision,
+            &residuals,
+            &plan,
+            block_size,
+        )?;
+        return Ok(SubframeType::Lpc(order as u8));
     }
 
     if let Some((order, residuals, plan, _)) = fixed_state {
@@ -798,7 +800,7 @@ mod tests {
     }
 
     fn encode_verbatim(samples: &[i32], bits_per_sample: u8, wasted_bits: u8) -> EncodedSubframe {
-        let capacity = (samples.len() * bits_per_sample as usize + 7) / 8 + 8;
+        let capacity = (samples.len() * bits_per_sample as usize).div_ceil(8) + 8;
         let mut writer = BitWriter::with_capacity(capacity);
         SubframeHeader {
             subframe_type: SubframeType::Verbatim,

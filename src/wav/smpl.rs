@@ -152,6 +152,7 @@ fn u32_at(bytes: &[u8], offset: usize) -> u32 {
 mod tests {
     use super::*;
 
+    #[allow(clippy::too_many_arguments)]
     fn make_smpl_bytes(
         manufacturer: u32,
         product: u32,

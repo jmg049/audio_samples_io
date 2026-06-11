@@ -18,7 +18,8 @@ fn main() {
     // warm up
     for _ in 0..200 {
         let w = Cursor::new(Vec::with_capacity(32768));
-        black_box(write_flac(w, &audio, CompressionLevel::DEFAULT).unwrap());
+        let _: () = write_flac(w, &audio, CompressionLevel::DEFAULT).unwrap();
+        black_box(());
     }
 
     // measure
@@ -26,7 +27,8 @@ fn main() {
     let t0 = Instant::now();
     for _ in 0..iters {
         let w = Cursor::new(Vec::with_capacity(32768));
-        black_box(write_flac(w, &audio, CompressionLevel::DEFAULT).unwrap());
+        let _: () = write_flac(w, &audio, CompressionLevel::DEFAULT).unwrap();
+        black_box(());
     }
     let elapsed = t0.elapsed();
 

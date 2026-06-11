@@ -393,10 +393,10 @@ impl SeekTable {
             if point.is_placeholder() {
                 continue;
             }
-            if let Some(prev) = prev_sample {
-                if point.sample_number <= prev {
-                    return Err(FlacError::SeekTableNotSorted);
-                }
+            if let Some(prev) = prev_sample
+                && point.sample_number <= prev
+            {
+                return Err(FlacError::SeekTableNotSorted);
             }
             if point.sample_number > total_samples {
                 return Err(FlacError::InvalidSeekPoint {

@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn test_read_samples_multi_channel_shape() {
         let n = 8;
-        let channels: Vec<Vec<i32>> = (0..6).map(|ch| vec![(ch as i32) * 100; n]).collect();
+        let channels: Vec<Vec<i32>> = (0..6).map(|ch| vec![ch * 100; n]).collect();
         let audio = DecodedAudio::new(channels, 24, 96000);
 
         let sample_rate = NonZeroU32::new(96000).unwrap();
