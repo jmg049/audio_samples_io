@@ -198,7 +198,7 @@ where
         writer.write_all(&sample_rate.to_le_bytes())?;
         writer.write_all(&byte_rate.to_le_bytes())?;
         writer.write_all(&block_align.to_le_bytes())?;
-        writer.write_all(&bits_per_sample.get().to_le_bytes())?;
+        writer.write_all(&(bits_per_sample.get() as u16).to_le_bytes())?;
 
         Ok(())
     }
@@ -245,13 +245,13 @@ where
         writer.write_all(&sample_rate.to_le_bytes())?;
         writer.write_all(&byte_rate.to_le_bytes())?;
         writer.write_all(&block_align.to_le_bytes())?;
-        writer.write_all(&bits_per_sample.get().to_le_bytes())?;
+        writer.write_all(&(bits_per_sample.get() as u16).to_le_bytes())?;
 
         // Extension size (2 bytes)
         writer.write_all(&22u16.to_le_bytes())?;
 
         // Extended format info (22 bytes)
-        writer.write_all(&bits_per_sample.get().to_le_bytes())?; // Valid bits per sample
+        writer.write_all(&(bits_per_sample.get() as u16).to_le_bytes())?; // Valid bits per sample
         writer.write_all(&channel_mask.to_le_bytes())?;
 
         // Sub-format GUID (16 bytes)

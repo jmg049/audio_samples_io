@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- WAV: streaming writer wrote an 8-byte bits-per-sample value into the 2-byte fmt chunk field, corrupting every file produced by `StreamedWavWriter`/`create_streamed`
 - WAV: tolerate real-world/streaming files — over-declared RIFF/`data` size fields (including the `0xFFFFFFFF` placeholder written by streaming encoders) are clamped to the bytes actually present, and a ragged `data` chunk decodes its whole frames instead of erroring
 - Streaming: `AudioStreamReader` now exposes `num_channels()`, allowing `Box<dyn AudioStreamReader>` callers to allocate read buffers without a separate `info()` call (eliminating the probe → drop → reopen two-pass latency)
 
