@@ -194,7 +194,9 @@ where
             id: riff,
             offset: 0,
             logical_size: riff_size as usize,
-            total_size: riff_size as usize + 8,
+            // Saturating: a streaming/unfinalised WAV stores 0xFFFFFFFF here,
+            // which overflows a 32-bit usize (wasm) on `+ 8`.
+            total_size: (riff_size as usize).saturating_add(8),
         });
         chunks.push(ChunkDesc {
             id: wave,
@@ -247,8 +249,9 @@ where
                 None => declared_size_32 as usize,
             };
 
-            let padded = size + (size & 1);
-            let header_and_data_size = 8 + padded;
+            // Saturating: a 0xFFFFFFFF placeholder size overflows 32-bit usize.
+            let padded = size.saturating_add(size & 1);
+            let header_and_data_size = padded.saturating_add(8);
 
             chunks.push(ChunkDesc {
                 id,
@@ -315,7 +318,7 @@ where
                 break;
             }
 
-            offset += header_and_data_size;
+            offset = offset.saturating_add(header_and_data_size);
         }
 
         // Validate we found required chunks
@@ -346,8 +349,18 @@ where
         let bytes_per_sample = bits_per_sample / 8;
 
         // Calculate frame info
-        let data_offset = (data_desc.offset + 8) as u64;
-        let data_size = data_desc.logical_size as u64;
+        let data_offset = (data_desc.offset as u64).saturating_add(8);
+        // A streaming/unfinalised WAV stores 0xFFFFFFFF as the data-chunk size
+        // placeholder; the real size is whatever bytes remain in the stream.
+        // Also clamp a declared size that overruns the available stream.
+        let stream_len = reader.seek(SeekFrom::End(0))?;
+        let avail = stream_len.saturating_sub(data_offset);
+        let declared = data_desc.logical_size as u64;
+        let data_size = if declared == u32::MAX as u64 || declared > avail {
+            avail
+        } else {
+            declared
+        };
         let total_samples = data_size as usize / sample_type.bytes_per_sample();
         let total_frames = total_samples / channels as usize;
 

@@ -314,7 +314,9 @@ impl<'a> AudioFile for WavFile<'a> {
             let mmap = unsafe { MmapOptions::new().map(&file)? };
             // Hint to the OS that pages will be accessed sequentially, enabling aggressive
             // read-ahead prefetching.  Best-effort: ignore errors (e.g. on platforms that
-            // don't support it).
+            // don't support it). `advise`/`Advice` are unix-only in memmap2, so gate it
+            // out on non-unix targets (e.g. wasm) where the call doesn't exist.
+            #[cfg(unix)]
             let _ = mmap.advise(memmap2::Advice::Sequential);
             AudioDataSource::MemoryMapped(mmap)
         } else {

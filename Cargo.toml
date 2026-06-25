@@ -14,7 +14,7 @@ categories = ["encoding", "multimedia", "science"]
 exclude = ["/examples/*", "/tests/*", "/target/*", "/benches/*", "*.wav", "*.flac"]
 
 [dependencies]
-audio_samples = { path = "../audio_samples" }
+audio_samples = "1.0.13"
 colored = { version = "3.0.0", optional = true }
 memmap2 = "0.9.10"
 thiserror = "2.0.18"
@@ -57,6 +57,7 @@ wav = []
 flac = []
 aiff = []
 resampling = ["audio_samples/resampling"]
+
 [[bench]]
 name = "wav_rw"
 harness = false
