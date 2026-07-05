@@ -413,7 +413,7 @@ where
         let frames_per_channel = samples.samples_per_channel();
 
         // Get interleaved samples and convert to target format
-        let interleaved = samples.data.as_interleaved_vec();
+        let interleaved = samples.data().as_interleaved_vec();
 
         let bytes_written =
             write_frames_converted::<T, W>(&mut self.writer, &interleaved, self.sample_type, self.channels)?;

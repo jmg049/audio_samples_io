@@ -1166,7 +1166,7 @@ where
     // float type (except I24 which uses a non-standard 4-byte in-memory representation).
     #[cfg(target_endian = "little")]
     if TypeId::of::<T>() != TypeId::of::<I24>()
-        && let AudioData::Multi(ref m) = audio.data
+        && let AudioData::Multi(m) = audio.data()
     {
         let view = m.as_view();
         if !view.is_standard_layout()
@@ -1196,7 +1196,7 @@ where
     // reads within each channel's tile window, sequential writes.
     #[cfg(target_endian = "little")]
     if TypeId::of::<T>() != TypeId::of::<I24>()
-        && let AudioData::Multi(ref m) = audio.data
+        && let AudioData::Multi(m) = audio.data()
     {
         let view = m.as_view();
         if view.is_standard_layout() {
@@ -1249,7 +1249,7 @@ where
 
     // Fallback: materialise an interleaved Vec then serialise sample-by-sample.
     // Handles I24, big-endian platforms, and non-contiguous array layouts.
-    let interleaved = audio.data.as_interleaved_vec();
+    let interleaved = audio.data().as_interleaved_vec();
     let total_samples = interleaved.len();
 
     const TARGET_CHUNK_BYTES: usize = 256 * 1024;
