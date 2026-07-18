@@ -161,3 +161,44 @@ fn streamed_aiff_reads_from_in_memory_cursor() {
     }
     assert_eq!(streamed.remaining_frames(), 0);
 }
+
+/// Wraps any `Read` but deliberately does *not* implement `Seek` — proves at
+/// the type level that `new_forward_only`/`read_frames_into` genuinely don't
+/// require it.
+struct ReadOnly<R>(R);
+
+impl<R: std::io::Read> std::io::Read for ReadOnly<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+#[test]
+fn streamed_aiff_works_over_read_only_source() {
+    // Long enough that the header scan's growing buffer overshoots well past
+    // SSND's 8-byte header into the sound data, exercising the `leftover`
+    // carry-forward path (the whole point of this test).
+    let sr = sample_rate!(44100);
+    let audio: AudioSamples<'static, f32> = sine_wave::<f32>(440.0, Duration::from_secs_f64(0.25), sr, 0.5);
+
+    let mut bytes = Vec::new();
+    audio_samples_io::aiff::write_aiff(&mut bytes, &audio).expect("write to memory");
+    let expected_total = audio.samples_per_channel().get();
+
+    let mut s = StreamedAiffFile::new_forward_only(ReadOnly(Cursor::new(bytes))).expect("new_forward_only");
+    assert_eq!(s.total_frames(), expected_total);
+
+    let mut buffer = AudioSamples::<f32>::zeros_mono(nzu!(1024), sr);
+    let mut frames_read = 0;
+    loop {
+        let n = s.read_frames_into(&mut buffer, nzu!(1024)).expect("read");
+        if n == 0 {
+            break;
+        }
+        frames_read += n;
+    }
+    assert_eq!(
+        frames_read, expected_total,
+        "Read-only decode must reach the same total as a Read+Seek source"
+    );
+}
