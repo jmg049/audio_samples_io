@@ -17,6 +17,7 @@ All notable changes to this project will be documented in this file.
 - Docs: FLAC streaming examples now compile — they import the `AudioStreamRead`/`AudioStreamReader` traits their method calls require
 
 ### Added
+- `StreamedAiffFile` (`aiff` feature): incremental AIFF/AIFF-C reader mirroring `StreamedWavFile`/`StreamedFlacFile` — parses `COMM`/`SSND` at construction, reads frames on demand, supports `seek_to_frame`/`reset`, and works over any `Read + Seek` source (not just files)
 - AIFF/AIFF-C support (`aiff` feature): read plain AIFF and the practical AIFF-C codecs (`sowt`, `fl32`, `fl64`); write AIFF for integer audio and AIFF-C for floats — verified against ffmpeg in both directions
 - WAV: read RF64/BW64 files (the 64-bit RIFF variants used for >4 GiB broadcast audio) — all read paths resolve the `0xFFFFFFFF` size placeholders through the `ds64` chunk
 - Format detection: `read()`, `info()`, `peek_native_type()`, `open()`, and the streamed-open functions now sniff the file's magic bytes (`FileType::from_magic_bytes`/`FileType::detect`) and fall back to the extension, so mismatched or missing extensions no longer break reads

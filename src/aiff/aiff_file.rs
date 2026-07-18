@@ -31,7 +31,7 @@ use crate::types::{AudioDataSource, BaseAudioInfo, FileType, OpenOptions, Valida
 
 /// How the SSND payload is encoded, derived from form type + compression code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SoundEncoding {
+pub(crate) enum SoundEncoding {
     /// Big-endian two's-complement integers (plain AIFF, `NONE`, `twos`, `in24`, `in32`).
     PcmBigEndian,
     /// Little-endian 16-bit integers (`sowt`).
@@ -40,6 +40,65 @@ enum SoundEncoding {
     Float32,
     /// Big-endian IEEE f64 (`fl64`).
     Float64,
+}
+
+/// Maps an AIFF-C compression code + `COMM` bit depth to the [`SoundEncoding`]
+/// and [`ValidatedSampleType`] used to decode `SSND`. Shared by [`AiffFile`] and
+/// [`crate::aiff::streaming::StreamedAiffFile`] so both readers agree on format
+/// support.
+pub(crate) fn resolve_encoding(
+    compression: &[u8; 4],
+    bits_per_sample: u16,
+) -> AudioIOResult<(SoundEncoding, ValidatedSampleType)> {
+    match compression {
+        b"NONE" | b"twos" | b"in24" | b"in32" => Ok((
+            SoundEncoding::PcmBigEndian,
+            match bits_per_sample {
+                1..=8 => ValidatedSampleType::U8,
+                9..=16 => ValidatedSampleType::I16,
+                17..=24 => ValidatedSampleType::I24,
+                25..=32 => ValidatedSampleType::I32,
+                other => {
+                    return Err(AudioIOError::unsupported_format(format!(
+                        "Unsupported AIFF bit depth: {other}"
+                    )));
+                },
+            },
+        )),
+        b"sowt" => Ok((SoundEncoding::PcmLittleEndian, ValidatedSampleType::I16)),
+        b"fl32" | b"FL32" => Ok((SoundEncoding::Float32, ValidatedSampleType::F32)),
+        b"fl64" | b"FL64" => Ok((SoundEncoding::Float64, ValidatedSampleType::F64)),
+        other => Err(AudioIOError::unsupported_format(format!(
+            "Unsupported AIFF-C compression type: {:?}",
+            String::from_utf8_lossy(other)
+        ))),
+    }
+}
+
+/// Decodes one big-endian AIFF sample (as found in `SSND`) to `T`. Shared by
+/// [`AiffFile`] and [`crate::aiff::streaming::StreamedAiffFile`].
+pub(crate) fn decode_sample_be<T>(sample: &[u8], encoding: SoundEncoding, sample_type: ValidatedSampleType) -> T
+where
+    T: StandardSample + 'static,
+{
+    match encoding {
+        SoundEncoding::PcmBigEndian => match sample_type {
+            // AIFF 8-bit is signed; shift to the crate's unsigned-u8 convention.
+            ValidatedSampleType::U8 => T::convert_from((sample[0] as i8 as i16 + 128) as u8),
+            ValidatedSampleType::I16 => T::convert_from(i16::from_be_bytes([sample[0], sample[1]])),
+            ValidatedSampleType::I24 => {
+                let wide = i32::from_be_bytes([sample[0], sample[1], sample[2], 0]) >> 8;
+                T::convert_from(I24::wrapping_from_i32(wide))
+            },
+            ValidatedSampleType::I32 => {
+                T::convert_from(i32::from_be_bytes([sample[0], sample[1], sample[2], sample[3]]))
+            },
+            _ => unreachable!("PCM encoding never maps to float sample types"),
+        },
+        SoundEncoding::PcmLittleEndian => T::convert_from(i16::from_le_bytes([sample[0], sample[1]])),
+        SoundEncoding::Float32 => T::convert_from(f32::from_be_bytes([sample[0], sample[1], sample[2], sample[3]])),
+        SoundEncoding::Float64 => T::convert_from(f64::from_be_bytes(sample.try_into().expect("8-byte slice"))),
+    }
 }
 
 /// AIFF-specific metadata returned by [`AudioFileMetadata::specific_info`].
@@ -200,31 +259,7 @@ impl<'a> AiffFile<'a> {
             AudioIOError::corrupted_data_simple("Invalid sample rate", format!("COMM declares {rate} Hz"))
         })?;
 
-        let (encoding, sample_type) = match &compression {
-            b"NONE" | b"twos" | b"in24" | b"in32" => (
-                SoundEncoding::PcmBigEndian,
-                match bits_per_sample {
-                    1..=8 => ValidatedSampleType::U8,
-                    9..=16 => ValidatedSampleType::I16,
-                    17..=24 => ValidatedSampleType::I24,
-                    25..=32 => ValidatedSampleType::I32,
-                    other => {
-                        return Err(AudioIOError::unsupported_format(format!(
-                            "Unsupported AIFF bit depth: {other}"
-                        )));
-                    },
-                },
-            ),
-            b"sowt" => (SoundEncoding::PcmLittleEndian, ValidatedSampleType::I16),
-            b"fl32" | b"FL32" => (SoundEncoding::Float32, ValidatedSampleType::F32),
-            b"fl64" | b"FL64" => (SoundEncoding::Float64, ValidatedSampleType::F64),
-            other => {
-                return Err(AudioIOError::unsupported_format(format!(
-                    "Unsupported AIFF-C compression type: {:?}",
-                    String::from_utf8_lossy(other)
-                )));
-            },
-        };
+        let (encoding, sample_type) = resolve_encoding(&compression, bits_per_sample)?;
 
         // Clamp the frame count to the bytes actually present, mirroring the
         // WAV reader's tolerance of over-declared headers.
@@ -277,29 +312,7 @@ impl<'a> AiffFile<'a> {
             for frame in 0..frames {
                 let at = (frame * channels + ch) * bps;
                 let sample = &sound[at..at + bps];
-                let value: T = match self.encoding {
-                    SoundEncoding::PcmBigEndian => match self.sample_type {
-                        // AIFF 8-bit is signed; shift to the crate's unsigned-u8 convention.
-                        ValidatedSampleType::U8 => T::convert_from((sample[0] as i8 as i16 + 128) as u8),
-                        ValidatedSampleType::I16 => T::convert_from(i16::from_be_bytes([sample[0], sample[1]])),
-                        ValidatedSampleType::I24 => {
-                            let wide = i32::from_be_bytes([sample[0], sample[1], sample[2], 0]) >> 8;
-                            T::convert_from(I24::wrapping_from_i32(wide))
-                        },
-                        ValidatedSampleType::I32 => {
-                            T::convert_from(i32::from_be_bytes([sample[0], sample[1], sample[2], sample[3]]))
-                        },
-                        _ => unreachable!("PCM encoding never maps to float sample types"),
-                    },
-                    SoundEncoding::PcmLittleEndian => T::convert_from(i16::from_le_bytes([sample[0], sample[1]])),
-                    SoundEncoding::Float32 => {
-                        T::convert_from(f32::from_be_bytes([sample[0], sample[1], sample[2], sample[3]]))
-                    },
-                    SoundEncoding::Float64 => {
-                        T::convert_from(f64::from_be_bytes(sample.try_into().expect("8-byte slice")))
-                    },
-                };
-                out.push(value);
+                out.push(decode_sample_be(sample, self.encoding, self.sample_type));
             }
         }
 
