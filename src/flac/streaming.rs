@@ -365,7 +365,11 @@ impl<R: std::io::Read> StreamedFlacFile<R> {
     /// per-call `out`/`flat` staging vectors allocate). Available for any
     /// `Read` source — the [`AudioStreamRead`] trait impl below (`R: Read +
     /// Seek`) just delegates to this.
-    pub fn read_frames_into<T>(&mut self, buffer: &mut AudioSamples<'_, T>, frame_count: NonZeroUsize) -> AudioIOResult<usize>
+    pub fn read_frames_into<T>(
+        &mut self,
+        buffer: &mut AudioSamples<'_, T>,
+        frame_count: NonZeroUsize,
+    ) -> AudioIOResult<usize>
     where
         T: StandardSample + ConvertTo<T> + ConvertFrom<T> + 'static,
     {
@@ -817,6 +821,9 @@ mod tests {
             }
             frames_read += n;
         }
-        assert_eq!(frames_read, expected_total, "Read-only decode must reach the same total as a Read+Seek source");
+        assert_eq!(
+            frames_read, expected_total,
+            "Read-only decode must reach the same total as a Read+Seek source"
+        );
     }
 }

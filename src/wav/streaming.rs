@@ -362,7 +362,10 @@ fn parse_wav_header<R: std::io::Read>(reader: &mut R) -> AudioIOResult<WavHeader
     let data_offset = (data_desc.offset as u64).saturating_add(8);
     let declared_data_size = data_desc.logical_size as u64;
     let data_body_start = data_desc.offset + 8;
-    let overshoot = header_buf.get(data_body_start..).map(<[u8]>::to_vec).unwrap_or_default();
+    let overshoot = header_buf
+        .get(data_body_start..)
+        .map(<[u8]>::to_vec)
+        .unwrap_or_default();
 
     Ok(WavHeaderParse {
         chunks,
@@ -1197,6 +1200,9 @@ mod tests {
             }
             frames_read += n;
         }
-        assert_eq!(frames_read, expected_total, "Read-only decode must reach the same total as a Read+Seek source");
+        assert_eq!(
+            frames_read, expected_total,
+            "Read-only decode must reach the same total as a Read+Seek source"
+        );
     }
 }
