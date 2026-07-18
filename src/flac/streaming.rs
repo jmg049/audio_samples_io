@@ -83,10 +83,15 @@ pub struct StreamedFlacFile<R> {
 
 // ─── Constructors ────────────────────────────────────────────────────────────
 
-impl<R: ReadSeek> StreamedFlacFile<R> {
-    /// Create a new streaming FLAC reader from any `Read + Seek` source.
+impl<R: std::io::Read> StreamedFlacFile<R> {
+    /// Create a new streaming FLAC reader from any `Read` source.
     ///
-    /// The file path is set to `"<stream>"` for error messages.
+    /// The file path is set to `"<stream>"` for error messages. Note that
+    /// [`seek_to_frame`](AudioStreamReader::seek_to_frame)/[`reset`](AudioStreamReader::reset)
+    /// (and therefore the [`AudioStreamReader`]/[`AudioStreamRead`] trait
+    /// impls) additionally require `R: Seek` — a plain `Read` source (e.g. a
+    /// network transport) can still be constructed and decoded via the
+    /// inherent [`read_frames_into`](Self::read_frames_into), just not seek.
     pub fn new(reader: R) -> AudioIOResult<Self> {
         Self::new_with_path(reader, PathBuf::from("<stream>"))
     }
@@ -97,8 +102,42 @@ impl<R: ReadSeek> StreamedFlacFile<R> {
         self.stream_info.channels as u16
     }
 
+    /// Get the sample rate in Hz.
+    #[inline]
+    pub const fn sample_rate(&self) -> u32 {
+        self.stream_info.sample_rate
+    }
+
+    /// Get the current frame position.
+    #[inline]
+    pub const fn current_frame(&self) -> usize {
+        self.current_frame
+    }
+
+    /// Get the total number of frames in the stream.
+    #[inline]
+    pub const fn total_frames(&self) -> usize {
+        self.total_frames
+    }
+
+    /// Get the number of remaining frames from the current position.
+    #[inline]
+    pub const fn remaining_frames(&self) -> usize {
+        self.total_frames.saturating_sub(self.current_frame)
+    }
+
+    /// Nominal uncompressed bytes per inter-channel sample (frame).
+    #[inline]
+    pub const fn bytes_per_frame(&self) -> usize {
+        self.stream_info.channels as usize * self.stream_info.bits_per_sample.div_ceil(8) as usize
+    }
+
     /// Create a new streaming FLAC reader with an associated path.
     pub fn new_with_path(mut reader: R, file_path: PathBuf) -> AudioIOResult<Self> {
+        // Tracked manually (rather than via `Seek::stream_position`) so this
+        // constructor works for any `Read` source, not just `Read + Seek`.
+        let mut bytes_read: u64 = 0;
+
         // Read and validate the 4-byte FLAC marker.
         let mut marker = [0u8; 4];
         reader.read_exact(&mut marker).map_err(|_| {
@@ -107,6 +146,7 @@ impl<R: ReadSeek> StreamedFlacFile<R> {
                 "Could not read 4-byte FLAC marker",
             )
         })?;
+        bytes_read += 4;
         if marker != FLAC_MARKER {
             return Err(AudioIOError::FlacError(FlacError::invalid_marker(marker)));
         }
@@ -126,6 +166,7 @@ impl<R: ReadSeek> StreamedFlacFile<R> {
                     "Could not read 4-byte metadata block header",
                 )
             })?;
+            bytes_read += 4;
 
             is_last = (header[0] & 0x80) != 0;
             let block_type_byte = header[0] & 0x7F;
@@ -144,6 +185,7 @@ impl<R: ReadSeek> StreamedFlacFile<R> {
                     ),
                 )
             })?;
+            bytes_read += block_size as u64;
 
             // Parse STREAMINFO (block type 0).
             if block_type == MetadataBlockType::StreamInfo {
@@ -153,8 +195,10 @@ impl<R: ReadSeek> StreamedFlacFile<R> {
 
         let stream_info = stream_info.ok_or(AudioIOError::FlacError(FlacError::MissingStreamInfo))?;
 
-        // Record where audio data starts (current reader position after all metadata).
-        let audio_data_start = reader.stream_position().map_err(AudioIOError::from)?;
+        // Audio data starts exactly where the metadata-block loop stopped
+        // reading — unlike WAV/AIFF's growing header buffer, this parser
+        // never reads past the boundary, so no overshoot to account for.
+        let audio_data_start = bytes_read;
 
         // Determine validated sample type from bits_per_sample.
         let validated_sample_type = match stream_info.bits_per_sample {
@@ -202,7 +246,7 @@ impl<R: ReadSeek> StreamedFlacFile<R> {
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
-impl<R: ReadSeek> StreamedFlacFile<R> {
+impl<R: std::io::Read> StreamedFlacFile<R> {
     /// Compact remaining data to the front of `read_buf`, grow if needed,
     /// then read more bytes from `self.reader`.
     fn refill_buf(&mut self) -> AudioIOResult<()> {
@@ -314,11 +358,95 @@ impl<R: ReadSeek> StreamedFlacFile<R> {
             .map(|ch| ch.len().saturating_sub(self.pending_start))
             .unwrap_or(0)
     }
+
+    /// Decode frames into a pre-allocated `AudioSamples` buffer.
+    ///
+    /// This is the primary zero-allocation-after-warmup read method (only the
+    /// per-call `out`/`flat` staging vectors allocate). Available for any
+    /// `Read` source — the [`AudioStreamRead`] trait impl below (`R: Read +
+    /// Seek`) just delegates to this.
+    pub fn read_frames_into<T>(&mut self, buffer: &mut AudioSamples<'_, T>, frame_count: NonZeroUsize) -> AudioIOResult<usize>
+    where
+        T: StandardSample + ConvertTo<T> + ConvertFrom<T> + 'static,
+    {
+        let frames_to_read = frame_count.get().min(self.remaining_frames());
+        if frames_to_read == 0 {
+            return Ok(0);
+        }
+
+        let num_channels = self.stream_info.channels as usize;
+        // One Vec<T> per channel, capacity = frames_to_read.
+        let mut out: Vec<Vec<T>> = (0..num_channels).map(|_| Vec::with_capacity(frames_to_read)).collect();
+
+        // Inline i32 → T conversion closure.
+        // The match on `bits` is resolved at monomorphisation time.
+        let bits = self.stream_info.bits_per_sample;
+        let convert = move |s: i32| -> T {
+            match bits {
+                1..=8 => T::convert_from(((s) << (16 - bits as u32)) as i16),
+                9..=16 => T::convert_from(s as i16),
+                17..=24 => T::convert_from(I24::wrapping_from_i32(s)),
+                _ => T::convert_from(s),
+            }
+        };
+
+        // Fill `out` from pending decoded samples and fresh decoded frames.
+        loop {
+            let filled = out.first().map(|v| v.len()).unwrap_or(0);
+            if filled >= frames_to_read {
+                break;
+            }
+
+            let available = self.pending_available();
+            if available > 0 {
+                let take = available.min(frames_to_read - filled);
+                let start = self.pending_start;
+                let end = start + take;
+                for (pending_ch, out_ch) in self.pending.iter().zip(out.iter_mut()) {
+                    for &s in &pending_ch[start..end] {
+                        out_ch.push(convert(s));
+                    }
+                }
+                self.pending_start += take;
+            } else {
+                // Decode another frame.
+                match self.decode_next_frame()? {
+                    true => {
+                        // pending refreshed; loop will drain it.
+                    },
+                    false => {
+                        // EOF — stop filling.
+                        break;
+                    },
+                }
+            }
+        }
+
+        let actual_frames = out.first().map(|v| v.len()).unwrap_or(0);
+        if actual_frames == 0 {
+            return Ok(0);
+        }
+
+        self.current_frame += actual_frames;
+
+        // Build a flat planar Vec<T>: [ch0[0..N], ch1[0..N], …].
+        let mut flat: Vec<T> = Vec::with_capacity(num_channels * actual_frames);
+        for ch_data in out {
+            flat.extend(ch_data);
+        }
+
+        let non_empty = NonEmptyVec::try_from(flat).map_err(|_| {
+            AudioIOError::corrupted_data_simple("Empty decoded output", "No samples after FLAC frame decode")
+        })?;
+        buffer.replace_with_vec(&non_empty)?;
+
+        Ok(actual_frames)
+    }
 }
 
 // ─── AudioFileMetadata ────────────────────────────────────────────────────────
 
-impl<R: ReadSeek> AudioFileMetadata for StreamedFlacFile<R> {
+impl<R: std::io::Read> AudioFileMetadata for StreamedFlacFile<R> {
     fn open_metadata<P: AsRef<Path>>(_path: P) -> AudioIOResult<Self>
     where
         Self: Sized,
@@ -401,33 +529,32 @@ impl<R: ReadSeek> AudioFileMetadata for StreamedFlacFile<R> {
 impl<R: ReadSeek> AudioStreamReader for StreamedFlacFile<R> {
     #[inline]
     fn current_frame(&self) -> usize {
-        self.current_frame
+        StreamedFlacFile::current_frame(self)
     }
 
     #[inline]
     fn remaining_frames(&self) -> usize {
-        self.total_frames.saturating_sub(self.current_frame)
+        StreamedFlacFile::remaining_frames(self)
     }
 
     #[inline]
     fn total_frames(&self) -> usize {
-        self.total_frames
+        StreamedFlacFile::total_frames(self)
     }
 
     #[inline]
     fn sample_rate(&self) -> u32 {
-        self.stream_info.sample_rate
+        StreamedFlacFile::sample_rate(self)
     }
 
-    /// Nominal uncompressed bytes per inter-channel sample (frame).
     #[inline]
     fn bytes_per_frame(&self) -> usize {
-        self.stream_info.channels as usize * self.stream_info.bits_per_sample.div_ceil(8) as usize
+        StreamedFlacFile::bytes_per_frame(self)
     }
 
     #[inline]
     fn num_channels(&self) -> u16 {
-        self.stream_info.channels as u16
+        StreamedFlacFile::num_channels(self)
     }
 
     fn seek_to_frame(&mut self, frame: usize) -> AudioIOResult<()> {
@@ -493,78 +620,7 @@ impl<R: ReadSeek> AudioStreamRead for StreamedFlacFile<R> {
     where
         T: StandardSample + ConvertTo<T> + ConvertFrom<T> + 'static,
     {
-        let frames_to_read = frame_count.get().min(self.remaining_frames());
-        if frames_to_read == 0 {
-            return Ok(0);
-        }
-
-        let num_channels = self.stream_info.channels as usize;
-        // One Vec<T> per channel, capacity = frames_to_read.
-        let mut out: Vec<Vec<T>> = (0..num_channels).map(|_| Vec::with_capacity(frames_to_read)).collect();
-
-        // Inline i32 → T conversion closure.
-        // The match on `bits` is resolved at monomorphisation time.
-        let bits = self.stream_info.bits_per_sample;
-        let convert = move |s: i32| -> T {
-            match bits {
-                1..=8 => T::convert_from(((s) << (16 - bits as u32)) as i16),
-                9..=16 => T::convert_from(s as i16),
-                17..=24 => T::convert_from(I24::wrapping_from_i32(s)),
-                _ => T::convert_from(s),
-            }
-        };
-
-        // Fill `out` from pending decoded samples and fresh decoded frames.
-        loop {
-            let filled = out.first().map(|v| v.len()).unwrap_or(0);
-            if filled >= frames_to_read {
-                break;
-            }
-
-            let available = self.pending_available();
-            if available > 0 {
-                let take = available.min(frames_to_read - filled);
-                let start = self.pending_start;
-                let end = start + take;
-                for (pending_ch, out_ch) in self.pending.iter().zip(out.iter_mut()) {
-                    for &s in &pending_ch[start..end] {
-                        out_ch.push(convert(s));
-                    }
-                }
-                self.pending_start += take;
-            } else {
-                // Decode another frame.
-                match self.decode_next_frame()? {
-                    true => {
-                        // pending refreshed; loop will drain it.
-                    },
-                    false => {
-                        // EOF — stop filling.
-                        break;
-                    },
-                }
-            }
-        }
-
-        let actual_frames = out.first().map(|v| v.len()).unwrap_or(0);
-        if actual_frames == 0 {
-            return Ok(0);
-        }
-
-        self.current_frame += actual_frames;
-
-        // Build a flat planar Vec<T>: [ch0[0..N], ch1[0..N], …].
-        let mut flat: Vec<T> = Vec::with_capacity(num_channels * actual_frames);
-        for ch_data in out {
-            flat.extend(ch_data);
-        }
-
-        let non_empty = NonEmptyVec::try_from(flat).map_err(|_| {
-            AudioIOError::corrupted_data_simple("Empty decoded output", "No samples after FLAC frame decode")
-        })?;
-        buffer.replace_with_vec(&non_empty)?;
-
-        Ok(actual_frames)
+        StreamedFlacFile::read_frames_into(self, buffer, frame_count)
     }
 }
 
@@ -724,5 +780,43 @@ mod tests {
         let s = crate::open_streamed_dyn("resources/test.flac").expect("open_streamed_dyn");
         assert!(s.total_frames() > 0);
         assert_eq!(s.current_frame(), 0);
+    }
+
+    /// Wraps any `Read` but deliberately does *not* implement `Seek` — proves
+    /// at the type level that construction and `read_frames_into` genuinely
+    /// don't require it (a network transport, for instance, could use this).
+    struct ReadOnly<R>(R);
+
+    impl<R: std::io::Read> std::io::Read for ReadOnly<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.0.read(buf)
+        }
+    }
+
+    #[test]
+    fn test_streamed_flac_works_over_read_only_source() {
+        let bytes = std::fs::read("resources/test.flac").expect("read test.flac");
+        let expected_total = open_test_flac().total_frames();
+
+        let mut s = StreamedFlacFile::new(ReadOnly(std::io::Cursor::new(bytes))).expect("new over Read-only source");
+        assert_eq!(s.total_frames(), expected_total);
+
+        let sr = NonZeroU32::new(s.sample_rate()).unwrap();
+        let mut buf = if s.num_channels() == 1 {
+            AudioSamples::<f32>::zeros_mono(NonZeroUsize::new(1024).unwrap(), sr)
+        } else {
+            let ch = NonZeroU32::new(s.num_channels() as u32).unwrap();
+            AudioSamples::<f32>::zeros_multi(ch, NonZeroUsize::new(1024).unwrap(), sr)
+        };
+
+        let mut frames_read = 0;
+        loop {
+            let n = s.read_frames_into(&mut buf, nzu!(1024)).expect("read");
+            if n == 0 {
+                break;
+            }
+            frames_read += n;
+        }
+        assert_eq!(frames_read, expected_total, "Read-only decode must reach the same total as a Read+Seek source");
     }
 }
