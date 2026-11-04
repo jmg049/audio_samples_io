@@ -544,6 +544,68 @@ pub(crate) fn decode_frame_into_scratch(
     Ok(bytes_consumed)
 }
 
+/// Parse a frame header without decoding the frame, for seeking.
+///
+/// Returns the number of the frame's first sample and its block size, or `None`
+/// when `data` does not start with a valid header (wrong sync, reserved codes, a
+/// failed CRC-8, or a channel count or sample size other than the stream's).
+/// `fixed_block_size` is the stream's block size, which turns a frame number into
+/// a sample number in fixed-blocksize streams.
+pub(crate) fn parse_frame_position(
+    data: &[u8],
+    fixed_block_size: u32,
+    channels: usize,
+    streaminfo_bits_per_sample: u8,
+) -> Option<(u64, u32)> {
+    let mut reader = BitReader::new(data);
+
+    if reader.read_bits(14).ok()? as u16 != FRAME_SYNC_CODE || reader.read_bit().ok()? {
+        return None;
+    }
+    let variable_blocksize = reader.read_bit().ok()?;
+    let block_size_code = reader.read_bits(4).ok()? as u8;
+    let sample_rate_code = reader.read_bits(4).ok()? as u8;
+    let channel_code = reader.read_bits(4).ok()? as u8;
+    let sample_size_code = reader.read_bits(3).ok()? as u8;
+    if reader.read_bit().ok()? || sample_size_code == 0b011 {
+        return None;
+    }
+    if ChannelAssignment::from_code(channel_code)?.channels() as usize != channels {
+        return None;
+    }
+    if sample_size_code != 0 && BITS_PER_SAMPLE_TABLE[sample_size_code as usize] != streaminfo_bits_per_sample {
+        return None;
+    }
+    let number = reader.read_utf8_coded().ok()?;
+    let block_size = match block_size_code {
+        0b0000 => return None,
+        0b0110 => reader.read_bits(8).ok()? + 1,
+        0b0111 => reader.read_bits(16).ok()? + 1,
+        _ => BLOCK_SIZE_TABLE[block_size_code as usize],
+    };
+    match sample_rate_code {
+        0b1100 => {
+            reader.read_bits(8).ok()?;
+        },
+        0b1101 | 0b1110 => {
+            reader.read_bits(16).ok()?;
+        },
+        0b1111 => return None,
+        _ => {},
+    }
+    let header_len = reader.byte_position();
+    let crc = reader.read_bits(8).ok()? as u8;
+    if Crc8::compute(&data[..header_len]) != crc {
+        return None;
+    }
+    let first_sample = if variable_blocksize {
+        number
+    } else {
+        number * u64::from(fixed_block_size)
+    };
+    Some((first_sample, block_size))
+}
+
 /// Encode samples into a FLAC frame.
 ///
 /// # Arguments

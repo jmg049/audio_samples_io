@@ -21,7 +21,7 @@ use crate::{
         FlacFileInfo,
         constants::FLAC_MARKER,
         error::FlacError,
-        frame::decode_frame_into_scratch,
+        frame::{decode_frame_into_scratch, parse_frame_position},
         metadata::{MetadataBlockType, StreamInfo},
     },
     traits::{AudioFileMetadata, AudioStreamRead, AudioStreamReader},
@@ -70,6 +70,8 @@ pub struct StreamedFlacFile<R> {
     current_frame: usize,
     /// Sliding window of raw compressed bytes.
     read_buf: Vec<u8>,
+    /// Capacity `read_buf` gets at its first use.
+    read_buf_capacity: usize,
     buf_start: usize,
     buf_end: usize,
     reader_exhausted: bool,
@@ -79,6 +81,16 @@ pub struct StreamedFlacFile<R> {
     pending_start: usize,
     /// Per-channel decode scratch (reused across frames to avoid allocation).
     scratch: Vec<Vec<i32>>,
+    /// File offset of `read_buf[0]`.
+    buf_file_offset: u64,
+    /// First sample of the next frame to decode.
+    next_frame_sample: u64,
+    /// First sample of the frame in `pending`.
+    pending_first_sample: u64,
+    /// `(first sample, file offset)` of every frame decoded so far, ascending.
+    frame_index: Vec<(u64, u64)>,
+    /// Whether `frame_index` is kept.
+    index_frames: bool,
 }
 
 // ─── Constructors ────────────────────────────────────────────────────────────
@@ -213,16 +225,16 @@ impl<R: std::io::Read> StreamedFlacFile<R> {
         let num_channels = stream_info.channels as usize;
         let total_frames = stream_info.total_samples as usize;
 
-        // Choose read buffer capacity: generous enough for one typical frame,
-        // but fall back to 64 KiB when max_frame_size is unknown (0).
+        // Choose read buffer capacity: at least two frames, so that a frame found in the buffer
+        // is whole; 64 KiB when max_frame_size is unknown (0).
         let buf_cap = if stream_info.max_frame_size == 0 {
             65536
         } else {
-            65536_usize.max(stream_info.max_frame_size as usize * 4)
+            32768_usize.max(stream_info.max_frame_size as usize * 2)
         };
 
-        let block_size_hint = stream_info.max_block_size as usize;
-        let scratch: Vec<Vec<i32>> = (0..num_channels).map(|_| Vec::with_capacity(block_size_hint)).collect();
+        // Allocated when the first frame is decoded: a reader may only want the metadata.
+        let scratch: Vec<Vec<i32>> = (0..num_channels).map(|_| Vec::new()).collect();
         let pending: Vec<Vec<i32>> = (0..num_channels).map(|_| Vec::new()).collect();
 
         Ok(StreamedFlacFile {
@@ -233,15 +245,35 @@ impl<R: std::io::Read> StreamedFlacFile<R> {
             audio_data_start,
             total_frames,
             current_frame: 0,
-            read_buf: Vec::with_capacity(buf_cap),
+            read_buf: Vec::new(),
+            read_buf_capacity: buf_cap,
             buf_start: 0,
             buf_end: 0,
             reader_exhausted: false,
             pending,
             pending_start: 0,
             scratch,
+            buf_file_offset: audio_data_start,
+            next_frame_sample: 0,
+            pending_first_sample: 0,
+            frame_index: Vec::new(),
+            index_frames: true,
         })
     }
+}
+
+/// Read until `buf` is full or the source ends; returns the bytes read.
+fn read_up_to<R: std::io::Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {},
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(filled)
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -254,7 +286,12 @@ impl<R: std::io::Read> StreamedFlacFile<R> {
         if self.buf_start > 0 {
             self.read_buf.copy_within(self.buf_start..self.buf_end, 0);
             self.buf_end -= self.buf_start;
+            self.buf_file_offset += self.buf_start as u64;
             self.buf_start = 0;
+        }
+
+        if self.read_buf.capacity() == 0 {
+            self.read_buf.reserve_exact(self.read_buf_capacity);
         }
 
         // Grow the buffer if it's full.
@@ -280,14 +317,29 @@ impl<R: std::io::Read> StreamedFlacFile<R> {
         Ok(())
     }
 
-    /// Decode the next FLAC frame from the internal buffer.
+    /// Decode the next FLAC frame into `self.pending`.
     ///
-    /// Returns `Ok(true)` when a frame was successfully decoded and placed into
-    /// `self.pending`.  Returns `Ok(false)` at end-of-stream.
+    /// Returns `Ok(true)` when a frame was decoded and `Ok(false)` at end-of-stream.
     fn decode_next_frame(&mut self) -> AudioIOResult<bool> {
+        if !self.decode_next_into_scratch()? {
+            return Ok(false);
+        }
+        std::mem::swap(&mut self.pending, &mut self.scratch);
+        self.pending_start = 0;
+        self.pending_first_sample = self.next_frame_sample - self.pending[0].len() as u64;
+        Ok(true)
+    }
+
+    /// Decode the next FLAC frame from the internal buffer into `self.scratch`.
+    ///
+    /// Returns `Ok(true)` when a frame was successfully decoded and `Ok(false)` at
+    /// end-of-stream.
+    fn decode_next_into_scratch(&mut self) -> AudioIOResult<bool> {
         loop {
-            // Ensure we have at least 2 bytes to check the sync code.
-            if self.buf_end - self.buf_start < 2 && !self.reader_exhausted {
+            // Refill before a frame might be cut off: decoding half a frame and retrying costs
+            // more than moving a few bytes. Without a known frame size, at least the sync code.
+            let wanted = (self.stream_info.max_frame_size as usize).max(2);
+            if self.buf_end - self.buf_start < wanted && !self.reader_exhausted {
                 self.refill_buf()?;
             }
 
@@ -318,15 +370,12 @@ impl<R: std::io::Read> StreamedFlacFile<R> {
                 &mut self.scratch,
             ) {
                 Ok(bytes_consumed) => {
-                    self.buf_start += bytes_consumed;
-
-                    // Move scratch into pending.
-                    let num_channels = self.stream_info.channels as usize;
-                    for ch in 0..num_channels {
-                        self.pending[ch].clear();
-                        self.pending[ch].extend_from_slice(&self.scratch[ch]);
+                    let frame_offset = self.buf_file_offset + self.buf_start as u64;
+                    if self.index_frames && self.frame_index.last().is_none_or(|&(_, off)| off < frame_offset) {
+                        self.frame_index.push((self.next_frame_sample, frame_offset));
                     }
-                    self.pending_start = 0;
+                    self.buf_start += bytes_consumed;
+                    self.next_frame_sample += self.scratch[0].len() as u64;
 
                     return Ok(true);
                 },
@@ -348,6 +397,74 @@ impl<R: std::io::Read> StreamedFlacFile<R> {
                 },
             }
         }
+    }
+
+    /// Do not record frame positions, for a reader that will only read straight through.
+    pub fn without_seek_index(mut self) -> Self {
+        self.index_frames = false;
+        self
+    }
+
+    /// Fill `out`, planar with `out.len() / channels` samples per channel, from the decoded
+    /// stream. Returns the samples per channel read, which is less than asked at the end of the
+    /// stream. Channel `c` starts at `out[c * per_channel]` whatever the count read.
+    pub fn read_planar_into<T>(&mut self, out: &mut [T]) -> AudioIOResult<usize>
+    where
+        T: StandardSample + 'static,
+    {
+        let num_channels = self.stream_info.channels as usize;
+        let per_channel = out.len() / num_channels;
+        let bits = self.stream_info.bits_per_sample;
+        let convert = move |s: i32| -> T {
+            match bits {
+                1..=8 => T::convert_from(((s) << (16 - bits as u32)) as i16),
+                9..=16 => T::convert_from(s as i16),
+                17..=24 => T::convert_from(I24::wrapping_from_i32(s)),
+                _ => T::convert_from(s),
+            }
+        };
+
+        let mut filled = 0usize;
+        while filled < per_channel {
+            let available = self.pending_available();
+            if available > 0 {
+                let take = available.min(per_channel - filled);
+                let start = self.pending_start;
+                for (ch, pending_ch) in self.pending.iter().enumerate() {
+                    let dst = &mut out[ch * per_channel + filled..ch * per_channel + filled + take];
+                    for (d, &s) in dst.iter_mut().zip(&pending_ch[start..start + take]) {
+                        *d = convert(s);
+                    }
+                }
+                self.pending_start += take;
+                filled += take;
+            } else {
+                if !self.decode_next_into_scratch()? {
+                    break;
+                }
+                let block = self.scratch[0].len();
+                if block <= per_channel - filled {
+                    // A whole frame fits: convert it where it was decoded.
+                    for (ch, samples) in self.scratch.iter().enumerate() {
+                        let dst = &mut out[ch * per_channel + filled..ch * per_channel + filled + block];
+                        for (d, &s) in dst.iter_mut().zip(samples) {
+                            *d = convert(s);
+                        }
+                    }
+                    filled += block;
+                    for ch in &mut self.pending {
+                        ch.clear();
+                    }
+                    self.pending_start = 0;
+                } else {
+                    std::mem::swap(&mut self.pending, &mut self.scratch);
+                    self.pending_start = 0;
+                    self.pending_first_sample = self.next_frame_sample - block as u64;
+                }
+            }
+        }
+        self.current_frame += filled;
+        Ok(filled)
     }
 
     /// Number of decoded samples available in `pending` but not yet consumed.
@@ -445,6 +562,85 @@ impl<R: std::io::Read> StreamedFlacFile<R> {
         buffer.replace_with_vec(&non_empty)?;
 
         Ok(actual_frames)
+    }
+}
+
+impl<R: ReadSeek> StreamedFlacFile<R> {
+    /// Continue decoding from the frame at `offset`, which starts at `first_sample`.
+    fn restart_at(&mut self, first_sample: u64, offset: u64) -> AudioIOResult<()> {
+        self.reader.seek(SeekFrom::Start(offset)).map_err(AudioIOError::from)?;
+        self.buf_file_offset = offset;
+        self.buf_start = 0;
+        self.buf_end = 0;
+        self.reader_exhausted = false;
+        self.pending_start = 0;
+        self.next_frame_sample = first_sample;
+        self.pending_first_sample = first_sample;
+        self.current_frame = first_sample as usize;
+        for ch in &mut self.pending {
+            ch.clear();
+        }
+        Ok(())
+    }
+
+    /// Drop decoded samples until the next read returns sample `frame`.
+    fn discard_until(&mut self, frame: usize) -> AudioIOResult<()> {
+        while self.current_frame < frame {
+            let available = self.pending_available();
+            if available > 0 {
+                let advance = available.min(frame - self.current_frame);
+                self.pending_start += advance;
+                self.current_frame += advance;
+            } else if !self.decode_next_frame()? {
+                // EOF before reaching the target frame.
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Bisect the file for a frame at or just before sample `frame`, starting from the known
+    /// frame `lo`. Frames are found by their sync code and validated by their CRC-8.
+    fn bisect_for_frame(&mut self, frame: u64, mut lo: (u64, u64)) -> AudioIOResult<(u64, u64)> {
+        let channels = self.stream_info.channels as usize;
+        let bits = self.stream_info.bits_per_sample;
+        let block = u64::from(self.stream_info.max_block_size.max(1));
+        let min_block = u32::from(self.stream_info.min_block_size);
+        let probe_len = 16384usize.max(self.stream_info.max_frame_size as usize * 2);
+        let mut probe = vec![0u8; probe_len];
+        let mut hi = self.reader.seek(SeekFrom::End(0)).map_err(AudioIOError::from)?;
+        let mut hi_sample = self.total_frames as u64;
+
+        for _ in 0..48 {
+            if frame.saturating_sub(lo.0) <= 2 * block || hi <= lo.1 + 1 {
+                break;
+            }
+            // Interpolate within the bracket, clear of its ends.
+            let span_samples = hi_sample.saturating_sub(lo.0).max(1);
+            let estimate = (u128::from(hi - lo.1) * u128::from(frame - lo.0) / u128::from(span_samples)) as u64;
+            let at = lo.1 + estimate.min(hi - lo.1 - 1);
+
+            self.reader.seek(SeekFrom::Start(at)).map_err(AudioIOError::from)?;
+            let n = read_up_to(&mut self.reader, &mut probe).map_err(AudioIOError::from)?;
+            let found = (0..n.saturating_sub(1)).find_map(|i| {
+                if probe[i] != 0xFF || (probe[i + 1] & 0xFC) != 0xF8 {
+                    return None;
+                }
+                parse_frame_position(&probe[i..n], min_block, channels, bits).map(|(sample, _)| (sample, at + i as u64))
+            });
+            match found {
+                Some((sample, offset)) if sample <= frame && sample > lo.0 => lo = (sample, offset),
+                Some((sample, _)) if sample > frame => {
+                    hi = at;
+                    hi_sample = sample;
+                },
+                // Nothing usable from here on: the wanted frame is before this probe.
+                _ => {
+                    hi = at;
+                },
+            }
+        }
+        Ok(lo)
     }
 }
 
@@ -569,43 +765,43 @@ impl<R: ReadSeek> AudioStreamReader for StreamedFlacFile<R> {
             )));
         }
 
-        // Seek the underlying reader back to the start of audio data.
-        self.reader
-            .seek(SeekFrom::Start(self.audio_data_start))
-            .map_err(AudioIOError::from)?;
+        let target = frame as u64;
+        let block = u64::from(self.stream_info.max_block_size.max(1));
 
-        // Reset all internal state.
-        self.buf_start = 0;
-        self.buf_end = 0;
-        self.reader_exhausted = false;
-        self.pending_start = 0;
-        self.current_frame = 0;
-        for ch in &mut self.pending {
-            ch.clear();
+        // Inside the block already decoded: no I/O.
+        let pending_len = self.pending.first().map_or(0, Vec::len) as u64;
+        if pending_len > 0 && (self.pending_first_sample..=self.pending_first_sample + pending_len).contains(&target) {
+            self.pending_start = (target - self.pending_first_sample) as usize;
+            self.current_frame = frame;
+            return Ok(());
         }
 
-        // Decode-and-discard frames until we reach the target position.
-        while self.current_frame < frame {
-            let available = self.pending_available();
-            if available > 0 {
-                let advance = available.min(frame - self.current_frame);
-                self.pending_start += advance;
-                self.current_frame += advance;
-            } else {
-                // Need to decode another frame.
-                match self.decode_next_frame()? {
-                    true => {
-                        // pending now has a freshly decoded block; loop will drain it.
-                    },
-                    false => {
-                        // EOF before reaching target frame — stop here.
-                        break;
-                    },
-                }
-            }
+        // A short way ahead: keep decoding from here.
+        if frame >= self.current_frame && target - self.current_frame as u64 <= 4 * block {
+            return self.discard_until(frame);
         }
 
-        Ok(())
+        // The nearest frame decoded so far at or before the target...
+        let known = match self.frame_index.partition_point(|&(sample, _)| sample <= target) {
+            0 => (0, self.audio_data_start),
+            i => self.frame_index[i - 1],
+        };
+        // ... or, when that is far away, one found by bisecting the file.
+        let start = if target - known.0 > 8 * block && self.stream_info.total_samples > 0 {
+            self.bisect_for_frame(target, known)?
+        } else {
+            known
+        };
+
+        self.restart_at(start.0, start.1)?;
+        match self.discard_until(frame) {
+            // A false sync that passed the CRC-8: decode from the known frame instead.
+            Err(_) if start != known => {
+                self.restart_at(known.0, known.1)?;
+                self.discard_until(frame)
+            },
+            other => other,
+        }
     }
 
     fn reset(&mut self) -> AudioIOResult<()> {

@@ -146,8 +146,12 @@ pub fn info<P: AsRef<Path>>(fp: P) -> AudioIOResult<BaseAudioInfo> {
 
             #[cfg(feature = "wav")]
             {
-                let wav_file = WavFile::open_metadata(path)?;
-                wav_file.base_info()
+                // Header only: the file is neither mapped nor read further.
+                use crate::wav::wav_file::parse_wav_header_streaming;
+                let file = File::open(path)?;
+                let mut reader = BufReader::with_capacity(4096, file);
+                let (info, _) = parse_wav_header_streaming(&mut reader)?;
+                Ok(info)
             }
         },
         FileType::FLAC => {
@@ -158,10 +162,10 @@ pub fn info<P: AsRef<Path>>(fp: P) -> AudioIOResult<BaseAudioInfo> {
 
             #[cfg(feature = "flac")]
             {
-                use crate::flac::FlacFile;
+                use crate::flac::StreamedFlacFile;
                 use crate::traits::AudioFileMetadata;
-                let flac_file = FlacFile::open_metadata(path)?;
-                flac_file.base_info()
+                let file = BufReader::with_capacity(4096, File::open(path)?);
+                StreamedFlacFile::new(file)?.base_info()
             }
         },
         FileType::AIFF => {

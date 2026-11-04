@@ -5,10 +5,15 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- FLAC: decoding failed with a CRC error or returned wrong samples when a Rice quotient ended at the last bit of the 64-bit read buffer, because the buffer was shifted by 64 bits.
 - WAV: `parse_wav_header_streaming` left the reader at the stream end (instead of the first audio byte) for files with a ragged or over-declared `data` chunk
 - WAV: streaming writer wrote an 8-byte bits-per-sample value into the 2-byte fmt chunk field, corrupting every file produced by `StreamedWavWriter`/`create_streamed`
 - WAV: tolerate real-world/streaming files — over-declared RIFF/`data` size fields (including the `0xFFFFFFFF` placeholder written by streaming encoders) are clamped to the bytes actually present, and a ragged `data` chunk decodes its whole frames instead of erroring
 - Streaming: `AudioStreamReader` now exposes `num_channels()`, allowing `Box<dyn AudioStreamReader>` callers to allocate read buffers without a separate `info()` call (eliminating the probe → drop → reopen two-pass latency)
+
+### Changed
+- FLAC: `StreamedFlacFile` decodes through a small sliding window, keeps an index of decoded frames and bisects by frame header on seek, so seeking no longer decodes from the start.
+- WAV and FLAC streaming readers write directly into a caller's buffer without intermediate copies.
 
 ### Removed
 - Dead `format_conversion` module (never compiled into the crate); transcoding is covered by `read()` + `write()`

@@ -175,6 +175,80 @@ impl<'a> FlacFile<'a> {
         ))
     }
 
+    /// Decode all frames into planar storage: channel `c` occupies
+    /// `out[c * total_spc .. (c + 1) * total_spc]`.
+    ///
+    /// Returns the samples per channel written, or `None` when the stream holds more
+    /// than STREAMINFO's `total_spc` (nothing beyond `out` is written).
+    ///
+    /// # Safety
+    ///
+    /// `out` must be valid for writes of `channels * total_spc` values of `T`.
+    pub(crate) unsafe fn decode_planar_into<T>(&self, out: *mut T, total_spc: usize) -> Result<Option<usize>, FlacError>
+    where
+        T: StandardSample + 'static,
+    {
+        use audio_samples::I24;
+
+        let num_channels = self.stream_info.channels as usize;
+        let bits = self.stream_info.bits_per_sample;
+        let block_size_hint = self.stream_info.max_block_size as usize;
+        let mut scratch: Vec<Vec<i32>> = (0..num_channels).map(|_| Vec::with_capacity(block_size_hint)).collect();
+
+        let convert = |s: i32| -> T {
+            match bits {
+                1..=8 => T::convert_from(((s) << (16 - bits)) as i16),
+                9..=16 => T::convert_from(s as i16),
+                17..=24 => T::convert_from(I24::wrapping_from_i32(s)),
+                _ => T::convert_from(s),
+            }
+        };
+
+        let data = self.audio_data();
+        let mut offset = 0;
+        let mut written = 0usize;
+
+        while offset < data.len() {
+            let frame_data = &data[offset..];
+            if frame_data.len() < 2 {
+                break;
+            }
+            if frame_data[0] != 0xFF || (frame_data[1] & 0xFC) != 0xF8 {
+                offset += 1;
+                continue;
+            }
+            match decode_frame_into_scratch(
+                frame_data,
+                self.stream_info.sample_rate,
+                self.stream_info.bits_per_sample,
+                &mut scratch,
+            ) {
+                Ok(bytes_consumed) => {
+                    let block = scratch[0].len();
+                    if written + block > total_spc {
+                        return Ok(None);
+                    }
+                    for (ch, samples) in scratch.iter().enumerate() {
+                        // SAFETY: `written + block <= total_spc`, so the range lies in
+                        // channel `ch`'s part of `out`.
+                        let dst = unsafe { out.add(ch * total_spc + written) };
+                        for (i, &s) in samples.iter().enumerate() {
+                            unsafe { dst.add(i).write(convert(s)) };
+                        }
+                    }
+                    written += block;
+                    offset += bytes_consumed;
+                },
+                Err(FlacError::InvalidFrameSync { .. }) => {
+                    offset += 1;
+                },
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(Some(written))
+    }
+
     /// Decode all frames, converting directly to type T frame-by-frame.
     ///
     /// The key difference from `decode_all_frames` + `read_samples`:
@@ -196,6 +270,25 @@ impl<'a> FlacFile<'a> {
         if num_channels == 0 || total_spc == 0 {
             return Ok(Vec::new());
         }
+
+        // The usual case: STREAMINFO's sample count holds, and the frames are decoded
+        // straight into the planar result.
+        let mut planar: Vec<T> = Vec::with_capacity(num_channels * total_spc);
+        // SAFETY: the capacity covers `num_channels * total_spc` values.
+        if let Some(written) = unsafe { self.decode_planar_into(planar.as_mut_ptr(), total_spc)? } {
+            let p = planar.as_mut_ptr();
+            if written < total_spc {
+                // A truncated stream: close the gaps between the channels.
+                for ch in 1..num_channels {
+                    // SAFETY: both ranges lie inside the capacity and were written above.
+                    unsafe { std::ptr::copy(p.add(ch * total_spc), p.add(ch * written), written) };
+                }
+            }
+            // SAFETY: the first `num_channels * written` values are initialised.
+            unsafe { planar.set_len(num_channels * written) };
+            return Ok(planar);
+        }
+        drop(planar);
 
         // Per-channel typed output: one Vec<T> per channel, capacity = total_spc.
         // Written frame by frame; flattened into planar layout at the end.

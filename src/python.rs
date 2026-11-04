@@ -49,7 +49,7 @@ pub fn read_pyarray_native(py: Python<'_>, path: &Path) -> Option<PyResult<Nativ
     // Step 1: open + header (GIL released — pure I/O)
     let parse_result: AudioIOResult<(BaseAudioInfo, BufReader<std::fs::File>)> = py.detach(|| {
         let file = std::fs::File::open(path).map_err(AudioIOError::from)?;
-        let mut reader = BufReader::with_capacity(65536, file);
+        let mut reader = BufReader::with_capacity(4096, file);
         let (info, _) = parse_wav_header_streaming(&mut reader)?;
         Ok((info, reader))
     });
@@ -153,11 +153,16 @@ where
     // Eliminates the intermediate Vec allocation and the extra mmap(MAP_ANONYMOUS) zero-fill
     // overhead that Vec::with_capacity triggers for large allocations.
     #[cfg(target_endian = "little")]
-    if TypeId::of::<T>() != TypeId::of::<I24>() {
-        if let Some(result) = read_pyarray_direct::<T>(py, path) {
-            return result;
-        }
-        // Falls through to the Vec path below if direct path is not applicable.
+    // Falls through to the Vec path below if direct path is not applicable.
+    if TypeId::of::<T>() != TypeId::of::<I24>()
+        && let Some(result) = read_pyarray_direct::<T>(py, path)
+    {
+        return result;
+    }
+
+    #[cfg(feature = "flac")]
+    if let Some(result) = read_flac_planar_pyarray::<T>(py, path) {
+        return result;
     }
 
     // Vec path: reads into intermediate Vec<T>, then hands ownership to numpy (zero-copy).
@@ -190,11 +195,11 @@ where
 {
     use std::mem::size_of;
 
-    // Step 1: Parse WAV header with GIL released (I/O).  A 64 KB BufReader reads the header
-    // and the first chunk of audio data in a single syscall, reducing round-trips.
+    // Step 1: Parse WAV header with GIL released (I/O). The payload read below goes straight to
+    // the array, so the buffer only has to hold the header.
     let parse_result: AudioIOResult<(BaseAudioInfo, BufReader<std::fs::File>)> = py.detach(|| {
         let file = std::fs::File::open(path).map_err(AudioIOError::from)?;
-        let mut reader = BufReader::with_capacity(65536, file);
+        let mut reader = BufReader::with_capacity(4096, file);
         let (info, _) = parse_wav_header_streaming(&mut reader)?;
         Ok((info, reader))
     });
@@ -213,9 +218,10 @@ where
         audio_samples::SampleType::F64 => TypeId::of::<T>() == TypeId::of::<f64>(),
         _ => false,
     };
-    if !native_matches {
-        return None;
-    }
+    let file_type = match ValidatedSampleType::try_from(info.sample_type) {
+        Ok(t) => t,
+        Err(_) => return None,
+    };
 
     let channels = info.channels as usize;
     let total_samples = info.total_samples;
@@ -237,6 +243,19 @@ where
 
     let read_result: AudioIOResult<()> = py.detach(|| {
         let mut r = reader;
+        if !native_matches {
+            // Another sample type: convert block by block, through no copy of the whole file.
+            // Safety: as below.
+            let out = unsafe { std::slice::from_raw_parts_mut(data_ptr_usize as *mut T, total_samples) };
+            let read = crate::wav::streaming::read_converted(&mut r, file_type, out)?;
+            if read != total_samples {
+                return Err(AudioIOError::corrupted_data_simple(
+                    "Truncated WAV data",
+                    format!("expected {total_samples} samples, found {read}"),
+                ));
+            }
+            return Ok(());
+        }
         // Safety: pointer was valid when captured (step 2), array is held alive by `array`,
         // CPython does not move objects, no other thread has seen this array.
         let bytes = unsafe { std::slice::from_raw_parts_mut(data_ptr_usize as *mut u8, byte_count) };
@@ -248,6 +267,54 @@ where
     }
 
     Some(Ok((array.unbind(), info)))
+}
+
+/// FLAC: decode into a C-order `(channels, frames)` NumPy array in one pass, with the GIL
+/// released. Frames decode to planar samples, so the array needs no reordering.
+///
+/// Returns `None` when this does not apply (not FLAC, or STREAMINFO's sample count does not
+/// hold), letting the caller fall back to the Vec path.
+#[cfg(feature = "flac")]
+fn read_flac_planar_pyarray<T>(py: Python<'_>, path: &Path) -> Option<PyResult<(Py<PyArray2<T>>, BaseAudioInfo)>>
+where
+    T: StandardSample + Element + 'static,
+{
+    use crate::flac::StreamedFlacFile;
+
+    if !matches!(FileType::from_path(path), FileType::FLAC) {
+        return None;
+    }
+    let opened = py.detach(|| {
+        let file = std::fs::File::open(path).map_err(AudioIOError::from)?;
+        let flac = StreamedFlacFile::new_with_path(file, path.to_path_buf())?.without_seek_index();
+        let info = flac.base_info()?;
+        Ok::<_, AudioIOError>((flac, info))
+    });
+    let (mut flac, info) = match opened {
+        Ok(v) => v,
+        Err(e) => return Some(Err(PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))),
+    };
+    let channels = info.channels as usize;
+    let total_samples = info.total_samples;
+    if channels == 0 || total_samples == 0 || total_samples % channels != 0 {
+        return None;
+    }
+    let frames = total_samples / channels;
+
+    let array = unsafe { PyArray2::<T>::new(py, [channels, frames], false) };
+    let data_ptr_usize = array.data() as usize;
+    let decoded = py.detach(|| {
+        // SAFETY: as in `read_pyarray_direct`: the fresh array is kept alive by `array` and no
+        // other thread has seen it; it holds `total_samples` values.
+        let out = unsafe { std::slice::from_raw_parts_mut(data_ptr_usize as *mut T, total_samples) };
+        flac.read_planar_into(out)
+    });
+    match decoded {
+        Ok(written) if written == frames => Some(Ok((array.unbind(), info))),
+        // Fewer samples than STREAMINFO says.
+        Ok(_) => None,
+        Err(e) => Some(Err(PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))),
+    }
 }
 
 /// Read audio file into interleaved Vec with metadata,
@@ -265,11 +332,11 @@ where
             // one syscall for the header (BufReader), one for the payload.  Avoids
             // the mmap + intermediate-Vec copy that the mmap path requires.
             #[cfg(target_endian = "little")]
-            if TypeId::of::<T>() != TypeId::of::<I24>() {
-                if let Ok(result) = read_wav_direct::<T>(path) {
-                    return Ok(result);
-                }
-                // Any error falls through to the mmap path below.
+            // Any error falls through to the mmap path below.
+            if TypeId::of::<T>() != TypeId::of::<I24>()
+                && let Ok(result) = read_wav_direct::<T>(path)
+            {
+                return Ok(result);
             }
 
             // Mmap path: general fallback (type conversion, I24, big-endian, etc.)
@@ -371,10 +438,8 @@ where
     let total_samples = info.total_samples;
     let byte_count = total_samples * size_of::<T>();
 
-    // Allocate Vec<T> and read the entire payload directly into it.
-    // Safety: T: Copy; every byte is overwritten by read_exact before it is read.
+    // Allocate Vec<T> and read the entire payload directly into its spare capacity.
     let mut vec: Vec<T> = Vec::with_capacity(total_samples);
-    unsafe { vec.set_len(total_samples) };
 
     let bytes = unsafe { std::slice::from_raw_parts_mut(vec.as_mut_ptr().cast::<u8>(), byte_count) };
 
@@ -382,6 +447,8 @@ where
     // the first byte of the data payload.
     let _ = data_byte_offset; // used only for the type-conversion fallback check above
     reader.read_exact(bytes).map_err(AudioIOError::from)?;
+    // Safety: T: Copy; read_exact has written every byte of the first total_samples elements.
+    unsafe { vec.set_len(total_samples) };
 
     let nev = NonEmptyVec::try_from(vec)
         .map_err(|_| AudioIOError::corrupted_data_simple("Empty WAV file", "No audio samples"))?;
@@ -405,7 +472,7 @@ where
         ));
     }
 
-    if total_samples % channels != 0 {
+    if !total_samples.is_multiple_of(channels) {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
             "total_samples ({}) not divisible by channels ({})",
             total_samples, channels
@@ -448,6 +515,10 @@ mod tests {
     fn test_create_pyarray_fortran_stereo() {
         Python::initialize();
         Python::attach(|py| {
+            if py.import("numpy").is_err() {
+                eprintln!("skipped: the embedded interpreter has no numpy");
+                return;
+            }
             // Interleaved stereo: [L0, R0, L1, R1, L2, R2]
             let interleaved = non_empty_vec![1i16, 2, 3, 4, 5, 6];
             let channels = 2;
@@ -484,6 +555,10 @@ mod tests {
     fn test_create_pyarray_fortran_mono() {
         Python::initialize();
         Python::attach(|py| {
+            if py.import("numpy").is_err() {
+                eprintln!("skipped: the embedded interpreter has no numpy");
+                return;
+            }
             // Mono: [S0, S1, S2, S3]
             let mono = non_empty_vec![10i16, 20, 30, 40];
             let channels = 1;

@@ -748,6 +748,48 @@ impl<R: std::io::Read> StreamedWavFile<R> {
         Ok(frames_read)
     }
 
+    /// Read frames into `out`, interleaved (`channels * frames` values), without an
+    /// intermediate buffer when `T` is the file's own sample type. Returns the frames read,
+    /// which is less than asked at the end of the data.
+    pub fn read_interleaved_into<T>(&mut self, out: &mut [T]) -> AudioIOResult<usize>
+    where
+        T: StandardSample + 'static,
+    {
+        use std::any::TypeId;
+
+        let channels = self.channels as usize;
+        let frames_to_read = (out.len() / channels).min(self.remaining_frames());
+        if frames_to_read == 0 {
+            return Ok(0);
+        }
+        let bytes_per_frame = self.bytes_per_frame();
+        let bytes_to_read = frames_to_read * bytes_per_frame;
+        let target = &mut out[..frames_to_read * channels];
+
+        let native = cfg!(target_endian = "little")
+            && match self.sample_type {
+                ValidatedSampleType::U8 => TypeId::of::<T>() == TypeId::of::<u8>(),
+                ValidatedSampleType::I16 => TypeId::of::<T>() == TypeId::of::<i16>(),
+                ValidatedSampleType::I24 => false,
+                ValidatedSampleType::I32 => TypeId::of::<T>() == TypeId::of::<i32>(),
+                ValidatedSampleType::F32 => TypeId::of::<T>() == TypeId::of::<f32>(),
+                ValidatedSampleType::F64 => TypeId::of::<T>() == TypeId::of::<f64>(),
+            };
+
+        let bytes_read = if native {
+            // SAFETY: `T` is a plain numeric type here, and the file's little-endian bytes are
+            // its representation on this platform.
+            let bytes = unsafe { std::slice::from_raw_parts_mut(target.as_mut_ptr().cast::<u8>(), bytes_to_read) };
+            read_full(&mut self.reader, bytes)?
+        } else {
+            read_converted(&mut self.reader, self.sample_type, target)? * self.bytes_per_frame() / channels
+        };
+
+        let frames_read = bytes_read / bytes_per_frame;
+        self.current_frame += frames_read;
+        Ok(frames_read)
+    }
+
     /// Convert raw bytes to samples of type T, writing into `out` (cleared first).
     fn convert_bytes_to_samples<T>(&self, bytes: &[u8], out: &mut Vec<T>)
     where
@@ -911,6 +953,95 @@ where
         T: StandardSample + 'static,
     {
         StreamedWavFile::read_frames_into(self, buffer, frame_count)
+    }
+}
+
+/// Read until `buf` is full or the source ends; returns the bytes read.
+fn read_full<R: std::io::Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {},
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(filled)
+}
+
+/// Fill `out` from little-endian samples of `sample_type` in `reader`, converting block by block
+/// through a buffer on the stack. Returns the samples written.
+pub(crate) fn read_converted<R, T>(
+    reader: &mut R,
+    sample_type: ValidatedSampleType,
+    out: &mut [T],
+) -> std::io::Result<usize>
+where
+    R: std::io::Read,
+    T: StandardSample + 'static,
+{
+    const SMALL: usize = 8192;
+    const LARGE: usize = 65536;
+
+    fn go<R, T, const N: usize>(
+        reader: &mut R,
+        sample_type: ValidatedSampleType,
+        out: &mut [T],
+    ) -> std::io::Result<usize>
+    where
+        R: std::io::Read,
+        T: StandardSample + 'static,
+    {
+        let size = sample_type.bytes_per_sample().get();
+        let block = N / size * size;
+        let mut buf = [0u8; N];
+        let mut written = 0;
+        while written < out.len() {
+            let want = block.min((out.len() - written) * size);
+            let n = read_full(reader, &mut buf[..want])?;
+            let samples = n / size;
+            convert_bytes_into(
+                sample_type,
+                &buf[..samples * size],
+                &mut out[written..written + samples],
+            );
+            written += samples;
+            if n < want {
+                break;
+            }
+        }
+        Ok(written)
+    }
+
+    if out.len() * sample_type.bytes_per_sample().get() > SMALL {
+        go::<R, T, LARGE>(reader, sample_type, out)
+    } else {
+        go::<R, T, SMALL>(reader, sample_type, out)
+    }
+}
+
+/// Convert little-endian samples of `sample_type` into `out`.
+fn convert_bytes_into<T>(sample_type: ValidatedSampleType, bytes: &[u8], out: &mut [T])
+where
+    T: StandardSample + 'static,
+{
+    macro_rules! go {
+        ($size:literal, |$c:ident| $value:expr) => {
+            for (d, $c) in out.iter_mut().zip(bytes.chunks_exact($size)) {
+                *d = T::convert_from($value);
+            }
+        };
+    }
+    match sample_type {
+        ValidatedSampleType::U8 => go!(1, |c| c[0]),
+        ValidatedSampleType::I16 => go!(2, |c| i16::from_le_bytes([c[0], c[1]])),
+        ValidatedSampleType::I24 => go!(3, |c| I24::from_le_bytes([c[0], c[1], c[2]])),
+        ValidatedSampleType::I32 => go!(4, |c| i32::from_le_bytes([c[0], c[1], c[2], c[3]])),
+        ValidatedSampleType::F32 => go!(4, |c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
+        ValidatedSampleType::F64 => go!(8, |c| f64::from_le_bytes([
+            c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]
+        ])),
     }
 }
 
