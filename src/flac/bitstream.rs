@@ -194,6 +194,18 @@ impl<'a> BitReader<'a> {
         }
     }
 
+    /// Drop `count` buffered bits, `1 <= count <= buf_bits`.
+    ///
+    /// `count` can be 64: the buffer holds 64 bits after a refill from empty, and a
+    /// Rice quotient of 63 zeros or more can end exactly at its last bit. A shift by
+    /// 64 is out of range for `u64` (it panics in debug builds and leaves the buffer
+    /// unchanged in release builds), so that case clears the buffer.
+    #[inline(always)]
+    fn consume_buffered(&mut self, count: u32) {
+        self.buf = self.buf.checked_shl(count).unwrap_or(0);
+        self.buf_bits -= count;
+    }
+
     /// Read a unary coded value (count 0s before the terminating 1).
     ///
     /// For FLAC Rice coding, we count 0s until we hit a 1.
@@ -215,8 +227,7 @@ impl<'a> BitReader<'a> {
             if lz < self.buf_bits {
                 // Terminating 1 is within the buffered bits
                 count += lz;
-                self.buf <<= lz + 1;
-                self.buf_bits -= lz + 1;
+                self.consume_buffered(lz + 1);
                 return Ok(count);
             } else {
                 // All buf_bits are zeros — consume them and continue
@@ -256,14 +267,12 @@ impl<'a> BitReader<'a> {
                 // Fast path: unary quotient + k-bit suffix both fit in the buffer.
                 // Extract the k bits that immediately follow the terminating 1.
                 let r = ((self.buf << (lz + 1)) >> (64 - k)) as u32;
-                self.buf <<= needed;
-                self.buf_bits -= needed;
+                self.consume_buffered(needed);
                 return Ok((lz << k) | r);
             }
             // Terminator is in buffer but k-bits straddle the refill boundary.
             let q = lz;
-            self.buf <<= lz + 1;
-            self.buf_bits -= lz + 1;
+            self.consume_buffered(lz + 1);
             self.refill();
             if self.buf_bits < k as u32 {
                 return Err(FlacError::UnexpectedEof);
@@ -672,6 +681,30 @@ impl Default for BitWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Rice code whose unary part ends exactly at the last bit of a full buffer.
+    #[test]
+    fn test_unary_ending_at_the_last_buffered_bit() {
+        // 63 zeros and the terminating 1 fill the first 8 bytes.
+        let mut data = vec![0u8; 7];
+        data.push(0b0000_0001);
+        data.extend_from_slice(&[0b1010_0000, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+        let mut reader = BitReader::new(&data);
+        assert_eq!(reader.read_unary().unwrap(), 63);
+        assert_eq!(reader.read_bits(4).unwrap(), 0b1010);
+
+        let mut reader = BitReader::new(&data);
+        assert_eq!(reader.read_rice_unsigned(4).unwrap(), (63 << 4) | 0b1010);
+
+        // Quotient and remainder together end at the 64th bit.
+        let mut data = vec![0u8; 7];
+        data.push(0b0000_1101);
+        data.extend_from_slice(&[0b1110_0000, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let mut reader = BitReader::new(&data);
+        assert_eq!(reader.read_rice_unsigned(3).unwrap(), (60 << 3) | 0b101);
+        assert_eq!(reader.read_bits(3).unwrap(), 0b111);
+    }
 
     #[test]
     fn test_read_bits_basic() {
