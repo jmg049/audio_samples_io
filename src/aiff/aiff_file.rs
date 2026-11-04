@@ -531,11 +531,18 @@ where
     writer.write_all(&0u32.to_be_bytes())?; // offset
     writer.write_all(&0u32.to_be_bytes())?; // blockSize
 
-    // Interleave and serialise big-endian frame by frame.
-    let interleaved: Vec<T> = audio.to_interleaved_vec().into_iter().collect();
-    let mut buf = Vec::with_capacity(data_size);
-    for s in interleaved {
-        write_sample_be(&mut buf, s, sample_type);
+    // Serialise big-endian frame by frame through a fixed buffer, so no copy of the signal is made.
+    const TILE_BYTES: usize = 8 * 1024;
+    let view = crate::types::channel_frame_view(audio);
+    let mut buf = Vec::with_capacity(TILE_BYTES + channels as usize * bytes_per_sample);
+    for f in 0..frames {
+        for c in 0..channels as usize {
+            write_sample_be(&mut buf, view[[c, f]], sample_type);
+        }
+        if buf.len() >= TILE_BYTES {
+            writer.write_all(&buf)?;
+            buf.clear();
+        }
     }
     writer.write_all(&buf)?;
     if ssnd_pad == 1 {

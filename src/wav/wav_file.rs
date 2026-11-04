@@ -11,18 +11,20 @@ use std::{
 };
 
 use audio_samples::{
-    AudioData, AudioSamples, I24, SampleType,
-    traits::{ConvertFrom, StandardSample},
+    AudioSamples, I24, SampleType,
+    traits::{ConvertFrom, ConvertTo, StandardSample},
 };
 use memmap2::MmapOptions;
-use ndarray::{Array1, Array2, ShapeBuilder};
+use ndarray::{Array1, Array2, ArrayView2, Axis, ShapeBuilder};
 use non_empty_slice::NonEmptyVec;
 
 use crate::{
     MAX_MMAP_SIZE, MAX_WAV_SIZE,
     error::{AudioIOError, AudioIOResult, ErrorPosition},
     traits::{AudioFile, AudioFileMetadata, AudioFileRead, AudioFileWrite, AudioInfoMarker},
-    types::{AudioDataSource, BaseAudioInfo, FileType, OpenOptions, ValidatedSampleType, WriteOptions},
+    types::{
+        AudioDataSource, BaseAudioInfo, FileType, OpenOptions, ValidatedSampleType, WriteOptions, channel_frame_view,
+    },
     wav::{
         Companding, FormatCode,
         bext::BextChunk,
@@ -1143,146 +1145,142 @@ where
     Ok(())
 }
 
-/// Build an interleaved byte buffer for WAV output and write it in one go.
-/// Mono fast-path uses the underlying contiguous bytes view; multi-channel
-/// uses optimized interleave functions for better cache locality.
-fn write_audio_data_interleaved<T, W>(writer: &mut W, audio: &AudioSamples<T>) -> AudioIOResult<()>
+/// Bytes of interleaved samples converted at a time. The buffer lives on the stack, so writing
+/// a file makes no allocation that grows with its length.
+const TILE_BYTES: usize = 8 * 1024;
+
+/// Convert `count` frames from the channel runs in `runs` to `U`, writing them interleaved
+/// little-endian at `out`. Each run holds one channel, or several already interleaved.
+///
+/// # Safety
+///
+/// `out` must be valid for `count * runs.len() * U::BYTES` bytes, and each run for `count` samples.
+#[inline(always)]
+unsafe fn pack_frames<T, U>(runs: &[&[T]], count: usize, out: *mut u8)
 where
-    T: StandardSample + 'static,
+    T: StandardSample + ConvertTo<U>,
+    U: StandardSample,
+{
+    let size = U::BYTES as usize;
+    let mut p = out;
+    let mut put = |sample: T| {
+        let converted: U = sample.convert_to();
+        let bytes = converted.to_le_bytes();
+        // SAFETY: at most `count * runs.len()` samples are written, within the caller's bound.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ref().as_ptr(), p, size);
+            p = p.add(size);
+        }
+    };
+    match runs {
+        [only] => only[..count].iter().for_each(|&s| put(s)),
+        [left, right] => {
+            for (&l, &r) in left[..count].iter().zip(&right[..count]) {
+                put(l);
+                put(r);
+            }
+        },
+        _ => {
+            for f in 0..count {
+                for run in runs {
+                    // SAFETY: every run holds at least `count` samples.
+                    put(unsafe { *run.get_unchecked(f) });
+                }
+            }
+        },
+    }
+}
+
+/// Write the samples of `view`, shape `(channels, frames)`, interleaved and little-endian as `U`.
+///
+/// Samples whose memory is already the file's layout go straight to `writer`. Anything else
+/// passes through a buffer of [`TILE_BYTES`], so no copy of the signal is made. Returns the
+/// number of bytes written.
+pub(crate) fn write_interleaved_le<T, U, W>(writer: &mut W, view: ArrayView2<'_, T>) -> AudioIOResult<usize>
+where
+    T: StandardSample + ConvertTo<U> + 'static,
+    U: StandardSample + 'static,
     W: Write,
 {
-    let num_channels = audio.num_channels();
-
-    // Mono data is already laid out correctly; respect I24 packing via AudioSamples::bytes
-    if audio.is_mono() {
-        let bytes = audio.bytes()?;
-        writer.write_all(bytes.as_slice())?;
-        return Ok(());
+    let (channels, frames) = view.dim();
+    let size = U::BYTES as usize;
+    let total = channels * frames * size;
+    if total == 0 {
+        return Ok(0);
     }
 
-    // Fast path: F-order (Fortran-contiguous) multi-channel arrays already have interleaved
-    // layout in memory — [L0, R0, L1, R1, …] — matching WAV's on-disk format exactly.
-    // On little-endian platforms the in-memory bytes need no reordering for any integer or
-    // float type (except I24 which uses a non-standard 4-byte in-memory representation).
-    #[cfg(target_endian = "little")]
-    if TypeId::of::<T>() != TypeId::of::<I24>()
-        && let AudioData::Multi(m) = audio.data()
-    {
-        let view = m.as_view();
-        if !view.is_standard_layout()
-            && let Some(slice) = view.as_slice_memory_order()
-        {
-            // Safety: T is a plain numeric type (StandardSample, not I24).
-            // Casting any &[T] to &[u8] is valid — bytes are always initialised.
-            let bytes =
-                unsafe { std::slice::from_raw_parts(slice.as_ptr().cast::<u8>(), std::mem::size_of_val(slice)) };
-            writer.write_all(bytes)?;
-            return Ok(());
-        }
-    }
-
-    let bytes_per_sample = if TypeId::of::<T>() == TypeId::of::<I24>() {
-        3usize
+    // Interleaved memory: channel stride 1, frame stride `channels`.
+    let interleaved = if channels == 1 || view.strides() == [1, channels as isize] {
+        view.as_slice_memory_order()
     } else {
-        mem::size_of::<T>()
+        None
     };
 
-    // C-order (standard-layout) path: stream interleaved bytes via a small tile buffer.
-    //
-    // The naive approach (view.t().as_standard_layout()) allocates a 10 MB intermediate Vec
-    // upfront, incurring ~2500 OS page faults (~2.5 ms) before any data moves.  Instead, we
-    // reuse a single fixed-size tile buffer (~64 KB), fill it with interleaved samples one
-    // tile at a time, and write each tile to the output — zero large allocations, sequential
-    // reads within each channel's tile window, sequential writes.
     #[cfg(target_endian = "little")]
-    if TypeId::of::<T>() != TypeId::of::<I24>()
-        && let AudioData::Multi(m) = audio.data()
+    if let Some(slice) = interleaved
+        && TypeId::of::<T>() == TypeId::of::<U>()
+        && TypeId::of::<T>() != TypeId::of::<I24>()
     {
-        let view = m.as_view();
-        if view.is_standard_layout() {
-            use std::mem::MaybeUninit;
+        // SAFETY: T is a plain numeric type, for which any initialised memory is valid bytes,
+        // and its in-memory layout on a little-endian machine is the file's.
+        let bytes = unsafe { std::slice::from_raw_parts(slice.as_ptr().cast::<u8>(), total) };
+        writer.write_all(bytes)?;
+        return Ok(total);
+    }
 
-            let channels = view.shape()[0];
-            let frames = view.shape()[1];
-            let sample_size = mem::size_of::<T>();
+    let frame_bytes = channels * size;
+    #[repr(align(64))]
+    struct Tile([mem::MaybeUninit<u8>; TILE_BYTES]);
+    let mut stack = Tile([mem::MaybeUninit::uninit(); TILE_BYTES]);
+    // A frame larger than the stack buffer is only possible with over a thousand channels.
+    let mut heap: Vec<u8> = Vec::new();
+    let tile: *mut u8 = if frame_bytes > TILE_BYTES {
+        heap.reserve_exact(frame_bytes);
+        heap.as_mut_ptr()
+    } else {
+        stack.0.as_mut_ptr().cast()
+    };
+    let tile_frames = (TILE_BYTES / frame_bytes).max(1);
 
-            // Tile size: aim for ~64 KB of output data to stay in L1/L2 cache.
-            const TARGET_TILE_BYTES: usize = 512 * 1024;
-            let tile_frames = (TARGET_TILE_BYTES / (channels * sample_size)).max(1);
+    let row_slices: Option<Vec<&[T]>> = if interleaved.is_none() {
+        (0..channels).map(|c| view.index_axis(Axis(0), c).to_slice()).collect()
+    } else {
+        None
+    };
 
-            // One contiguous slice per channel (rows are contiguous in C-order).
-            let rows: Vec<&[T]> = (0..channels)
-                .map(|c| view.row(c).to_slice().expect("C-order row is contiguous"))
-                .collect();
-
-            // Pre-allocate tile buffer once — avoids per-tile page faults.
-            let tile_capacity = tile_frames * channels;
-
-            // Allocate uninitialised buffer
-            let mut tile: Vec<MaybeUninit<T>> = Vec::with_capacity(tile_capacity);
-
-            // SAFETY: we will initialise every element before reading
-            unsafe { tile.set_len(tile_capacity) };
-
-            for tile_start in (0..frames).step_by(tile_frames) {
-                let tile_end = (tile_start + tile_frames).min(frames);
-                let actual_frames = tile_end - tile_start;
-                // Channels-outer loop: each channel's tile window is read sequentially,
-                // letting the HW prefetcher stream contiguous cache lines.  Writes land
-                // at stride=channels in the tile buffer (still within a small working set).
+    let mut tails: Vec<&[T]> = Vec::with_capacity(channels);
+    let mut start = 0usize;
+    while start < frames {
+        let count = tile_frames.min(frames - start);
+        let bytes = count * frame_bytes;
+        if let Some(slice) = interleaved {
+            // SAFETY: the tile holds `count * channels * size` bytes, the slice that many samples
+            // from `start * channels`.
+            unsafe { pack_frames::<T, U>(&[&slice[start * channels..]], count * channels, tile) };
+        } else if let Some(rows) = &row_slices {
+            tails.clear();
+            tails.extend(rows.iter().map(|r| &r[start..]));
+            // SAFETY: the tile holds `count` frames and each tail that many samples.
+            unsafe { pack_frames::<T, U>(&tails, count, tile) };
+        } else {
+            let mut p = tile;
+            for f in start..start + count {
                 for c in 0..channels {
-                    for (i, f) in (tile_start..tile_end).enumerate() {
-                        // Safety: f < frames and c < channels, both in bounds.
-                        tile[i * channels + c].write(rows[c][f]);
+                    let converted: U = view[[c, f]].convert_to();
+                    let encoded = converted.to_le_bytes();
+                    // SAFETY: at most `count * frame_bytes` bytes are written to the tile.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(encoded.as_ref().as_ptr(), p, size);
+                        p = p.add(size);
                     }
                 }
-                // Safety: T is a plain numeric type (not I24), LE platform; tile
-                // slice is fully initialised above.
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(tile.as_ptr().cast::<u8>(), actual_frames * channels * sample_size)
-                };
-                writer.write_all(bytes)?;
             }
-            return Ok(());
         }
+        // SAFETY: every one of these bytes was written above.
+        writer.write_all(unsafe { std::slice::from_raw_parts(tile, bytes) })?;
+        start += count;
     }
-
-    // Fallback: materialise an interleaved Vec then serialise sample-by-sample.
-    // Handles I24, big-endian platforms, and non-contiguous array layouts.
-    let interleaved = audio.data().as_interleaved_vec();
-    let total_samples = interleaved.len();
-
-    const TARGET_CHUNK_BYTES: usize = 256 * 1024;
-    let chunk_samples = TARGET_CHUNK_BYTES
-        .checked_div(bytes_per_sample)
-        .ok_or(AudioIOError::corrupted_data_simple(
-            "Chunk size calculation overflow",
-            "TARGET_CHUNK_BYTES / bytes_per_sample",
-        ))?
-        .max(num_channels.get() as usize);
-
-    let mut buf = vec![0u8; chunk_samples * bytes_per_sample];
-
-    let mut sample_start = 0;
-    while sample_start < total_samples.get() {
-        let remaining = total_samples.get() - sample_start;
-        let samples_this_chunk = remaining.min(chunk_samples);
-        let bytes_this_chunk = samples_this_chunk * bytes_per_sample;
-
-        let mut write_idx = 0;
-        for sample in interleaved.iter().skip(sample_start).take(samples_this_chunk) {
-            let bytes = sample.to_le_bytes();
-            let dst = &mut buf[write_idx..write_idx + bytes_per_sample];
-            dst.copy_from_slice(bytes.as_ref());
-            write_idx += bytes_per_sample;
-        }
-
-        debug_assert_eq!(write_idx, bytes_this_chunk);
-        writer.write_all(&buf[..bytes_this_chunk])?;
-        sample_start += samples_this_chunk;
-    }
-
-    Ok(())
+    Ok(total)
 }
 
 /// Optional metadata chunks written after the audio `data` chunk.
@@ -1394,7 +1392,7 @@ where
     writer.write_all(&(data_size as u32).to_le_bytes())?;
 
     // Write audio data (interleaved for multi-channel)
-    write_audio_data_interleaved(&mut writer, audio)?;
+    write_interleaved_le::<T, T, _>(&mut writer, channel_frame_view(audio))?;
 
     // Add padding byte if needed
     if data_size % 2 == 1 {

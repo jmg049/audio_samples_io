@@ -129,9 +129,7 @@ where
             ));
         }
 
-        let interleaved = samples.data().as_interleaved_vec();
-        let bytes_written =
-            write_frames_converted::<T, W>(&mut self.writer, &interleaved, self.sample_type, self.channels)?;
+        let bytes_written = write_frames_converted::<T, W>(&mut self.writer, samples, self.sample_type)?;
 
         self.frames_written += frames_per_channel;
         self.data_bytes_written += bytes_written as u64;

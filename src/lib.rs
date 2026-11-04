@@ -721,9 +721,8 @@ where
     use audio_samples::I24;
     let type_id = TypeId::of::<T>();
     match type_id {
-        id if id == TypeId::of::<u8>() || id == TypeId::of::<i16>() => {
-            StreamedWavWriter::new_i16(writer, channels, sample_rate)
-        },
+        id if id == TypeId::of::<u8>() => StreamedWavWriter::new_u8(writer, channels, sample_rate),
+        id if id == TypeId::of::<i16>() => StreamedWavWriter::new_i16(writer, channels, sample_rate),
         id if id == TypeId::of::<I24>() => StreamedWavWriter::new_i24(writer, channels, sample_rate),
         id if id == TypeId::of::<i32>() => StreamedWavWriter::new_i32(writer, channels, sample_rate),
         id if id == TypeId::of::<f32>() => StreamedWavWriter::new_f32(writer, channels, sample_rate),
@@ -873,8 +872,8 @@ where
 ///
 /// let audio = sine_wave::<f32>(440.0, Duration::from_secs(60), sample_rate!(44100), 0.5);
 ///
-/// // 16 MiB buffer for a 60-second file (~21 MiB stereo f32).
-/// write_with_options("long.wav", &audio, WriteOptions { write_buf_capacity: 16 * 1024 * 1024 })?;
+/// // Batch small writes on a destination where each write is expensive.
+/// write_with_options("long.wav", &audio, WriteOptions { write_buf_capacity: 1024 * 1024 })?;
 /// # Ok::<(), audio_samples_io::error::AudioIOError>(())
 /// ```
 pub fn write_with_options<P, T>(fp: P, audio: &AudioSamples<T>, opts: WriteOptions) -> AudioIOResult<()>

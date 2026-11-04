@@ -8,7 +8,7 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use audio_samples::SampleType;
+use audio_samples::{AudioSamples, SampleType, traits::StandardSample};
 use memmap2::Mmap;
 
 use crate::error::AudioIOError;
@@ -551,11 +551,22 @@ impl Default for OpenOptions {
     }
 }
 
-/// Default write-buffer capacity: 4 MiB.
+/// The samples of `audio` as a `(channels, frames)` view, for mono and multi-channel alike.
+pub(crate) fn channel_frame_view<'b, T>(audio: &'b AudioSamples<'_, T>) -> ndarray::ArrayView2<'b, T>
+where
+    T: StandardSample,
+{
+    match audio.data() {
+        audio_samples::AudioData::Mono(m) => m.as_view().insert_axis(ndarray::Axis(0)),
+        audio_samples::AudioData::Multi(m) => m.as_view(),
+    }
+}
+
+/// Default write-buffer capacity: 256 bytes, enough to hold a file's header.
 ///
-/// Large enough to hold a full 10-second stereo file (≤ 3.5 MiB) in one shot,
-/// flushing the kernel page-cache in a single `write()` syscall.
-pub const DEFAULT_WRITE_BUF_CAPACITY: usize = 4 * 1024 * 1024;
+/// Samples are written straight to the destination whenever their memory is already the file's
+/// layout, and otherwise in tiles of a few KiB. A larger buffer would only copy them first.
+pub const DEFAULT_WRITE_BUF_CAPACITY: usize = 256;
 
 /// Options controlling how audio data is written.
 ///
@@ -564,24 +575,19 @@ pub const DEFAULT_WRITE_BUF_CAPACITY: usize = 4 * 1024 * 1024;
 /// ```
 /// use audio_samples_io::types::WriteOptions;
 ///
-/// // Default: 4 MiB write buffer.
+/// // Default: the buffer holds the header; samples go straight to the file.
 /// let default_opts = WriteOptions::default();
 ///
-/// // Smaller buffer for memory-constrained environments.
-/// let small_opts = WriteOptions { write_buf_capacity: 256 * 1024 };
-///
-/// // Larger buffer for writing many multi-minute files sequentially.
-/// let large_opts = WriteOptions { write_buf_capacity: 16 * 1024 * 1024 };
+/// // Batch writes for a destination where each write is expensive.
+/// let batched_opts = WriteOptions { write_buf_capacity: 1024 * 1024 };
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct WriteOptions {
     /// Size of the internal write buffer in bytes.
     ///
-    /// A larger buffer reduces the number of `write()` syscalls at the cost of a larger
-    /// upfront allocation.  The default (`DEFAULT_WRITE_BUF_CAPACITY`, 4 MiB) fully buffers
-    /// most short audio files before issuing any I/O, and cuts syscall count significantly
-    /// for longer ones.  Reduce this in memory-constrained environments; increase it when
-    /// writing many large files sequentially.
+    /// The default ([`DEFAULT_WRITE_BUF_CAPACITY`]) holds only the file's header. A larger
+    /// buffer reduces the number of `write()` calls for layouts written in tiles, at the cost of
+    /// an allocation of this size and a copy of every sample that passes through it.
     pub write_buf_capacity: usize,
 }
 
