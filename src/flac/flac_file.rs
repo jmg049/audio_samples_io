@@ -192,9 +192,14 @@ impl<'a> FlacFile<'a> {
         let block_size_hint = self.stream_info.max_block_size as usize;
 
         let data = self.audio_data();
+        // Pages of a mapped file that have been decoded go back at once, so that the resident
+        // size does not grow by the size of the file.
+        let offset = self.audio_data_offset;
+        let source = &self.data_source;
+        let release = move |range: std::ops::Range<usize>| source.release(offset + range.start..offset + range.end);
         // SAFETY: the caller's guarantee on `out` is the one this call needs.
         if super::parallel::worth_decoding_in_parallel(data)
-            && unsafe { super::parallel::decode_planar_parallel(data, &self.stream_info, out, total_spc) }
+            && unsafe { super::parallel::decode_planar_parallel(data, &self.stream_info, out, total_spc, &release) }
         {
             return Ok(Some(total_spc));
         }

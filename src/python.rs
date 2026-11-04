@@ -64,8 +64,11 @@ mod sample_memory {
         let map = MmapOptions::new().len(needed).map_anon()?;
         let start = map.as_ptr() as usize;
         let inner = start.next_multiple_of(HUGE_PAGE) - start;
-        // Only an optimisation: without huge pages the memory works the same.
-        let _ = map.advise_range(Advice::HugePage, inner, needed - inner);
+        // Huge pages for whole units of the array; the rest stays in small pages, so that the
+        // resident size is the array's. Only an optimisation: without them the memory works the same.
+        let whole = bytes / HUGE_PAGE * HUGE_PAGE;
+        let _ = map.advise_range(Advice::HugePage, inner, whole);
+        let _ = map.advise_range(Advice::NoHugePage, inner + whole, needed - inner - whole);
         Ok(map)
     }
 

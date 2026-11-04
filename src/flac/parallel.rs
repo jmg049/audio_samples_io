@@ -51,15 +51,25 @@ pub(crate) fn worth_decoding_in_parallel(data: &[u8]) -> bool {
 }
 
 /// Decode the frames in `data` into `out`, planar with `total` samples per channel. True if every
-/// frame decoded and together they cover exactly `total` samples.
+/// frame decoded and together they cover exactly `total` samples. `consumed(range)` is called now
+/// and then with a range of `data` that thread has finished with.
 ///
 /// # Safety
 ///
 /// `out` must be valid for writes of `channels * total` values of `T`.
-pub(crate) unsafe fn decode_planar_parallel<T>(data: &[u8], info: &StreamInfo, out: *mut T, total: usize) -> bool
+pub(crate) unsafe fn decode_planar_parallel<T>(
+    data: &[u8],
+    info: &StreamInfo,
+    out: *mut T,
+    total: usize,
+    consumed: &(dyn Fn(std::ops::Range<usize>) + Sync),
+) -> bool
 where
     T: StandardSample + 'static,
 {
+    /// Bytes a thread decodes between calls to `consumed`.
+    const RELEASE_BYTES: usize = 128 * 1024;
+
     let channels = info.channels as usize;
     let threads = decode_threads().min(data.len() / MIN_BYTES_PER_THREAD).max(1);
     if channels == 0 || threads < 2 {
@@ -89,6 +99,7 @@ where
             None => (data.len(), total),
         };
         let mut sample = first as usize;
+        let mut released = at;
         let block_hint = info.max_block_size as usize;
         let mut scratch: Vec<Vec<i32>> = (0..channels).map(|_| Vec::with_capacity(block_hint)).collect();
         while at < end && sample < end_sample {
@@ -109,6 +120,10 @@ where
             }
             sample += block;
             at += used;
+            if at - released >= RELEASE_BYTES {
+                consumed(released..at);
+                released = at;
+            }
         }
         sample == end_sample && (index + 1 == ranges || at == end)
     })

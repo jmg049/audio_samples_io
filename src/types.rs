@@ -407,6 +407,25 @@ impl<'a> AudioDataSource<'a> {
         }
     }
 
+    /// Tell the OS that `range` will not be needed soon, so that a mapped file's pages leave the
+    /// resident set. They come back from the file if read again.
+    #[cfg_attr(not(feature = "flac"), allow(dead_code))]
+    pub(crate) fn release(&self, range: std::ops::Range<usize>) {
+        #[cfg(target_os = "linux")]
+        if let AudioDataSource::MemoryMapped(mmap) = self {
+            const PAGE: usize = 4096;
+            let start = range.start.next_multiple_of(PAGE);
+            let end = range.end / PAGE * PAGE;
+            if end > start {
+                // SAFETY: the mapping is a private view of a file, never written through here, so
+                // dropping its pages loses nothing: the next read faults them in from the file.
+                let _ = unsafe { mmap.unchecked_advise_range(memmap2::UncheckedAdvice::DontNeed, start, end - start) };
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = (self, range);
+    }
+
     /// Returns the length of the buffer in bytes
     #[inline]
     pub fn len(&self) -> usize {
