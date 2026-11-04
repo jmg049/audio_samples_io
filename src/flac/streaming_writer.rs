@@ -19,45 +19,23 @@
 //! finalize. The MD5 signature is left zeroed (the "unknown" sentinel), exactly as the
 //! bulk encoder does.
 
-use std::io::{SeekFrom, Write};
+use std::io::SeekFrom;
 
-use audio_samples::{AudioSamples, SampleType, traits::StandardSample};
+use audio_samples::{AudioSamples, traits::StandardSample};
 
 use super::{
-    CompressionLevel, constants::FLAC_MARKER, flac_file::audio_to_planar_i32, frame::encode_frame_from_channels,
+    CompressionLevel,
+    constants::FLAC_MARKER,
+    encoder::{EncoderConfig, FrameEncoder},
+    flac_file::{append_channel_i32, flac_bits_per_sample},
     metadata::StreamInfo,
 };
 use crate::{
     WriteSeek,
     error::{AudioIOError, AudioIOResult},
     traits::{AudioStreamWrite, AudioStreamWriter},
-    types::ValidatedSampleType,
+    types::{ValidatedSampleType, channel_frame_view},
 };
-
-/// Encoder parameters derived once from a [`CompressionLevel`], reused for every frame.
-#[derive(Debug, Clone, Copy)]
-struct FlacEncodeParams {
-    max_lpc_order: usize,
-    qlp_precision: u8,
-    min_partition_order: u8,
-    max_partition_order: u8,
-    try_mid_side: bool,
-    exhaustive_rice: bool,
-}
-
-impl FlacEncodeParams {
-    const fn from_level(level: CompressionLevel) -> Self {
-        let (min_partition_order, max_partition_order) = level.rice_partition_order_range();
-        Self {
-            max_lpc_order: level.max_lpc_order() as usize,
-            qlp_precision: level.qlp_precision(),
-            min_partition_order,
-            max_partition_order,
-            try_mid_side: level.try_mid_side(),
-            exhaustive_rice: level.exhaustive_rice_search(),
-        }
-    }
-}
 
 /// A streaming FLAC writer that encodes audio incrementally, block by block.
 ///
@@ -82,7 +60,6 @@ impl FlacEncodeParams {
 /// without an explicit `finalize`, it finalizes on a best-effort basis (errors are
 /// swallowed, since [`Drop`] cannot report them); prefer calling `finalize` yourself so
 /// I/O errors surface.
-#[derive(Debug)]
 pub struct StreamedFlacWriter<W>
 where
     W: WriteSeek,
@@ -97,8 +74,8 @@ where
     bits_per_sample: u8,
     /// Encoding block size (samples per channel per full frame).
     block_size: u32,
-    /// Encoder parameters derived from the compression level.
-    params: FlacEncodeParams,
+    /// Frame encoder, with buffers kept between frames.
+    encoder: FrameEncoder,
     /// Per-channel buffer of i32 samples not yet emitted as a full block.
     accum: Vec<Vec<i32>>,
     /// Next frame number (FLAC fixed-blocksize frame counter).
@@ -213,7 +190,9 @@ where
         let streaminfo_offset = writer.stream_position()?;
         writer.write_all(&streaminfo_bytes)?;
 
-        let accum = (0..channels as usize).map(|_| Vec::new()).collect();
+        let accum = (0..channels as usize)
+            .map(|_| Vec::with_capacity(block_size as usize))
+            .collect();
 
         Ok(Self {
             writer,
@@ -221,7 +200,11 @@ where
             sample_rate,
             bits_per_sample,
             block_size,
-            params: FlacEncodeParams::from_level(level),
+            encoder: FrameEncoder::new(
+                EncoderConfig::for_level(level, bits_per_sample, block_size),
+                channels as usize,
+                block_size as usize,
+            ),
             accum,
             frame_number: 0,
             frames_written: 0,
@@ -239,37 +222,45 @@ const fn flac_bits_for(sample_type: ValidatedSampleType) -> u8 {
     }
 }
 
-/// Encode `accum[..][start..start + len]` as one FLAC frame and write it to `writer`.
-///
-/// Takes `writer` and `accum` as separate borrows so the caller can pass disjoint fields
-/// of `self`.
-#[allow(clippy::too_many_arguments)]
-fn encode_and_write_block<W: Write>(
-    writer: &mut W,
-    accum: &[Vec<i32>],
-    start: usize,
-    len: usize,
-    bits_per_sample: u8,
-    sample_rate: u32,
-    frame_number: u64,
-    params: &FlacEncodeParams,
-) -> AudioIOResult<()> {
-    let ch_slices: Vec<&[i32]> = accum.iter().map(|ch| &ch[start..start + len]).collect();
-    let frame_bytes = encode_frame_from_channels(
-        &ch_slices,
-        bits_per_sample,
-        sample_rate,
-        frame_number,
-        params.max_lpc_order,
-        params.qlp_precision,
-        params.min_partition_order,
-        params.max_partition_order,
-        params.try_mid_side,
-        params.exhaustive_rice,
-    )
-    .map_err(AudioIOError::FlacError)?;
-    writer.write_all(&frame_bytes)?;
-    Ok(())
+impl<W> std::fmt::Debug for StreamedFlacWriter<W>
+where
+    W: WriteSeek,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamedFlacWriter")
+            .field("channels", &self.channels)
+            .field("sample_rate", &self.sample_rate)
+            .field("bits_per_sample", &self.bits_per_sample)
+            .field("block_size", &self.block_size)
+            .field("frames_written", &self.frames_written)
+            .field("finalized", &self.finalized)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<W> StreamedFlacWriter<W>
+where
+    W: WriteSeek,
+{
+    /// Encode `accum[..][start..start + len]` as one frame and write it.
+    fn encode_block(&mut self, start: usize, len: usize) -> AudioIOResult<()> {
+        let mut slices = [&[][..]; 8];
+        for (slice, channel) in slices.iter_mut().zip(&self.accum) {
+            *slice = &channel[start..start + len];
+        }
+        let frame = self
+            .encoder
+            .encode(
+                &slices[..self.accum.len()],
+                self.bits_per_sample,
+                self.sample_rate,
+                self.frame_number,
+            )
+            .map_err(AudioIOError::FlacError)?;
+        self.writer.write_all(frame)?;
+        self.frame_number += 1;
+        Ok(())
+    }
 }
 
 impl<W> AudioStreamWriter for StreamedFlacWriter<W>
@@ -291,17 +282,7 @@ where
         // Encode any buffered trailing (partial) block as the final frame.
         let remaining = self.accum.first().map(|c| c.len()).unwrap_or(0);
         if remaining > 0 {
-            encode_and_write_block(
-                &mut self.writer,
-                &self.accum,
-                0,
-                remaining,
-                self.bits_per_sample,
-                self.sample_rate,
-                self.frame_number,
-                &self.params,
-            )?;
-            self.frame_number += 1;
+            self.encode_block(0, remaining)?;
             for ch in self.accum.iter_mut() {
                 ch.clear();
             }
@@ -384,10 +365,7 @@ where
         }
 
         // Validate bit depth: every chunk must map to the writer's configured depth.
-        let chunk_bits: u8 = match T::SAMPLE_TYPE {
-            SampleType::I16 => 16,
-            _ => 24,
-        };
+        let chunk_bits = flac_bits_per_sample::<T>();
         if chunk_bits != self.bits_per_sample {
             return Err(AudioIOError::corrupted_data_simple(
                 "Sample bit-depth mismatch",
@@ -399,32 +377,22 @@ where
         }
 
         let frames_per_channel = samples.samples_per_channel().get();
-        let planar = audio_to_planar_i32(samples)?;
-        for (ch, data) in planar.iter().enumerate() {
-            self.accum[ch].extend_from_slice(data);
-        }
-
-        // Emit every complete block now; keep the remainder buffered.
+        let view = channel_frame_view(samples);
         let bs = self.block_size as usize;
-        let available = self.accum.first().map(|c| c.len()).unwrap_or(0);
-        if bs > 0 && available >= bs {
-            let full_blocks = available / bs;
-            for b in 0..full_blocks {
-                encode_and_write_block(
-                    &mut self.writer,
-                    &self.accum,
-                    b * bs,
-                    bs,
-                    self.bits_per_sample,
-                    self.sample_rate,
-                    self.frame_number,
-                    &self.params,
-                )?;
-                self.frame_number += 1;
+        // Convert only what completes a block, then encode it, so the buffers never outgrow it.
+        let mut taken = 0usize;
+        while taken < frames_per_channel {
+            let held = self.accum.first().map_or(0, Vec::len);
+            let take = (bs - held).min(frames_per_channel - taken);
+            for (c, out) in self.accum.iter_mut().enumerate() {
+                append_channel_i32(view, c, taken, take, out);
             }
-            let consumed = full_blocks * bs;
-            for ch in self.accum.iter_mut() {
-                ch.drain(0..consumed);
+            taken += take;
+            if held + take == bs {
+                self.encode_block(0, bs)?;
+                for ch in self.accum.iter_mut() {
+                    ch.clear();
+                }
             }
         }
 

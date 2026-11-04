@@ -13,11 +13,8 @@ use crate::flac::constants::{
     block_size_to_code, sample_rate_to_code,
 };
 use crate::flac::crc::{Crc8, Crc16};
+use crate::flac::encoder::{EncoderConfig, FrameEncoder, StereoSearch};
 use crate::flac::error::FlacError;
-#[cfg(not(feature = "flac-parallel"))]
-use crate::flac::subframe::encode_subframe_into;
-#[cfg(feature = "flac-parallel")]
-use crate::flac::subframe::{EncodedSubframe, encode_subframe};
 use crate::flac::subframe::{Subframe, decode_subframe, decode_subframe_into};
 
 /// Decoded frame header.
@@ -661,7 +658,7 @@ pub fn encode_frame(
 }
 
 /// Encode frame header.
-fn encode_frame_header(
+pub(crate) fn encode_frame_header(
     writer: &mut BitWriter,
     block_size: u32,
     sample_rate: u32,
@@ -717,46 +714,10 @@ fn encode_frame_header(
     Ok(())
 }
 
-/// Find the best stereo encoding mode using residual energy estimation.
-///
-/// Rather than fully encoding all four candidate modes (8 subframe encodes),
-/// this uses L1 residual energy as a proxy for encoding cost. The mode with
-/// the lowest estimated energy is selected and only that mode's channel data
-/// is returned. The side-channel modes incur a +1 bit-per-sample overhead
-/// which is approximated as a penalty of `block_size` to the energy score.
-fn find_best_stereo_mode(left: &[i32], right: &[i32]) -> (ChannelAssignment, Vec<Vec<i32>>) {
-    let n = left.len() as u64;
-
-    let side: Vec<i32> = left.iter().zip(right.iter()).map(|(&l, &r)| l - r).collect();
-    let mid: Vec<i32> = left.iter().zip(right.iter()).map(|(&l, &r)| (l + r) >> 1).collect();
-
-    let e_left: u64 = left.iter().map(|&s| (s as i64).unsigned_abs()).sum();
-    let e_right: u64 = right.iter().map(|&s| (s as i64).unsigned_abs()).sum();
-    let e_side: u64 = side.iter().map(|&s| (s as i64).unsigned_abs()).sum();
-    let e_mid: u64 = mid.iter().map(|&s| (s as i64).unsigned_abs()).sum();
-
-    // Side-channel modes require 1 extra bit/sample — model as +n penalty
-    let score_ind = e_left + e_right;
-    let score_ls = e_left + e_side + n;
-    let score_rs = e_side + e_right + n;
-    let score_ms = e_mid + e_side + n;
-
-    if score_ind <= score_ls && score_ind <= score_rs && score_ind <= score_ms {
-        (ChannelAssignment::Independent(2), vec![left.to_vec(), right.to_vec()])
-    } else if score_ls <= score_rs && score_ls <= score_ms {
-        (ChannelAssignment::LeftSide, vec![left.to_vec(), side])
-    } else if score_rs <= score_ms {
-        (ChannelAssignment::RightSide, vec![side, right.to_vec()])
-    } else {
-        (ChannelAssignment::MidSide, vec![mid, side])
-    }
-}
-
 /// Encode samples into a FLAC frame from already-deinterleaved channel slices.
 ///
-/// This avoids the interleave→deinterleave round-trip of `encode_frame`.
-/// For independent channels the input slices are encoded directly without
-/// allocating intermediate owned Vecs.
+/// Builds its buffers for this one frame. To encode many frames, use a `StreamedFlacWriter` or
+/// [`write_flac`](crate::flac::write_flac), which keep them between frames.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_frame_from_channels(
     channel_samples: &[&[i32]],
@@ -770,137 +731,27 @@ pub fn encode_frame_from_channels(
     try_mid_side: bool,
     exhaustive_rice: bool,
 ) -> Result<Vec<u8>, FlacError> {
-    let num_channels = channel_samples.len() as u8;
-    if channel_samples.is_empty() {
+    let Some(first) = channel_samples.first() else {
         return Err(FlacError::InvalidChannelCount { channels: 0 });
-    }
-    let block_size = channel_samples[0].len() as u32;
-
-    let mut writer = BitWriter::with_capacity(channel_samples[0].len() * num_channels as usize * 4);
-
-    if num_channels == 2 && try_mid_side {
-        let (channel_assignment, owned) = find_best_stereo_mode(channel_samples[0], channel_samples[1]);
-
-        // Write header before subframe encoding so the sequential path can write
-        // subframes directly into the frame writer without an intermediate buffer.
-        encode_frame_header(
-            &mut writer,
-            block_size,
-            sample_rate,
-            channel_assignment,
-            bits_per_sample,
-            frame_number,
-        )?;
-        writer.align_to_byte();
-        let crc8 = Crc8::compute(writer.data());
-        writer.write_bits(crc8 as u32, 8);
-
-        #[cfg(feature = "flac-parallel")]
-        {
-            use rayon::prelude::*;
-            let subframe_data: Vec<EncodedSubframe> = owned
-                .par_iter()
-                .enumerate()
-                .map(|(ch, ch_data)| {
-                    let subframe_bps = match (channel_assignment, ch) {
-                        (ChannelAssignment::LeftSide, 1)
-                        | (ChannelAssignment::RightSide, 0)
-                        | (ChannelAssignment::MidSide, 1) => bits_per_sample + 1,
-                        _ => bits_per_sample,
-                    };
-                    encode_subframe(
-                        ch_data,
-                        subframe_bps,
-                        max_lpc_order,
-                        qlp_precision,
-                        min_partition_order,
-                        max_partition_order,
-                        exhaustive_rice,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            for encoded in &subframe_data {
-                writer.write_packed_bits(&encoded.data, encoded.bits);
-            }
-        }
-        #[cfg(not(feature = "flac-parallel"))]
-        for (ch, ch_data) in owned.iter().enumerate() {
-            let subframe_bps = match (channel_assignment, ch) {
-                (ChannelAssignment::LeftSide, 1)
-                | (ChannelAssignment::RightSide, 0)
-                | (ChannelAssignment::MidSide, 1) => bits_per_sample + 1,
-                _ => bits_per_sample,
-            };
-            encode_subframe_into(
-                &mut writer,
-                ch_data,
-                subframe_bps,
-                max_lpc_order,
-                qlp_precision,
-                min_partition_order,
-                max_partition_order,
-                exhaustive_rice,
-            )?;
-        }
-    } else {
-        let channel_assignment = ChannelAssignment::Independent(num_channels);
-
-        encode_frame_header(
-            &mut writer,
-            block_size,
-            sample_rate,
-            channel_assignment,
-            bits_per_sample,
-            frame_number,
-        )?;
-        writer.align_to_byte();
-        let crc8 = Crc8::compute(writer.data());
-        writer.write_bits(crc8 as u32, 8);
-
-        #[cfg(feature = "flac-parallel")]
-        {
-            use rayon::prelude::*;
-            let subframe_data: Vec<EncodedSubframe> = channel_samples
-                .par_iter()
-                .map(|&ch_data| {
-                    encode_subframe(
-                        ch_data,
-                        bits_per_sample,
-                        max_lpc_order,
-                        qlp_precision,
-                        min_partition_order,
-                        max_partition_order,
-                        exhaustive_rice,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            for encoded in &subframe_data {
-                writer.write_packed_bits(&encoded.data, encoded.bits);
-            }
-        }
-        #[cfg(not(feature = "flac-parallel"))]
-        for &ch_data in channel_samples {
-            encode_subframe_into(
-                &mut writer,
-                ch_data,
-                bits_per_sample,
-                max_lpc_order,
-                qlp_precision,
-                min_partition_order,
-                max_partition_order,
-                exhaustive_rice,
-            )?;
-        }
-    }
-
-    // Single frame-level padding to byte boundary before CRC-16
-    writer.align_to_byte();
-
-    let frame_data = writer.data();
-    let crc16 = Crc16::compute(frame_data);
-    writer.write_bits(crc16 as u32, 16);
-
-    Ok(writer.finish())
+    };
+    let config = EncoderConfig {
+        max_lpc_order,
+        qlp_precision,
+        min_partition_order,
+        max_partition_order,
+        stereo: if try_mid_side {
+            StereoSearch::Estimate
+        } else {
+            StereoSearch::Independent
+        },
+        wide_rice: exhaustive_rice,
+        window_parts: 1,
+        window_trials: 0,
+    };
+    let mut encoder = FrameEncoder::new(config, channel_samples.len(), first.len());
+    encoder
+        .encode(channel_samples, bits_per_sample, sample_rate, frame_number)
+        .map(<[u8]>::to_vec)
 }
 
 #[cfg(test)]

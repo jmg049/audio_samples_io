@@ -53,14 +53,20 @@ fn check_layouts<T: StandardSample + 'static>(make: impl Fn(i64) -> T) {
         let bulk = |audio: AudioSamples<'_, T>, what: &str| {
             let mut out = Vec::new();
             write_with(Cursor::new(&mut out), &audio, FileType::WAV).unwrap();
-            assert!(data_chunk(&out) == expected.as_slice(), "bulk {what}, {channels} channels");
+            assert!(
+                data_chunk(&out) == expected.as_slice(),
+                "bulk {what}, {channels} channels"
+            );
 
             let mut out = Vec::new();
             let mut w = create_streamed_writer::<_, T>(Cursor::new(&mut out), channels as u16, 44100).unwrap();
             w.write_frames(&audio).unwrap();
             w.finalize().unwrap();
             drop(w);
-            assert!(data_chunk(&out) == expected.as_slice(), "streamed {what}, {channels} channels");
+            assert!(
+                data_chunk(&out) == expected.as_slice(),
+                "streamed {what}, {channels} channels"
+            );
         };
 
         if channels == 1 {

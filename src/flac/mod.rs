@@ -43,6 +43,7 @@ pub mod subframe;
 
 mod bitstream;
 mod constants;
+mod encoder;
 mod flac_file;
 mod streaming;
 mod streaming_writer;
@@ -88,8 +89,7 @@ impl CompressionLevel {
     /// Get recommended block size for this level
     pub const fn block_size(self) -> u32 {
         match self.0 {
-            0 | 1 => 1152,
-            2 | 3 => 2304,
+            0..=2 => 1152,
             _ => 4096,
         }
     }
@@ -104,7 +104,7 @@ impl CompressionLevel {
         }
     }
 
-    /// Whether to use exhaustive Rice parameter search
+    /// Whether to compare the Rice parameters on either side of the one a partition's mean implies
     pub const fn exhaustive_rice_search(self) -> bool {
         self.0 >= 6
     }
@@ -117,8 +117,8 @@ impl CompressionLevel {
     /// Get Rice partition order range (min, max)
     pub const fn rice_partition_order_range(self) -> (u8, u8) {
         match self.0 {
-            0 | 1 => (0, 3),
-            2 | 3 => (0, 4),
+            0..=2 => (0, 3),
+            3 | 4 => (0, 4),
             6..=8 => (0, 6),
             _ => (0, 5),
         }
@@ -126,16 +126,23 @@ impl CompressionLevel {
 
     /// Whether to try mid-side stereo encoding
     pub const fn try_mid_side(self) -> bool {
-        self.0 >= 1
+        self.0 >= 1 && self.0 != 3
     }
 
-    /// LPC coefficient quantization precision
-    pub const fn qlp_precision(self) -> u8 {
+    /// Largest number of parts a block is divided into for partial analysis windows, which
+    /// suit signals that change within a block. 1 analyses the whole block only.
+    pub const fn window_parts(self) -> u8 {
         match self.0 {
-            5..=7 => 14,
-            8 => 15,
-            _ => 12,
+            0..=5 => 1,
+            6 | 7 => 2,
+            _ => 3,
         }
+    }
+
+    /// LPC coefficient precision for this level's block size and 16-bit samples. Wider samples
+    /// use up to 15 bits.
+    pub const fn qlp_precision(self) -> u8 {
+        encoder::auto_qlp_precision(16, self.block_size())
     }
 }
 

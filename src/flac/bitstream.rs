@@ -437,6 +437,76 @@ impl BitWriter {
         self.data.len()
     }
 
+    /// Forget everything written, keeping the allocation.
+    #[inline]
+    pub fn clear(&mut self) {
+        self.data.clear();
+        self.accum = 0;
+        self.accum_bits = 0;
+    }
+
+    /// Make room for `bits` more bits plus the slack that [`Self::write_rice_run`] overwrites.
+    #[inline]
+    pub fn reserve_bits(&mut self, bits: usize) {
+        self.data.reserve(bits / 8 + 32);
+    }
+
+    /// Write `residuals` as Rice codes with parameter `k`.
+    ///
+    /// Each code is OR-ed into a 64-bit word that is stored whole; the output pointer then moves
+    /// by the complete bytes in it. There is no branch on whether a flush is due, which codes of
+    /// varying length would mispredict.
+    ///
+    /// # Safety
+    ///
+    /// The spare capacity must hold every code of `residuals` plus 16 bytes.
+    #[inline(always)]
+    pub unsafe fn write_rice_run(&mut self, residuals: &[i32], k: u32) {
+        self.flush_complete_bytes();
+        let mut accum = self.accum;
+        let mut pending = self.accum_bits;
+        let start = self.data.as_mut_ptr();
+        let len = self.data.len();
+        // SAFETY: `len` is within the allocation.
+        let mut out = unsafe { start.add(len) };
+        let mask = (1u64 << k) - 1;
+        for &r in residuals {
+            let u = u64::from(((r << 1) ^ (r >> 31)) as u32);
+            let quotient = (u >> k) as u32;
+            let mut total = quotient + 1 + k;
+            if total > 56 {
+                // A long run of zeros: emit it in pieces no flush can overflow.
+                let mut zeros = quotient;
+                while zeros > 0 {
+                    let run = zeros.min(56);
+                    pending += run;
+                    // SAFETY: the caller reserved room for every code plus the 8-byte store.
+                    unsafe { (out as *mut u64).write_unaligned(accum.to_be()) };
+                    let bytes = pending >> 3;
+                    // SAFETY: as above.
+                    out = unsafe { out.add(bytes as usize) };
+                    accum = if bytes >= 8 { 0 } else { accum << (bytes * 8) };
+                    pending &= 7;
+                    zeros -= run;
+                }
+                total = 1 + k;
+            }
+            accum |= ((1u64 << k) | (u & mask)) << (64 - pending - total);
+            pending += total;
+            // SAFETY: the caller reserved room for every code plus the 8-byte store.
+            unsafe { (out as *mut u64).write_unaligned(accum.to_be()) };
+            let bytes = pending >> 3;
+            // SAFETY: as above.
+            out = unsafe { out.add(bytes as usize) };
+            accum <<= bytes * 8;
+            pending &= 7;
+        }
+        self.accum = accum;
+        self.accum_bits = pending;
+        // SAFETY: every byte up to `out` was stored above.
+        unsafe { self.data.set_len(out.offset_from(start) as usize) };
+    }
+
     /// Write a single bit.
     #[inline]
     pub fn write_bit(&mut self, bit: bool) {

@@ -18,10 +18,7 @@ use std::{
     time::Duration,
 };
 
-use audio_samples::{
-    AudioSamples, I24, SampleType,
-    traits::{ConvertFrom, StandardSample},
-};
+use audio_samples::{AudioSamples, I24, SampleType, traits::StandardSample};
 use memmap2::MmapOptions;
 
 use super::{
@@ -35,9 +32,9 @@ use super::{
 use crate::{
     MAX_MMAP_SIZE,
     error::{AudioIOError, AudioIOResult, ErrorPosition},
-    flac::frame::encode_frame_from_channels,
+    flac::encoder::{EncoderConfig, FrameEncoder},
     traits::{AudioFile, AudioFileMetadata, AudioFileRead, AudioFileWrite, AudioInfoMarker},
-    types::{AudioDataSource, BaseAudioInfo, FileType, OpenOptions, ValidatedSampleType},
+    types::{AudioDataSource, BaseAudioInfo, FileType, OpenOptions, ValidatedSampleType, channel_frame_view},
 };
 
 /// Maximum FLAC file size we'll handle (4GB)
@@ -643,220 +640,179 @@ impl<'a> AudioFileWrite for FlacFile<'a> {
 
 /// Write AudioSamples to a FLAC file.
 ///
-/// FLAC only supports integer PCM audio with 4-24 bits per sample.
-/// - For f32/f64 input: automatically converts to 24-bit integers
-/// - For i16 input: writes as 16-bit
-/// - For I24 input: writes as 24-bit
-/// - For i32 input: writes as 24-bit (truncated from 32-bit)
+/// FLAC stores integer PCM only, here at 16 or 24 bits per sample, so the sample type decides
+/// what reaches the file:
+/// - `i16` writes 16-bit samples and `I24` writes 24-bit samples, both unchanged.
+/// - `i32` writes its 24 most significant bits.
+/// - `u8` is rescaled to 24 bits.
+/// - `f32` and `f64` are rounded to 24-bit integers, with values outside \[-1, 1\] clipped.
+///
+/// The signal is encoded block by block, so memory use depends on the block size and channel
+/// count and not on the length of the signal. The STREAMINFO MD5 signature is left unset,
+/// which the format defines as unknown.
+///
+/// With the `flac-parallel` feature, frames are encoded on rayon's global thread pool.
 pub fn write_flac<W: Write, T>(mut writer: W, audio: &AudioSamples<T>, level: CompressionLevel) -> AudioIOResult<()>
 where
     T: StandardSample + 'static,
 {
-    let sample_rate = audio.sample_rate();
-    let num_channels = audio.num_channels().get() as u8;
+    let sample_rate = audio.sample_rate().get();
+    let channels = audio.num_channels().get() as usize;
     let samples_per_channel = audio.samples_per_channel().get();
-    let total_samples = audio.samples_per_channel().get() as u64;
 
-    // Validate parameters
-    if num_channels == 0 || num_channels > 8 {
+    if channels == 0 || channels > 8 {
         return Err(AudioIOError::FlacError(FlacError::InvalidChannelCount {
-            channels: num_channels,
+            channels: channels.min(255) as u8,
         }));
     }
 
-    // Determine target bit depth based on input type
-    // FLAC only supports 4-24 bits per sample
-    let bits_per_sample: u8 = match T::SAMPLE_TYPE {
-        SampleType::I16 => 16,
-        _ => 24, // u8/f32/f64 → 24-bit
-    };
+    let bits_per_sample = flac_bits_per_sample::<T>();
 
-    // Write FLAC marker
     writer.write_all(&FLAC_MARKER)?;
 
-    // Create STREAMINFO block
-    let block_size = level.block_size().min(samples_per_channel as u32);
-    let sample_rate_u32 = sample_rate.get();
+    let block_size = (level.block_size() as usize).min(samples_per_channel);
     let stream_info = StreamInfo {
         min_block_size: block_size as u16,
         max_block_size: block_size as u16,
-        min_frame_size: 0, // Unknown until encoded
+        min_frame_size: 0,
         max_frame_size: 0,
-        sample_rate: sample_rate_u32,
-        channels: num_channels,
+        sample_rate,
+        channels: channels as u8,
         bits_per_sample,
-        total_samples,
-        md5_signature: [0; 16], // Will be computed
+        total_samples: samples_per_channel as u64,
+        md5_signature: [0; 16],
     };
-
-    // Write STREAMINFO (last metadata block for now)
     let streaminfo_bytes = stream_info.to_bytes();
-    writer.write_all(&[0x80])?; // Last block, type 0 (STREAMINFO)
-    writer.write_all(&[(streaminfo_bytes.len() >> 16) as u8])?;
-    writer.write_all(&[(streaminfo_bytes.len() >> 8) as u8])?;
-    writer.write_all(&[streaminfo_bytes.len() as u8])?;
+    writer.write_all(&[0x80, 0, 0, streaminfo_bytes.len() as u8])?; // Last block, type 0 (STREAMINFO)
     writer.write_all(&streaminfo_bytes)?;
 
-    // Convert AudioSamples to per-channel i32 vectors at FLAC's target bit depth
-    // (shared with the streaming writer so bulk and streaming encode identically).
-    let channel_samples = audio_to_planar_i32(audio)?;
+    let config = EncoderConfig::for_level(level, bits_per_sample, level.block_size());
+    let view = channel_frame_view(audio);
 
-    // Get compression parameters from level
-    let max_lpc_order = level.max_lpc_order() as usize;
-    let qlp_precision = level.qlp_precision();
-    let (min_partition_order, max_partition_order) = level.rice_partition_order_range();
-    let try_mid_side = level.try_mid_side();
-    let exhaustive_rice = level.exhaustive_rice_search();
-
-    // Encode frames — pass per-channel slices directly, avoiding re-interleave.
-    let mut frame_number = 0u64;
-    let mut sample_offset = 0usize;
-
-    while sample_offset < samples_per_channel {
-        let frame_samples = (samples_per_channel - sample_offset).min(block_size as usize);
-
-        // Build slice references into each channel's data for this frame
-        let ch_slices: Vec<&[i32]> = channel_samples
-            .iter()
-            .map(|ch| &ch[sample_offset..sample_offset + frame_samples])
-            .collect();
-
-        let frame_bytes = encode_frame_from_channels(
-            &ch_slices,
-            bits_per_sample,
-            sample_rate_u32,
-            frame_number,
-            max_lpc_order,
-            qlp_precision,
-            min_partition_order,
-            max_partition_order,
-            try_mid_side,
-            exhaustive_rice,
-        )
-        .map_err(AudioIOError::FlacError)?;
-
-        writer.write_all(&frame_bytes)?;
-
-        frame_number += 1;
-        sample_offset += frame_samples;
+    #[cfg(feature = "flac-parallel")]
+    {
+        use rayon::prelude::*;
+        let blocks = samples_per_channel.div_ceil(block_size);
+        // Batches keep at most this many encoded frames in memory per worker.
+        let batch = 16 * rayon::current_num_threads();
+        for first in (0..blocks).step_by(batch.max(1)) {
+            let last = (first + batch).min(blocks);
+            let frames: Vec<Vec<u8>> = (first..last)
+                .into_par_iter()
+                .map_init(
+                    || {
+                        (
+                            FrameEncoder::new(config, channels, block_size),
+                            vec![Vec::with_capacity(block_size); channels],
+                        )
+                    },
+                    |(encoder, block), index| {
+                        let start = index * block_size;
+                        let len = block_size.min(samples_per_channel - start);
+                        for (c, out) in block.iter_mut().enumerate() {
+                            out.clear();
+                            append_channel_i32(view, c, start, len, out);
+                        }
+                        encoder
+                            .encode(block.as_slice(), bits_per_sample, sample_rate, index as u64)
+                            .map(<[u8]>::to_vec)
+                    },
+                )
+                .collect::<Result<_, FlacError>>()
+                .map_err(AudioIOError::FlacError)?;
+            for frame in &frames {
+                writer.write_all(frame)?;
+            }
+        }
+    }
+    #[cfg(not(feature = "flac-parallel"))]
+    {
+        let mut encoder = FrameEncoder::new(config, channels, block_size);
+        let mut block = vec![Vec::with_capacity(block_size); channels];
+        let mut frame_number = 0u64;
+        let mut start = 0usize;
+        while start < samples_per_channel {
+            let len = block_size.min(samples_per_channel - start);
+            for (c, out) in block.iter_mut().enumerate() {
+                out.clear();
+                append_channel_i32(view, c, start, len, out);
+            }
+            let frame = encoder
+                .encode(block.as_slice(), bits_per_sample, sample_rate, frame_number)
+                .map_err(AudioIOError::FlacError)?;
+            writer.write_all(frame)?;
+            frame_number += 1;
+            start += len;
+        }
     }
 
     writer.flush()?;
     Ok(())
 }
 
-/// Convert an [`AudioSamples`] buffer into per-channel `i32` sample vectors at FLAC's
-/// target bit depth (16-bit for `i16`, 24-bit for every other supported type), applying
-/// the same scaling as [`write_flac`]. Shared with the streaming writer
-/// ([`StreamedFlacWriter`](crate::flac::StreamedFlacWriter)) so bulk and streaming
-/// encoders produce identical samples.
-pub(crate) fn audio_to_planar_i32<T>(audio: &AudioSamples<T>) -> AudioIOResult<Vec<Vec<i32>>>
-where
+/// The FLAC sample width of `T`: 16 bits for `i16`, 24 for every other type.
+pub(crate) const fn flac_bits_per_sample<T: StandardSample>() -> u8 {
+    match T::SAMPLE_TYPE {
+        SampleType::I16 => 16,
+        _ => 24,
+    }
+}
+
+/// One sample as the integer FLAC stores for `T`. See [`write_flac`] for the rule per type.
+#[inline(always)]
+fn flac_sample<T: StandardSample + 'static>(s: T) -> i32 {
+    use std::any::TypeId;
+    let id = TypeId::of::<T>();
+    // SAFETY (all branches): the TypeId comparison proves T is the type being read.
+    if id == TypeId::of::<i16>() {
+        i32::from(unsafe { std::mem::transmute_copy::<T, i16>(&s) })
+    } else if id == TypeId::of::<I24>() {
+        unsafe { std::mem::transmute_copy::<T, I24>(&s) }.to_i32()
+    } else if id == TypeId::of::<i32>() {
+        unsafe { std::mem::transmute_copy::<T, i32>(&s) >> 8 }
+    } else if id == TypeId::of::<f32>() {
+        float_to_24(f64::from(unsafe { std::mem::transmute_copy::<T, f32>(&s) }))
+    } else if id == TypeId::of::<f64>() {
+        float_to_24(unsafe { std::mem::transmute_copy::<T, f64>(&s) })
+    } else {
+        let v: I24 = s.convert_to();
+        v.to_i32()
+    }
+}
+
+/// Round to 24 bits with the same asymmetric scale that decoding uses, so that decoded audio
+/// encodes back to the same integers. The cast sends NaN to zero and saturates.
+#[inline(always)]
+fn float_to_24(v: f64) -> i32 {
+    if v >= 0.0 {
+        ((v * 8_388_607.0 + 0.5) as i32).min(8_388_607)
+    } else {
+        ((v * 8_388_608.0 - 0.5) as i32).max(-8_388_608)
+    }
+}
+
+/// Append `len` samples of channel `channel` from frame `start` to `out`, as FLAC integers.
+pub(crate) fn append_channel_i32<T>(
+    view: ndarray::ArrayView2<'_, T>,
+    channel: usize,
+    start: usize,
+    len: usize,
+    out: &mut Vec<i32>,
+) where
     T: StandardSample + 'static,
 {
-    use std::any::TypeId;
-
-    let num_channels = audio.num_channels().get() as usize;
-    let samples_per_channel = audio.samples_per_channel().get();
-    let n_ch = num_channels;
-    let mut channel_samples: Vec<Vec<i32>> = (0..n_ch).map(|_| Vec::with_capacity(samples_per_channel)).collect();
-
-    // Helper: fill channel_samples from a planar slice (channel-major, contiguous).
-    macro_rules! fill_planar {
-        ($slice:expr, $conv:expr) => {
-            for (ch, ch_data) in channel_samples.iter_mut().enumerate() {
-                let start = ch * samples_per_channel;
-                ch_data.extend($slice[start..start + samples_per_channel].iter().map($conv));
-            }
-        };
-    }
-    // Helper: fill channel_samples from an interleaved slice.
-    macro_rules! fill_interleaved {
-        ($slice:expr, $conv:expr) => {
-            for (i, s) in $slice.iter().enumerate() {
-                channel_samples[i % n_ch].push($conv(s));
-            }
-        };
-    }
-
-    if TypeId::of::<T>() == TypeId::of::<i16>() {
-        let conv = |s: &T| -> i32 {
-            let v: i16 = unsafe { std::mem::transmute_copy(s) };
-            v as i32
-        };
-        if let Some(planar) = audio.as_slice() {
-            fill_planar!(planar, conv);
-        } else {
-            fill_interleaved!(audio.to_interleaved_vec(), conv);
-        }
-    } else if TypeId::of::<T>() == TypeId::of::<I24>() {
-        let conv = |s: &T| -> i32 {
-            let v: I24 = unsafe { std::mem::transmute_copy(s) };
-            i32::convert_from(v)
-        };
-        if let Some(planar) = audio.as_slice() {
-            fill_planar!(planar, conv);
-        } else {
-            fill_interleaved!(audio.to_interleaved_vec(), conv);
-        }
-    } else if TypeId::of::<T>() == TypeId::of::<i32>() {
-        let conv = |s: &T| -> i32 {
-            let v: i32 = unsafe { std::mem::transmute_copy(s) };
-            v >> 8
-        };
-        if let Some(planar) = audio.as_slice() {
-            fill_planar!(planar, conv);
-        } else {
-            fill_interleaved!(audio.to_interleaved_vec(), conv);
-        }
-    } else if TypeId::of::<T>() == TypeId::of::<f32>() {
-        // Asymmetric scaling matches the decode path in audio_samples ConvertFrom<I24>:
-        // positive decoded as v/8388607.0, negative as v/8388608.0
-        let conv = |s: &T| -> i32 {
-            let v: f32 = unsafe { std::mem::transmute_copy(s) };
-            if v >= 0.0 {
-                (v * 8388607.0).min(8388607.0) as i32
-            } else {
-                (v * 8388608.0).max(-8388608.0) as i32
-            }
-        };
-        if let Some(planar) = audio.as_slice() {
-            fill_planar!(planar, conv);
-        } else {
-            fill_interleaved!(audio.to_interleaved_vec(), conv);
-        }
-    } else if TypeId::of::<T>() == TypeId::of::<f64>() {
-        let conv = |s: &T| -> i32 {
-            let v: f64 = unsafe { std::mem::transmute_copy(s) };
-            if v >= 0.0 {
-                (v * 8388607.0).min(8388607.0) as i32
-            } else {
-                (v * 8388608.0).max(-8388608.0) as i32
-            }
-        };
-        if let Some(planar) = audio.as_slice() {
-            fill_planar!(planar, conv);
-        } else {
-            fill_interleaved!(audio.to_interleaved_vec(), conv);
-        }
-    } else if TypeId::of::<T>() == TypeId::of::<u8>() {
-        let conv = |s: &T| -> i32 {
-            let v: u8 = unsafe { std::mem::transmute_copy(s) };
-            ((v as i32) - 128) << 16
-        };
-        if let Some(planar) = audio.as_slice() {
-            fill_planar!(planar, conv);
-        } else {
-            fill_interleaved!(audio.to_interleaved_vec(), conv);
-        }
+    let row = view.index_axis(ndarray::Axis(0), channel);
+    if let Some(slice) = row.to_slice() {
+        out.extend(slice[start..start + len].iter().map(|&s| flac_sample(s)));
     } else {
-        return Err(AudioIOError::corrupted_data_simple(
-            "Unsupported sample type for FLAC encoding",
-            format!("Type has {} bits", T::BITS),
-        ));
+        let stride = row.strides()[0];
+        let base = row.as_ptr();
+        out.reserve(len);
+        for f in start..start + len {
+            // SAFETY: f is within the row, whose elements lie `stride` apart from `base`.
+            out.push(flac_sample(unsafe { *base.offset(f as isize * stride) }));
+        }
     }
-
-    Ok(channel_samples)
 }
 
 impl Display for FlacFile<'_> {

@@ -130,6 +130,45 @@ mod avx2_lpc {
         }
     }
 
+    /// Compute 8 residuals at a time in 32-bit arithmetic, for predictions known to fit 32 bits.
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn lpc_residuals8<const ORDER: usize>(
+        s: *const i32,
+        c: *const i32,
+        shift: i32,
+        out: *mut i32,
+        n: usize,
+    ) {
+        let mut cv = [_mm256_setzero_si256(); ORDER];
+        for (j, item) in cv.iter_mut().enumerate() {
+            *item = _mm256_set1_epi32(*c.add(j));
+        }
+        let count = _mm_cvtsi32_si128(shift);
+        let n8 = n / 8 * 8;
+        let mut k = 0usize;
+        while k < n8 {
+            let base = ORDER + k;
+            let mut acc = _mm256_setzero_si256();
+            for (j, &cj) in cv.iter().enumerate() {
+                let window = _mm256_loadu_si256(s.add(base - 1 - j) as *const __m256i);
+                acc = _mm256_add_epi32(acc, _mm256_mullo_epi32(cj, window));
+            }
+            let prediction = _mm256_sra_epi32(acc, count);
+            let actual = _mm256_loadu_si256(s.add(base) as *const __m256i);
+            _mm256_storeu_si256(out.add(k) as *mut __m256i, _mm256_sub_epi32(actual, prediction));
+            k += 8;
+        }
+        while k < n {
+            let i = ORDER + k;
+            let mut acc = 0i32;
+            for j in 0..ORDER {
+                acc = acc.wrapping_add((*c.add(j)).wrapping_mul(*s.add(i - 1 - j)));
+            }
+            *out.add(k) = (*s.add(i)).wrapping_sub(acc >> shift);
+            k += 1;
+        }
+    }
+
     /// Compute 4 residuals at a time using AVX2 — eliminates horizontal reduction.
     ///
     /// For each coefficient c[j], the 4 sample values needed by residuals k..k+3 are
@@ -1202,6 +1241,169 @@ pub fn lpc_predictor_restore(
     }
 
     Ok(samples)
+}
+
+/// Autocorrelation of `x` at lags `0..out.len()`, one dot product per lag.
+pub(crate) fn autocorrelate_scalar(x: &[f64], out: &mut [f64]) {
+    for (lag, r) in out.iter_mut().enumerate() {
+        *r = if lag < x.len() {
+            x[lag..].iter().zip(x).map(|(&a, &b)| a * b).sum()
+        } else {
+            0.0
+        };
+    }
+}
+
+/// [`autocorrelate_scalar`] with four independent accumulators per lag, so that each lag runs
+/// at the throughput of the FMA units rather than the latency of one accumulator.
+///
+/// # Safety
+///
+/// The CPU must support AVX2 and FMA.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+pub(crate) unsafe fn autocorrelate_fma(x: &[f64], out: &mut [f64]) {
+    use std::arch::x86_64::*;
+    for (lag, r) in out.iter_mut().enumerate() {
+        if lag >= x.len() {
+            *r = 0.0;
+            continue;
+        }
+        let a = &x[lag..];
+        let b = &x[..a.len()];
+        let mut acc = [_mm256_setzero_pd(); 4];
+        let blocks = a.len() / 16;
+        // SAFETY: each iteration reads 16 doubles at offset i * 16 < a.len() from both slices.
+        unsafe {
+            for i in 0..blocks {
+                let pa = a.as_ptr().add(i * 16);
+                let pb = b.as_ptr().add(i * 16);
+                for (j, slot) in acc.iter_mut().enumerate() {
+                    *slot = _mm256_fmadd_pd(_mm256_loadu_pd(pa.add(j * 4)), _mm256_loadu_pd(pb.add(j * 4)), *slot);
+                }
+            }
+        }
+        let total = _mm256_add_pd(_mm256_add_pd(acc[0], acc[1]), _mm256_add_pd(acc[2], acc[3]));
+        let mut lanes = [0.0f64; 4];
+        // SAFETY: lanes holds four doubles.
+        unsafe { _mm256_storeu_pd(lanes.as_mut_ptr(), total) };
+        let mut sum = lanes[0] + lanes[1] + lanes[2] + lanes[3];
+        for (&p, &q) in a[blocks * 16..].iter().zip(&b[blocks * 16..]) {
+            sum += p * q;
+        }
+        *r = sum;
+    }
+}
+
+/// Quantise `coeffs` to `precision` signed bits, carrying each coefficient's rounding error into
+/// the next. Returns the right shift, or `None` if the coefficients are all zero.
+pub(crate) fn quantize_with_feedback(coeffs: &[f64], precision: u8, out: &mut [i32]) -> Option<i8> {
+    let cmax = coeffs.iter().fold(0.0f64, |m, c| m.max(c.abs()));
+    if cmax <= 0.0 || !cmax.is_finite() {
+        return None;
+    }
+    // One bit of the precision is the sign.
+    let magnitude_bits = i32::from(precision) - 1;
+    let qmax = (1i64 << magnitude_bits) - 1;
+    let qmin = -(1i64 << magnitude_bits);
+    // cmax < 2^(exponent + 1), so a shift of magnitude_bits - exponent - 1 keeps it in range.
+    let exponent = cmax.log2().floor() as i32;
+    let shift = (magnitude_bits - exponent - 1).min(15);
+    // The format has no negative shift: scale large coefficients down instead.
+    let (scale, shift) = if shift >= 0 {
+        (f64::from(1u32 << shift), shift)
+    } else {
+        (1.0 / f64::from(1u32 << (-shift).min(30)), 0)
+    };
+    let mut error = 0.0f64;
+    for (q, &c) in out.iter_mut().zip(coeffs) {
+        error += c * scale;
+        let rounded = (error.round() as i64).clamp(qmin, qmax);
+        error -= rounded as f64;
+        *q = rounded as i32;
+    }
+    Some(shift as i8)
+}
+
+/// Residuals of LPC prediction, keeping 32-bit arithmetic whenever the coefficients and the
+/// sample width guarantee the prediction fits. `out` ends up with `samples.len() - order` values.
+#[inline(always)]
+pub(crate) fn lpc_residual_into<const AVX2: bool>(
+    samples: &[i32],
+    coeffs: &[i32],
+    shift: i8,
+    width: u8,
+    out: &mut Vec<i32>,
+) {
+    let order = coeffs.len();
+    let n = samples.len() - order;
+    out.clear();
+    out.reserve(n);
+    let shift = i32::from(shift);
+    let magnitude: u64 = coeffs.iter().map(|c| u64::from(c.unsigned_abs())).sum();
+    // |prediction| <= 2^(width - 1) * sum |c|.
+    let fits = magnitude == 0 || u32::from(width) + (64 - magnitude.leading_zeros()) <= 32;
+    let dst = out.as_mut_ptr();
+    macro_rules! dispatch {
+        ($f:ident) => {
+            // SAFETY: `order` matches the const parameter, samples holds order + n values, dst has
+            // capacity for n, and the AVX2 path is only taken with the features present.
+            unsafe {
+                match order {
+                    1 => $f::<1>(samples.as_ptr(), coeffs.as_ptr(), shift, dst, n),
+                    2 => $f::<2>(samples.as_ptr(), coeffs.as_ptr(), shift, dst, n),
+                    3 => $f::<3>(samples.as_ptr(), coeffs.as_ptr(), shift, dst, n),
+                    4 => $f::<4>(samples.as_ptr(), coeffs.as_ptr(), shift, dst, n),
+                    5 => $f::<5>(samples.as_ptr(), coeffs.as_ptr(), shift, dst, n),
+                    6 => $f::<6>(samples.as_ptr(), coeffs.as_ptr(), shift, dst, n),
+                    7 => $f::<7>(samples.as_ptr(), coeffs.as_ptr(), shift, dst, n),
+                    8 => $f::<8>(samples.as_ptr(), coeffs.as_ptr(), shift, dst, n),
+                    9 => $f::<9>(samples.as_ptr(), coeffs.as_ptr(), shift, dst, n),
+                    10 => $f::<10>(samples.as_ptr(), coeffs.as_ptr(), shift, dst, n),
+                    11 => $f::<11>(samples.as_ptr(), coeffs.as_ptr(), shift, dst, n),
+                    12 => $f::<12>(samples.as_ptr(), coeffs.as_ptr(), shift, dst, n),
+                    _ => residual_any_order(samples, coeffs, shift, dst, n),
+                }
+            }
+        };
+    }
+    #[cfg(target_arch = "x86_64")]
+    if AVX2 {
+        use avx2_lpc::{lpc_residuals4, lpc_residuals8};
+        if fits {
+            dispatch!(lpc_residuals8);
+        } else {
+            dispatch!(lpc_residuals4);
+        }
+        // SAFETY: the routine above wrote all n values.
+        unsafe { out.set_len(n) };
+        return;
+    }
+    let _ = fits;
+    // SAFETY: as above.
+    unsafe {
+        residual_any_order(samples, coeffs, shift, dst, n);
+        out.set_len(n);
+    }
+}
+
+/// # Safety
+///
+/// `samples` holds `coeffs.len() + n` values and `dst` has room for `n`.
+#[inline(always)]
+unsafe fn residual_any_order(samples: &[i32], coeffs: &[i32], shift: i32, dst: *mut i32, n: usize) {
+    let order = coeffs.len();
+    for k in 0..n {
+        let mut prediction = 0i64;
+        for (j, &c) in coeffs.iter().enumerate() {
+            prediction += i64::from(c) * i64::from(samples[order + k - 1 - j]);
+        }
+        // SAFETY: k < n, within the caller's bound.
+        unsafe {
+            dst.add(k)
+                .write((i64::from(samples[order + k]) - (prediction >> shift)) as i32)
+        };
+    }
 }
 
 /// All Levinson-Durbin outputs on the stack — no heap allocation.

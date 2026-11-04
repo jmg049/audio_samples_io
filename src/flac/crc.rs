@@ -234,12 +234,15 @@ impl Crc16 {
         self.crc = 0;
     }
 
-    /// Compute CRC-16 for a byte slice using slicing-by-4 (4 bytes per iteration).
-    ///
-    /// Processes 4 bytes at a time with 6 independent table lookups — no serial
-    /// dependency chain — giving ~2-3× throughput vs the byte-by-byte loop.
+    /// Compute CRC-16 for a byte slice: by carry-less multiplication where the CPU has it, otherwise
+    /// with slicing-by-4 (4 bytes per iteration, 6 independent table lookups).
     #[inline]
     pub fn compute(data: &[u8]) -> u16 {
+        #[cfg(target_arch = "x86_64")]
+        if data.len() >= 64 && is_x86_feature_detected!("pclmulqdq") && is_x86_feature_detected!("ssse3") {
+            // SAFETY: the features were just detected.
+            return unsafe { crc16_fold(data) };
+        }
         let mut crc: u16 = 0;
         let mut chunks = data.chunks_exact(4);
         for chunk in &mut chunks {
@@ -263,9 +266,92 @@ impl Default for Crc16 {
     }
 }
 
+/// x^n mod the CRC-16 polynomial.
+const fn x_pow_mod(n: u32) -> u64 {
+    let mut r: u32 = 1;
+    let mut i = 0;
+    while i < n {
+        r <<= 1;
+        if r & 0x1_0000 != 0 {
+            r ^= 0x1_8005;
+        }
+        i += 1;
+    }
+    r as u64
+}
+
+/// CRC-16 of `data` by folding: 16-byte blocks are multiplied forward with carry-less
+/// multiplication, which keeps their value modulo the polynomial, and the table finishes the
+/// last block and the tail.
+///
+/// # Safety
+///
+/// The CPU must support PCLMULQDQ and SSSE3.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "pclmulqdq,ssse3,sse2")]
+unsafe fn crc16_fold(data: &[u8]) -> u16 {
+    use std::arch::x86_64::*;
+
+    const FOLD_1: (u64, u64) = (x_pow_mod(128 + 64), x_pow_mod(128));
+    const FOLD_4: (u64, u64) = (x_pow_mod(512 + 64), x_pow_mod(512));
+
+    let swap = _mm_set_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    // SAFETY (all loads): callers pass offsets at least 16 bytes before the end of `data`.
+    let load = |at: usize| unsafe { _mm_shuffle_epi8(_mm_loadu_si128(data.as_ptr().add(at).cast()), swap) };
+    let fold = |a: __m128i, k: __m128i, next: __m128i| {
+        // High half with k's low lane (x^(n + 64)), low half with its high lane (x^n).
+        let hi = _mm_clmulepi64_si128::<0x01>(a, k);
+        let lo = _mm_clmulepi64_si128::<0x10>(a, k);
+        _mm_xor_si128(_mm_xor_si128(hi, lo), next)
+    };
+
+    let mut at = 16usize;
+    let mut a = load(0);
+    if data.len() >= 128 {
+        let k4 = _mm_set_epi64x(FOLD_4.1 as i64, FOLD_4.0 as i64);
+        let (mut b, mut c, mut d) = (load(16), load(32), load(48));
+        at = 64;
+        while at + 64 <= data.len() {
+            a = fold(a, k4, load(at));
+            b = fold(b, k4, load(at + 16));
+            c = fold(c, k4, load(at + 32));
+            d = fold(d, k4, load(at + 48));
+            at += 64;
+        }
+        let k1 = _mm_set_epi64x(FOLD_1.1 as i64, FOLD_1.0 as i64);
+        a = fold(a, k1, b);
+        a = fold(a, k1, c);
+        a = fold(a, k1, d);
+    }
+    let k1 = _mm_set_epi64x(FOLD_1.1 as i64, FOLD_1.0 as i64);
+    while at + 16 <= data.len() {
+        a = fold(a, k1, load(at));
+        at += 16;
+    }
+    let mut block = [0u8; 16];
+    // SAFETY: `block` holds 16 bytes.
+    unsafe { _mm_storeu_si128(block.as_mut_ptr().cast(), _mm_shuffle_epi8(a, swap)) };
+    let mut crc = Crc16::new();
+    crc.update(&block);
+    crc.update(&data[at..]);
+    crc.finalize()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_crc16_fold_matches_table() {
+        let data: Vec<u8> = (0..4096u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        for len in [
+            0usize, 1, 15, 16, 17, 31, 32, 63, 64, 65, 127, 128, 129, 200, 255, 256, 1000, 4096,
+        ] {
+            let mut table = Crc16::new();
+            table.update(&data[..len]);
+            assert_eq!(Crc16::compute(&data[..len]), table.finalize(), "length {len}");
+        }
+    }
 
     #[test]
     fn test_crc8_empty() {
