@@ -153,12 +153,10 @@ where
     // Eliminates the intermediate Vec allocation and the extra mmap(MAP_ANONYMOUS) zero-fill
     // overhead that Vec::with_capacity triggers for large allocations.
     #[cfg(target_endian = "little")]
-    // Falls through to the Vec path below if direct path is not applicable.
-    if TypeId::of::<T>() != TypeId::of::<I24>()
-        && let Some(result) = read_pyarray_direct::<T>(py, path)
-    {
+    if let Some(result) = read_pyarray_direct::<T>(py, path) {
         return result;
     }
+    // Falls through to the Vec path below if direct path is not applicable.
 
     #[cfg(feature = "flac")]
     if let Some(result) = read_flac_planar_pyarray::<T>(py, path) {
@@ -178,7 +176,7 @@ where
 /// Fast path for WAV loading: parse header, allocate PyArray2 with Fortran layout, read
 /// audio payload directly into numpy's buffer — no intermediate Vec allocation.
 ///
-/// Returns `None` when the fast path does not apply (type mismatch, I24, big-endian, or
+/// Returns `None` when the fast path does not apply (big-endian, or
 /// any I/O error), letting the caller fall back to the Vec path.
 ///
 /// # Safety
