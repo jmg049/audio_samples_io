@@ -9,8 +9,8 @@ description = "A Rust library for audio input and output operations."
 repository = "https://github.com/jmg049/audio_samples_io"
 homepage = "https://jmg049.github.io/audio_samples_io"
 documentation = "https://docs.rs/audio_samples_io"
-keywords = ["audio", "io"]
-categories = ["encoding", "multimedia", "science"]
+keywords = ["audio", "io", "wav", "flac"]
+categories = ["multimedia::audio", "multimedia::encoding"]
 exclude = ["/examples/*", "/tests/*", "/target/*", "/benches/*", "*.wav", "*.flac"]
 
 [dependencies]
