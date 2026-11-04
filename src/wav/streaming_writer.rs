@@ -350,6 +350,12 @@ where
         // RIFF size = 4 (WAVE) + fmt total size + 8 (data header) + padded data size
         let riff_size = 4 + fmt_total_size + 8 + padded_data_size;
 
+        if riff_size > u64::from(u32::MAX) {
+            return Err(AudioIOError::unsupported_format(format!(
+                "A WAV file holds at most 4 GiB; this one took {riff_size} bytes"
+            )));
+        }
+
         // Remember current position
         let current_pos = self.writer.stream_position()?;
 

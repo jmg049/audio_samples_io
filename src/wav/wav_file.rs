@@ -1416,6 +1416,12 @@ where
     // Calculate total file size
     let file_size = 4 + fmt_total_size + 8 + padded_data_size + metadata_bytes.len(); // WAVE + FMT + DATA + metadata
 
+    if file_size > u32::MAX as usize {
+        return Err(AudioIOError::unsupported_format(format!(
+            "A WAV file holds at most 4 GiB; this one would take {file_size} bytes"
+        )));
+    }
+
     let mut writer = BufWriter::with_capacity(opts.write_buf_capacity, writer);
 
     // Write RIFF header
