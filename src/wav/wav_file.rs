@@ -621,6 +621,12 @@ pub fn parse_wav_header_streaming<R: Read + Seek>(reader: &mut R) -> AudioIOResu
         } else if id == b"data" {
             // Current stream position is now at the first byte of audio data.
             let offset = reader.stream_position().map_err(AudioIOError::from)?;
+            if is_rf64 && ds64_data_size.is_none() {
+                return Err(AudioIOError::corrupted_data_simple(
+                    "RF64 file without a ds64 chunk",
+                    "The data chunk's size cannot be known",
+                ));
+            }
             // RF64/BW64 store the true 64-bit data size in ds64 and 0xFFFFFFFF here.
             let size = match ds64_data_size {
                 Some(ds64_size) if size == u32::MAX as usize => usize::try_from(ds64_size).unwrap_or(usize::MAX),
