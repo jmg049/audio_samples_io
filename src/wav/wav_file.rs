@@ -1200,32 +1200,19 @@ where
     U: StandardSample,
 {
     let size = U::BYTES as usize;
-    let mut p = out;
-    let mut put = |sample: T| {
-        let converted: U = sample.convert_to();
-        let bytes = converted.to_le_bytes();
-        // SAFETY: at most `count * runs.len()` samples are written, within the caller's bound.
-        unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ref().as_ptr(), p, size);
-            p = p.add(size);
+    let stride = runs.len() * size;
+    // One channel at a time: each is read in order, and the tile stays in the cache.
+    for (c, run) in runs.iter().enumerate() {
+        // SAFETY: the last value lands at `(count - 1) * stride + c * size`, which ends within
+        // the caller's bound.
+        let mut p = unsafe { out.add(c * size) };
+        for &sample in &run[..count] {
+            let converted: U = sample.convert_to();
+            let bytes = converted.to_le_bytes();
+            // SAFETY: as above. `wrapping_add` steps past the end after the last value only.
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ref().as_ptr(), p, size) };
+            p = p.wrapping_add(stride);
         }
-    };
-    match runs {
-        [only] => only[..count].iter().for_each(|&s| put(s)),
-        [left, right] => {
-            for (&l, &r) in left[..count].iter().zip(&right[..count]) {
-                put(l);
-                put(r);
-            }
-        },
-        _ => {
-            for f in 0..count {
-                for run in runs {
-                    // SAFETY: every run holds at least `count` samples.
-                    put(unsafe { *run.get_unchecked(f) });
-                }
-            }
-        },
     }
 }
 

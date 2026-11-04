@@ -60,6 +60,10 @@ pub use crate::{
 pub(crate) const MAX_WAV_SIZE: u64 = 2 * 1024 * 1024 * 1024; // 2GB limit
 pub(crate) const MAX_MMAP_SIZE: u64 = 512 * 1024 * 1024; // 512MB for memory mapping
 
+/// Buffer of the streamed writers that open a file themselves.
+#[cfg(any(feature = "wav", feature = "flac"))]
+const STREAMED_WRITE_BUFFER_BYTES: usize = 16 * 1024;
+
 /// Convenience trait for types that implement both Read and Seek
 pub trait ReadSeek: Read + Seek {}
 
@@ -509,9 +513,8 @@ where
     let path = fp.as_ref();
     let format = FileType::from_path(path);
     let file = fastio::open_for_streaming(path)?;
-    // 256 KiB: buffers ~8 typical streaming chunks (4096-frame stereo f32 = 32 KiB)
-    // before issuing a write syscall, reducing syscall count ~8× vs the 8 KiB default.
-    let writer = BufWriter::with_capacity(256 * 1024, file);
+    // Chunks of this size or more go straight to the file; smaller ones are gathered.
+    let writer = BufWriter::with_capacity(STREAMED_WRITE_BUFFER_BYTES, file);
     create_streamed_with::<_, T>(writer, channels, sample_rate, format)
 }
 
@@ -665,7 +668,7 @@ where
     match FileType::from_path(path) {
         FileType::FLAC => {
             let file = fastio::open_for_streaming(path)?;
-            let writer = BufWriter::with_capacity(256 * 1024, file);
+            let writer = BufWriter::with_capacity(STREAMED_WRITE_BUFFER_BYTES, file);
             flac_writer_for_type::<T, _>(writer, channels, sample_rate)
         },
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
