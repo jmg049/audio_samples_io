@@ -18,6 +18,129 @@ use crate::types::{OpenOptions, ValidatedSampleType};
 use crate::wav::{WavFile, wav_file::parse_wav_header_streaming};
 use crate::{AudioIOError, AudioIOResult, BaseAudioInfo, FileType};
 
+/// Arrays of at least this many bytes use [`SampleMemory`]. Smaller ones are served from NumPy's
+/// allocator without a page fault for each page.
+#[cfg(target_os = "linux")]
+const SAMPLE_MEMORY_MIN_BYTES: usize = 1024 * 1024;
+
+/// On a single thread the allocator's reuse of freed memory competes with [`SampleMemory`] up to
+/// this size, the most that allocator serves from its heap.
+#[cfg(target_os = "linux")]
+const SAMPLE_MEMORY_ALWAYS_BYTES: usize = 32 * 1024 * 1024;
+
+/// Memory for a large output array.
+///
+/// A NumPy array of many pages takes a page fault per 4 KiB page during the read that fills it,
+/// which costs more than copying the data, because the allocator's mappings do not start on a
+/// huge page boundary. This mapping does, and is released to the kernel only when replaced: the
+/// most recently freed one is kept for the next read.
+#[cfg(target_os = "linux")]
+#[pyclass(frozen, module = "audio_samples_io")]
+struct SampleMemory {
+    map: std::sync::Mutex<Option<memmap2::MmapMut>>,
+    data: usize,
+}
+
+#[cfg(target_os = "linux")]
+mod sample_memory {
+    use std::sync::Mutex;
+
+    use memmap2::{Advice, MmapMut, MmapOptions};
+
+    const HUGE_PAGE: usize = 2 * 1024 * 1024;
+    /// Largest mapping kept after its array is freed.
+    const KEEP_MAX_BYTES: usize = 256 * 1024 * 1024;
+
+    static SPARE: Mutex<Option<MmapMut>> = Mutex::new(None);
+
+    /// A mapping of at least `bytes` whose aligned start is [`aligned`] of it.
+    pub(super) fn acquire(bytes: usize) -> std::io::Result<MmapMut> {
+        let needed = bytes.next_multiple_of(HUGE_PAGE) + HUGE_PAGE;
+        if let Ok(mut spare) = SPARE.try_lock()
+            && let Some(map) = spare.take_if(|m| m.len() >= needed && m.len() / 4 <= needed)
+        {
+            return Ok(map);
+        }
+        let map = MmapOptions::new().len(needed).map_anon()?;
+        let start = map.as_ptr() as usize;
+        let inner = start.next_multiple_of(HUGE_PAGE) - start;
+        // Only an optimisation: without huge pages the memory works the same.
+        let _ = map.advise_range(Advice::HugePage, inner, needed - inner);
+        Ok(map)
+    }
+
+    /// The offset of the first huge page boundary in `map`.
+    pub(super) fn aligned(map: &mut MmapMut) -> *mut u8 {
+        let start = map.as_mut_ptr() as usize;
+        (start.next_multiple_of(HUGE_PAGE)) as *mut u8
+    }
+
+    /// Keep `map` for the next read, if it is not too large.
+    pub(super) fn release(map: MmapMut) {
+        if map.len() > KEEP_MAX_BYTES {
+            return;
+        }
+        if let Ok(mut spare) = SPARE.try_lock() {
+            *spare = Some(map);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for SampleMemory {
+    fn drop(&mut self) {
+        if let Ok(mut slot) = self.map.lock()
+            && let Some(map) = slot.take()
+        {
+            sample_memory::release(map);
+        }
+    }
+}
+
+/// An uninitialised `(channels, frames)` array in interleaved (`fortran`) or planar memory, with a
+/// pointer to its data.
+fn new_output_array<T>(py: Python<'_>, channels: usize, frames: usize, fortran: bool) -> (Bound<'_, PyArray2<T>>, usize)
+where
+    T: Element,
+{
+    #[cfg(target_os = "linux")]
+    {
+        let bytes = channels * frames * std::mem::size_of::<T>();
+        if bytes >= SAMPLE_MEMORY_MIN_BYTES
+            && (crate::fastio::transfer_threads() > 1 || bytes >= SAMPLE_MEMORY_ALWAYS_BYTES)
+            && let Ok(mut map) = sample_memory::acquire(bytes)
+        {
+            let data = sample_memory::aligned(&mut map);
+            let holder = SampleMemory {
+                map: std::sync::Mutex::new(Some(map)),
+                data: data as usize,
+            };
+            if let Ok(holder) = Bound::new(py, holder) {
+                use ndarray::ShapeBuilder;
+                let data = holder.get().data as *const T;
+                // SAFETY: the mapping holds at least `bytes` from `data`, is aligned for any T,
+                // and lives as long as `holder`, which becomes the array's base object.
+                unsafe {
+                    let array = if fortran {
+                        let view = ndarray::ArrayView2::from_shape_ptr((channels, frames).f(), data);
+                        PyArray2::borrow_from_array(&view, holder.into_any())
+                    } else {
+                        let view = ndarray::ArrayView2::from_shape_ptr((channels, frames), data);
+                        PyArray2::borrow_from_array(&view, holder.into_any())
+                    };
+                    // Filled by the caller before anyone else sees it.
+                    let data = array.data() as usize;
+                    return (array, data);
+                }
+            }
+        }
+    }
+    // SAFETY: the caller fills the array before it is seen by anything else.
+    let array = unsafe { PyArray2::<T>::new(py, [channels, frames], fortran) };
+    let data = array.data() as usize;
+    (array, data)
+}
+
 /// Type-erased container for a natively-typed audio array produced by [`read_pyarray_native`].
 ///
 /// Each variant holds a Fortran-layout `PyArray2<T>` matching the file's native sample type,
@@ -47,15 +170,15 @@ pub fn read_pyarray_native(py: Python<'_>, path: &Path) -> Option<PyResult<Nativ
     }
 
     // Step 1: open + header (GIL released — pure I/O)
-    let parse_result: AudioIOResult<(BaseAudioInfo, BufReader<std::fs::File>)> = py.detach(|| {
+    let parse_result: AudioIOResult<(BaseAudioInfo, u64, std::fs::File)> = py.detach(|| {
         let file = std::fs::File::open(path).map_err(AudioIOError::from)?;
         let mut reader = BufReader::with_capacity(4096, file);
-        let (info, _) = parse_wav_header_streaming(&mut reader)?;
-        Ok((info, reader))
+        let (info, offset) = parse_wav_header_streaming(&mut reader)?;
+        Ok((info, offset, reader.into_inner()))
     });
 
     // Return None on any parse error — the caller will try the slower fallback path.
-    let (info, reader) = parse_result.ok()?;
+    let (info, offset, reader) = parse_result.ok()?;
 
     // I24 has a non-standard in-memory layout — exclude from the direct path.
     if matches!(info.sample_type, audio_samples::SampleType::I24) {
@@ -71,19 +194,19 @@ pub fn read_pyarray_native(py: Python<'_>, path: &Path) -> Option<PyResult<Nativ
     // Step 2 + 3: allocate PyArray (GIL held) then fill it (GIL released), dispatched per type.
     let result = match info.sample_type {
         audio_samples::SampleType::U8 => {
-            alloc_and_fill::<u8>(py, reader, info).map(|(a, i)| NativeAudioArray::U8(a, i))
+            alloc_and_fill::<u8>(py, reader, offset, info).map(|(a, i)| NativeAudioArray::U8(a, i))
         },
         audio_samples::SampleType::I16 => {
-            alloc_and_fill::<i16>(py, reader, info).map(|(a, i)| NativeAudioArray::I16(a, i))
+            alloc_and_fill::<i16>(py, reader, offset, info).map(|(a, i)| NativeAudioArray::I16(a, i))
         },
         audio_samples::SampleType::I32 => {
-            alloc_and_fill::<i32>(py, reader, info).map(|(a, i)| NativeAudioArray::I32(a, i))
+            alloc_and_fill::<i32>(py, reader, offset, info).map(|(a, i)| NativeAudioArray::I32(a, i))
         },
         audio_samples::SampleType::F32 => {
-            alloc_and_fill::<f32>(py, reader, info).map(|(a, i)| NativeAudioArray::F32(a, i))
+            alloc_and_fill::<f32>(py, reader, offset, info).map(|(a, i)| NativeAudioArray::F32(a, i))
         },
         audio_samples::SampleType::F64 => {
-            alloc_and_fill::<f64>(py, reader, info).map(|(a, i)| NativeAudioArray::F64(a, i))
+            alloc_and_fill::<f64>(py, reader, offset, info).map(|(a, i)| NativeAudioArray::F64(a, i))
         },
         _ => return None,
     };
@@ -91,13 +214,14 @@ pub fn read_pyarray_native(py: Python<'_>, path: &Path) -> Option<PyResult<Nativ
     Some(result)
 }
 
-/// Allocate a Fortran-layout `PyArray2<T>` and fill it from the open `BufReader`.
+/// Allocate a Fortran-layout `PyArray2<T>` and fill it from `file` at `offset`.
 ///
-/// GIL is held for the allocation, released for the `read_exact` call.
+/// GIL is held for the allocation, released for the read.
 #[cfg(target_endian = "little")]
 fn alloc_and_fill<T>(
     py: Python<'_>,
-    reader: BufReader<std::fs::File>,
+    file: std::fs::File,
+    offset: u64,
     info: BaseAudioInfo,
 ) -> PyResult<(Py<PyArray2<T>>, BaseAudioInfo)>
 where
@@ -111,14 +235,12 @@ where
     let byte_count = total_samples * size_of::<T>();
 
     // Fortran (column-major) layout: element [c, f] → c + f*channels, matching WAV interleaved.
-    let array = unsafe { PyArray2::<T>::new(py, [channels, frames], true) };
-    let data_ptr_usize = array.data() as usize;
+    let (array, data_ptr_usize) = new_output_array::<T>(py, channels, frames, true);
 
     let read_result: AudioIOResult<()> = py.detach(|| {
-        let mut r = reader;
         // Safety: pointer valid (just allocated, not yet shared), CPython is non-moving.
         let bytes = unsafe { std::slice::from_raw_parts_mut(data_ptr_usize as *mut u8, byte_count) };
-        r.read_exact(bytes).map_err(AudioIOError::from)
+        crate::fastio::read_exact_at_parallel(&file, offset, bytes).map_err(AudioIOError::from)
     });
 
     read_result.map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
@@ -195,14 +317,14 @@ where
 
     // Step 1: Parse WAV header with GIL released (I/O). The payload read below goes straight to
     // the array, so the buffer only has to hold the header.
-    let parse_result: AudioIOResult<(BaseAudioInfo, BufReader<std::fs::File>)> = py.detach(|| {
+    let parse_result: AudioIOResult<(BaseAudioInfo, u64, std::fs::File)> = py.detach(|| {
         let file = std::fs::File::open(path).map_err(AudioIOError::from)?;
         let mut reader = BufReader::with_capacity(4096, file);
-        let (info, _) = parse_wav_header_streaming(&mut reader)?;
-        Ok((info, reader))
+        let (info, offset) = parse_wav_header_streaming(&mut reader)?;
+        Ok((info, offset, reader.into_inner()))
     });
 
-    let (info, reader) = match parse_result {
+    let (info, offset, file) = match parse_result {
         Ok(v) => v,
         Err(_) => return None,
     };
@@ -229,23 +351,18 @@ where
     let frames = total_samples / channels;
     let byte_count = total_samples * size_of::<T>();
 
-    // Step 2: Allocate PyArray2 with Fortran (column-major) layout (GIL held, fast).
+    // Step 2: Allocate an array with Fortran (column-major) layout (GIL held, fast).
     // Fortran layout for shape (channels, frames) maps element [c, f] to index c + f*channels,
     // which is exactly WAV's interleaved on-disk format — no deinterleave needed.
-    // `PyArray2::new` is the numpy equivalent of `numpy.empty(..., order='F')`.
-    let array = unsafe { PyArray2::<T>::new(py, [channels, frames], true) };
+    let (array, data_ptr_usize) = new_output_array::<T>(py, channels, frames, true);
 
-    // Step 3: Read audio payload directly into the PyArray's buffer (GIL released).
-    // Convert the raw data pointer to usize so it can cross the `py.detach()` Ungil boundary.
-    let data_ptr_usize = array.data() as usize;
-
+    // Step 3: Read audio payload directly into the array's buffer (GIL released).
     let read_result: AudioIOResult<()> = py.detach(|| {
-        let mut r = reader;
         if !native_matches {
             // Another sample type: convert block by block, through no copy of the whole file.
             // Safety: as below.
             let out = unsafe { std::slice::from_raw_parts_mut(data_ptr_usize as *mut T, total_samples) };
-            let read = crate::wav::streaming::read_converted(&mut r, file_type, out)?;
+            let read = read_converted_parallel(&file, offset, file_type, out, channels)?;
             if read != total_samples {
                 return Err(AudioIOError::corrupted_data_simple(
                     "Truncated WAV data",
@@ -257,7 +374,7 @@ where
         // Safety: pointer was valid when captured (step 2), array is held alive by `array`,
         // CPython does not move objects, no other thread has seen this array.
         let bytes = unsafe { std::slice::from_raw_parts_mut(data_ptr_usize as *mut u8, byte_count) };
-        r.read_exact(bytes).map_err(AudioIOError::from)
+        crate::fastio::read_exact_at_parallel(&file, offset, bytes).map_err(AudioIOError::from)
     });
 
     if let Err(e) = read_result {
@@ -266,6 +383,58 @@ where
 
     Some(Ok((array.unbind(), info)))
 }
+
+/// Convert the samples of a WAV payload at `offset` into `out`, on several threads when large.
+/// Returns the samples written.
+#[cfg(target_endian = "little")]
+fn read_converted_parallel<T>(
+    file: &std::fs::File,
+    offset: u64,
+    sample_type: ValidatedSampleType,
+    out: &mut [T],
+    channels: usize,
+) -> std::io::Result<usize>
+where
+    T: StandardSample + 'static,
+{
+    let size = sample_type.bytes_per_sample().get();
+    let threads = crate::fastio::transfer_threads().min((out.len() * size) / crate::fastio::TRANSFER_BYTES_PER_THREAD);
+    if threads <= 1 {
+        let mut reader = crate::fastio::FileAt { file, offset };
+        return crate::wav::streaming::read_converted(&mut reader, sample_type, out);
+    }
+    let total = out.len();
+    // Whole frames per thread; a thread's part of a frame is never split across threads.
+    let chunk = total.div_ceil(threads).next_multiple_of(channels.max(1));
+    let base = out.as_mut_ptr() as usize;
+    let written = std::sync::atomic::AtomicUsize::new(0);
+    let ok = crate::fastio::run_on_threads(total.div_ceil(chunk), |index| {
+        let start = index * chunk;
+        let end = (start + chunk).min(total);
+        // SAFETY: indices give disjoint ranges inside `out`, which outlives the threads.
+        let part = unsafe { std::slice::from_raw_parts_mut((base as *mut T).add(start), end - start) };
+        let mut reader = crate::fastio::FileAt {
+            file,
+            offset: offset + (start * size) as u64,
+        };
+        match crate::wav::streaming::read_converted(&mut reader, sample_type, part) {
+            Ok(n) => {
+                written.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+                n == end - start
+            },
+            Err(_) => false,
+        }
+    });
+    if ok {
+        Ok(total)
+    } else {
+        Ok(written.into_inner().min(total.saturating_sub(1)))
+    }
+}
+
+/// Compressed size from which a FLAC file is decoded as a whole rather than as a stream.
+#[cfg(feature = "flac")]
+const PARALLEL_FLAC_MIN_BYTES: u64 = 512 * 1024;
 
 /// FLAC: decode into a C-order `(channels, frames)` NumPy array in one pass, with the GIL
 /// released. Frames decode to planar samples, so the array needs no reordering.
@@ -299,9 +468,18 @@ where
     }
     let frames = total_samples / channels;
 
-    let array = unsafe { PyArray2::<T>::new(py, [channels, frames], false) };
-    let data_ptr_usize = array.data() as usize;
+    let (array, data_ptr_usize) = new_output_array::<T>(py, channels, frames, false);
     let decoded = py.detach(|| {
+        // Whole-file decoding can divide the stream between threads; it reports failure for any
+        // stream that needs the error handling of the sequential decoder below.
+        if std::fs::metadata(path).is_ok_and(|m| m.len() >= PARALLEL_FLAC_MIN_BYTES)
+            && let Ok(whole) = crate::flac::FlacFile::open_with_options(path, OpenOptions::default())
+            // SAFETY: the array holds `frames` samples for each of its channels.
+            && let Ok(Some(written)) = unsafe { whole.decode_planar_into(data_ptr_usize as *mut T, frames) }
+            && written == frames
+        {
+            return Ok(written);
+        }
         // SAFETY: as in `read_pyarray_direct`: the fresh array is kept alive by `array` and no
         // other thread has seen it; it holds `total_samples` values.
         let out = unsafe { std::slice::from_raw_parts_mut(data_ptr_usize as *mut T, total_samples) };

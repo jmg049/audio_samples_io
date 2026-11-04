@@ -190,6 +190,15 @@ impl<'a> FlacFile<'a> {
         let num_channels = self.stream_info.channels as usize;
         let bits = self.stream_info.bits_per_sample;
         let block_size_hint = self.stream_info.max_block_size as usize;
+
+        let data = self.audio_data();
+        // SAFETY: the caller's guarantee on `out` is the one this call needs.
+        if super::parallel::worth_decoding_in_parallel(data)
+            && unsafe { super::parallel::decode_planar_parallel(data, &self.stream_info, out, total_spc) }
+        {
+            return Ok(Some(total_spc));
+        }
+
         let mut scratch: Vec<Vec<i32>> = (0..num_channels).map(|_| Vec::with_capacity(block_size_hint)).collect();
 
         let convert = |s: i32| -> T {
@@ -201,7 +210,6 @@ impl<'a> FlacFile<'a> {
             }
         };
 
-        let data = self.audio_data();
         let mut offset = 0;
         let mut written = 0usize;
 
@@ -631,10 +639,9 @@ impl<'a> AudioFileWrite for FlacFile<'a> {
         let audio = self.read::<T>()?;
 
         // Write using the public function
-        let file = File::create(out_fp)?;
-        let writer = BufWriter::new(file);
-
-        write_flac(writer, &audio, CompressionLevel::DEFAULT)
+        let mut file = crate::fastio::open_for_overwrite(out_fp.as_ref())?;
+        write_flac(BufWriter::new(&mut file), &audio, CompressionLevel::DEFAULT)?;
+        Ok(crate::fastio::finish_overwrite(&mut file)?)
     }
 }
 

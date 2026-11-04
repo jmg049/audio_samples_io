@@ -8,7 +8,7 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use audio_samples::{AudioSamples, SampleType, traits::StandardSample};
+use audio_samples::{AudioSamples, I24, SampleType, traits::StandardSample};
 use memmap2::Mmap;
 
 use crate::error::AudioIOError;
@@ -559,6 +559,59 @@ where
     match audio.data() {
         audio_samples::AudioData::Mono(m) => m.as_view().insert_axis(ndarray::Axis(0)),
         audio_samples::AudioData::Multi(m) => m.as_view(),
+    }
+}
+
+/// Write `samples` packed to three little-endian bytes each at `out`.
+///
+/// # Safety
+///
+/// `out` must be valid for `samples.len() * 3` bytes.
+#[cfg(feature = "wav")]
+pub(crate) unsafe fn pack_i24(samples: &[I24], out: *mut u8) {
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("ssse3") && std::mem::size_of::<I24>() == 4 && cfg!(target_endian = "little") {
+        // SAFETY: the feature was detected; the caller's guarantee passes on.
+        unsafe { pack_i24_ssse3(samples, out) };
+        return;
+    }
+    for (i, s) in samples.iter().enumerate() {
+        // SAFETY: i < samples.len(), within the caller's bound.
+        unsafe { std::ptr::copy_nonoverlapping(s.to_le_bytes().as_ptr(), out.add(i * 3), 3) };
+    }
+}
+
+#[cfg(all(feature = "wav", target_arch = "x86_64"))]
+#[target_feature(enable = "ssse3,sse2")]
+unsafe fn pack_i24_ssse3(samples: &[I24], out: *mut u8) {
+    use std::arch::x86_64::*;
+    // Keep the low three bytes of each 32-bit value, closed up.
+    let keep = _mm_setr_epi8(0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, -1, -1, -1, -1);
+    let mut p = out;
+    let mut chunks = samples.chunks_exact(4);
+    let last = samples.len() / 4;
+    for (index, chunk) in (&mut chunks).enumerate() {
+        // SAFETY: I24 occupies 4 bytes with its value in the low three (checked by the caller),
+        // and each chunk holds four. 16-byte stores stay in bounds except on the last chunk,
+        // which stores through a local copy.
+        unsafe {
+            let packed = _mm_shuffle_epi8(_mm_loadu_si128(chunk.as_ptr().cast()), keep);
+            if index + 1 < last {
+                _mm_storeu_si128(p.cast(), packed);
+            } else {
+                let mut tmp = [0u8; 16];
+                _mm_storeu_si128(tmp.as_mut_ptr().cast(), packed);
+                std::ptr::copy_nonoverlapping(tmp.as_ptr(), p, 12);
+            }
+            p = p.add(12);
+        }
+    }
+    for s in chunks.remainder() {
+        // SAFETY: within the caller's bound.
+        unsafe {
+            std::ptr::copy_nonoverlapping(s.to_le_bytes().as_ptr(), p, 3);
+            p = p.add(3);
+        }
     }
 }
 

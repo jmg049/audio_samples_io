@@ -45,6 +45,7 @@ mod bitstream;
 mod constants;
 mod encoder;
 mod flac_file;
+mod parallel;
 mod streaming;
 mod streaming_writer;
 

@@ -1145,6 +1145,44 @@ where
     Ok(())
 }
 
+/// Read a WAV file whose samples are already `T` straight into memory, without mapping it.
+/// `None` when the file needs the general path: another sample type, a compressed format, or
+/// anything unusual about it, which that path reports properly.
+#[cfg(target_endian = "little")]
+pub(crate) fn read_same_type<T>(path: &Path) -> Option<AudioSamples<'static, T>>
+where
+    T: StandardSample + 'static,
+{
+    if TypeId::of::<T>() == TypeId::of::<I24>() {
+        return None;
+    }
+    let file = File::open(path).ok()?;
+    let mut reader = BufReader::with_capacity(4096, file);
+    let (info, offset) = parse_wav_header_streaming(&mut reader).ok()?;
+    if info.sample_type != T::SAMPLE_TYPE {
+        return None;
+    }
+    let file = reader.into_inner();
+    let channels = info.channels as usize;
+    let total = info.total_samples;
+    if channels == 0 || total == 0 || total % channels != 0 {
+        return None;
+    }
+    let mut samples: Vec<T> = Vec::with_capacity(total);
+    // SAFETY: the capacity holds `total` samples; they are only read after this fills them.
+    let bytes =
+        unsafe { std::slice::from_raw_parts_mut(samples.as_mut_ptr().cast::<u8>(), total * mem::size_of::<T>()) };
+    crate::fastio::read_exact_at_parallel(&file, offset, bytes).ok()?;
+    // SAFETY: every byte of the first `total` samples was just written, and T accepts any bytes.
+    unsafe { samples.set_len(total) };
+    if channels == 1 {
+        AudioSamples::new_mono(Array1::from_vec(samples), info.sample_rate).ok()
+    } else {
+        let array = Array2::from_shape_vec((channels, total / channels).f(), samples).ok()?;
+        AudioSamples::new_multi_channel(array, info.sample_rate).ok()
+    }
+}
+
 /// Bytes of interleaved samples converted at a time. The buffer lives on the stack, so writing
 /// a file makes no allocation that grows with its length.
 const TILE_BYTES: usize = 8 * 1024;
@@ -1248,12 +1286,24 @@ where
         None
     };
 
+    let packed_i24 = TypeId::of::<T>() == TypeId::of::<I24>() && TypeId::of::<U>() == TypeId::of::<I24>();
     let mut tails: Vec<&[T]> = Vec::with_capacity(channels);
     let mut start = 0usize;
     while start < frames {
         let count = tile_frames.min(frames - start);
         let bytes = count * frame_bytes;
-        if let Some(slice) = interleaved {
+        if let Some(slice) = interleaved
+            && packed_i24
+        {
+            let samples = &slice[start * channels..(start + count) * channels];
+            // SAFETY: T is I24, checked above, and the tile holds three bytes per sample.
+            unsafe {
+                crate::types::pack_i24(
+                    std::slice::from_raw_parts(samples.as_ptr().cast::<I24>(), samples.len()),
+                    tile,
+                );
+            }
+        } else if let Some(slice) = interleaved {
             // SAFETY: the tile holds `count * channels * size` bytes, the slice that many samples
             // from `start * channels`.
             unsafe { pack_frames::<T, U>(&[&slice[start * channels..]], count * channels, tile) };
@@ -1415,9 +1465,9 @@ impl<'a> AudioFileWrite for WavFile<'a> {
         T: StandardSample + 'static,
     {
         let audio = self.read::<T>()?;
-        let file = File::create(out_fp)?;
-        write_wav(file, &audio, WriteOptions::default())?;
-        Ok(())
+        let mut file = crate::fastio::open_for_overwrite(out_fp.as_ref())?;
+        write_wav(&mut file, &audio, WriteOptions::default())?;
+        Ok(crate::fastio::finish_overwrite(&mut file)?)
     }
 }
 

@@ -27,6 +27,8 @@ pub mod streaming;
 #[cfg(any(feature = "wav", feature = "flac"))]
 pub use crate::streaming::StreamedAudioWriter;
 
+#[allow(dead_code)] // Which helpers are used depends on the enabled formats.
+mod fastio;
 #[cfg(feature = "numpy")]
 pub mod python;
 
@@ -88,7 +90,7 @@ pub fn peek_native_type<P: AsRef<Path>>(fp: P) -> AudioIOResult<ValidatedSampleT
             {
                 use crate::wav::wav_file::parse_wav_header_streaming;
                 let file = File::open(path)?;
-                let mut reader = BufReader::with_capacity(65536, file);
+                let mut reader = BufReader::with_capacity(4096, file);
                 let (info, _) = parse_wav_header_streaming(&mut reader)?;
                 ValidatedSampleType::try_from(info.sample_type).map_err(|_| {
                     AudioIOError::unsupported_format(format!("Unsupported native sample type: {:?}", info.sample_type))
@@ -207,6 +209,10 @@ where
 
             #[cfg(feature = "wav")]
             {
+                #[cfg(target_endian = "little")]
+                if let Some(samples) = crate::wav::wav_file::read_same_type::<T>(path) {
+                    return Ok(samples);
+                }
                 let wav_file = WavFile::open_with_options(path, OpenOptions::default())?;
                 let samples = wav_file.read::<T>()?;
                 Ok(samples.into_owned())
@@ -502,7 +508,7 @@ where
 {
     let path = fp.as_ref();
     let format = FileType::from_path(path);
-    let file = File::create(path)?;
+    let file = fastio::open_for_streaming(path)?;
     // 256 KiB: buffers ~8 typical streaming chunks (4096-frame stereo f32 = 32 KiB)
     // before issuing a write syscall, reducing syscall count ~8× vs the 8 KiB default.
     let writer = BufWriter::with_capacity(256 * 1024, file);
@@ -544,7 +550,7 @@ where
 {
     let path = fp.as_ref();
     let format = FileType::from_path(path);
-    let file = File::create(path)?;
+    let file = fastio::open_for_streaming(path)?;
     let writer = BufWriter::with_capacity(opts.write_buf_capacity, file);
     create_streamed_with::<_, T>(writer, channels, sample_rate, format)
 }
@@ -658,7 +664,7 @@ where
     let path = fp.as_ref();
     match FileType::from_path(path) {
         FileType::FLAC => {
-            let file = File::create(path)?;
+            let file = fastio::open_for_streaming(path)?;
             let writer = BufWriter::with_capacity(256 * 1024, file);
             flac_writer_for_type::<T, _>(writer, channels, sample_rate)
         },
@@ -892,8 +898,9 @@ where
 
             #[cfg(feature = "wav")]
             {
-                let file = std::fs::File::create(path)?;
-                crate::wav::wav_file::write_wav(file, audio, opts)
+                let mut file = fastio::open_for_overwrite(path)?;
+                crate::wav::wav_file::write_wav(&mut file, audio, opts)?;
+                Ok(fastio::finish_overwrite(&mut file)?)
             }
         },
         FileType::FLAC => {
@@ -904,9 +911,10 @@ where
 
             #[cfg(feature = "flac")]
             {
-                let file = std::fs::File::create(path)?;
-                let buf_writer = std::io::BufWriter::with_capacity(opts.write_buf_capacity, file);
-                crate::flac::write_flac(buf_writer, audio, CompressionLevel::default())
+                let mut file = fastio::open_for_overwrite(path)?;
+                let buf_writer = std::io::BufWriter::with_capacity(opts.write_buf_capacity, &mut file);
+                crate::flac::write_flac(buf_writer, audio, CompressionLevel::default())?;
+                Ok(fastio::finish_overwrite(&mut file)?)
             }
         },
         FileType::AIFF => {
@@ -917,9 +925,10 @@ where
 
             #[cfg(feature = "aiff")]
             {
-                let file = std::fs::File::create(path)?;
-                let buf_writer = std::io::BufWriter::with_capacity(opts.write_buf_capacity, file);
-                crate::aiff::write_aiff(buf_writer, audio)
+                let mut file = fastio::open_for_overwrite(path)?;
+                let buf_writer = std::io::BufWriter::with_capacity(opts.write_buf_capacity, &mut file);
+                crate::aiff::write_aiff(buf_writer, audio)?;
+                Ok(fastio::finish_overwrite(&mut file)?)
             }
         },
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
@@ -957,8 +966,9 @@ where
     P: AsRef<Path>,
     T: StandardSample + 'static,
 {
-    let file = std::fs::File::create(fp)?;
-    crate::wav::wav_file::write_wav_with_metadata(file, audio, WriteOptions::default(), metadata)
+    let mut file = fastio::open_for_overwrite(fp.as_ref())?;
+    crate::wav::wav_file::write_wav_with_metadata(&mut file, audio, WriteOptions::default(), metadata)?;
+    Ok(fastio::finish_overwrite(&mut file)?)
 }
 
 /// Write a WAV file with trailing metadata to any `Write` destination (e.g. an in-memory buffer).

@@ -1021,11 +1021,122 @@ where
     }
 }
 
+/// Loops for integer samples to floats, with the same result as `ConvertFrom`: a division by the
+/// magnitude of the integer type's limit on that sign. Written so that they vectorise.
+macro_rules! int_to_float_loops {
+    ($($name:ident: $size:literal, |$c:ident| $value:expr, $float:ty, $negative:expr, $positive:expr;)*) => {
+        $(
+            #[inline(always)]
+            fn $name(bytes: &[u8], out: &mut [$float]) {
+                for (d, $c) in out.iter_mut().zip(bytes.chunks_exact($size)) {
+                    let v: i32 = $value;
+                    let x = v as $float;
+                    *d = x / if v < 0 { $negative } else { $positive };
+                }
+            }
+        )*
+    };
+}
+
+int_to_float_loops! {
+    i16_to_f32: 2, |c| i32::from(i16::from_le_bytes([c[0], c[1]])), f32, 32768.0, 32767.0;
+    i16_to_f64: 2, |c| i32::from(i16::from_le_bytes([c[0], c[1]])), f64, 32768.0, 32767.0;
+    i24_to_f32: 3, |c| i32::from_le_bytes([0, c[0], c[1], c[2]]) >> 8, f32, 8_388_608.0, 8_388_607.0;
+    i24_to_f64: 3, |c| i32::from_le_bytes([0, c[0], c[1], c[2]]) >> 8, f64, 8_388_608.0, 8_388_607.0;
+    i32_to_f32: 4, |c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]), f32, 2_147_483_648.0, 2_147_483_647.0;
+    i32_to_f64: 4, |c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]), f64, 2_147_483_648.0, 2_147_483_647.0;
+}
+
+/// Run the integer-to-float loop for this pair of types, if there is one.
+#[inline(always)]
+fn convert_to_float<T: 'static>(sample_type: ValidatedSampleType, bytes: &[u8], out: &mut [T]) -> bool {
+    use std::any::TypeId;
+    let id = TypeId::of::<T>();
+    if id == TypeId::of::<f32>() {
+        // SAFETY: T is f32.
+        let out = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr().cast::<f32>(), out.len()) };
+        match sample_type {
+            ValidatedSampleType::I16 => i16_to_f32(bytes, out),
+            ValidatedSampleType::I24 => i24_to_f32(bytes, out),
+            ValidatedSampleType::I32 => i32_to_f32(bytes, out),
+            _ => return false,
+        }
+        true
+    } else if id == TypeId::of::<f64>() {
+        // SAFETY: T is f64.
+        let out = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr().cast::<f64>(), out.len()) };
+        match sample_type {
+            ValidatedSampleType::I16 => i16_to_f64(bytes, out),
+            ValidatedSampleType::I24 => i24_to_f64(bytes, out),
+            ValidatedSampleType::I32 => i32_to_f64(bytes, out),
+            _ => return false,
+        }
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn convert_to_float_avx2<T: 'static>(sample_type: ValidatedSampleType, bytes: &[u8], out: &mut [T]) -> bool {
+    convert_to_float(sample_type, bytes, out)
+}
+
+/// Spread packed three-byte samples to I24 values, four at a time.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3,sse2")]
+unsafe fn unpack_i24_ssse3(bytes: &[u8], out: &mut [I24]) {
+    use std::arch::x86_64::*;
+    // I24 holds its value in the low three bytes and a zero above them.
+    let spread = _mm_setr_epi8(0, 1, 2, -1, 3, 4, 5, -1, 6, 7, 8, -1, 9, 10, 11, -1);
+    let samples = out.len().min(bytes.len() / 3);
+    let mut i = 0;
+    // A 16-byte load covers four samples plus four more bytes, so stop while those exist.
+    while i + 4 <= samples && (i + 4) * 3 + 4 <= bytes.len() {
+        // SAFETY: the loop condition bounds both the 16-byte load and the 16-byte store.
+        unsafe {
+            let v = _mm_loadu_si128(bytes.as_ptr().add(i * 3).cast());
+            _mm_storeu_si128(out.as_mut_ptr().add(i).cast(), _mm_shuffle_epi8(v, spread));
+        }
+        i += 4;
+    }
+    for (d, c) in out[i..samples].iter_mut().zip(bytes[i * 3..].chunks_exact(3)) {
+        *d = I24::from_le_bytes([c[0], c[1], c[2]]);
+    }
+}
+
 /// Convert little-endian samples of `sample_type` into `out`.
 fn convert_bytes_into<T>(sample_type: ValidatedSampleType, bytes: &[u8], out: &mut [T])
 where
     T: StandardSample + 'static,
 {
+    #[cfg(target_arch = "x86_64")]
+    if matches!(sample_type, ValidatedSampleType::I24)
+        && std::any::TypeId::of::<T>() == std::any::TypeId::of::<I24>()
+        && std::mem::size_of::<I24>() == 4
+        && is_x86_feature_detected!("ssse3")
+    {
+        // SAFETY: T is I24, checked above, so the cast is the identity; the feature was detected.
+        unsafe {
+            let out = std::slice::from_raw_parts_mut(out.as_mut_ptr().cast::<I24>(), out.len());
+            unpack_i24_ssse3(bytes, out);
+        }
+        return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        // SAFETY: the features were just detected.
+        if unsafe { convert_to_float_avx2(sample_type, bytes, out) } {
+            return;
+        }
+    } else if convert_to_float(sample_type, bytes, out) {
+        return;
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    if convert_to_float(sample_type, bytes, out) {
+        return;
+    }
     macro_rules! go {
         ($size:literal, |$c:ident| $value:expr) => {
             for (d, $c) in out.iter_mut().zip(bytes.chunks_exact($size)) {

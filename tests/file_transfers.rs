@@ -1,0 +1,140 @@
+#![cfg(all(feature = "wav", feature = "flac"))]
+//! Whole-file reads and writes: overwriting, and transfers large enough to use several threads.
+
+use std::path::PathBuf;
+
+use audio_samples::{AudioSamples, I24, nzu, sample_rate};
+use audio_samples_io::{
+    create_streamed,
+    flac::{CompressionLevel, write_flac},
+    read,
+    traits::{AudioStreamWrite, AudioStreamWriter},
+    write,
+};
+use ndarray::{Array1, Array2};
+
+fn temp(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("aus_file_transfers_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join(name)
+}
+
+fn noise(channels: usize, frames: usize) -> Array2<i16> {
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    Array2::from_shape_fn((channels, frames), |_| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 48) as i16
+    })
+}
+
+#[test]
+fn overwriting_leaves_exactly_the_new_file() {
+    let path = temp("overwrite.wav");
+    let long = AudioSamples::new_multi_channel(noise(2, 100_000), sample_rate!(44100)).unwrap();
+    let short = AudioSamples::new_multi_channel(noise(2, 1_000), sample_rate!(44100)).unwrap();
+    write(&path, &long).unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 44 + 400_000);
+    write(&path, &short).unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 44 + 4_000);
+    let back = read::<_, i16>(&path).unwrap();
+    assert_eq!(back.to_interleaved_vec(), short.to_interleaved_vec());
+
+    let flac = temp("overwrite.flac");
+    write(&flac, &long).unwrap();
+    write(&flac, &short).unwrap();
+    assert_eq!(
+        read::<_, i16>(&flac).unwrap().to_interleaved_vec(),
+        short.to_interleaved_vec()
+    );
+}
+
+#[test]
+fn streaming_over_a_longer_file_leaves_exactly_the_new_file() {
+    let path = temp("stream_over.wav");
+    let long = AudioSamples::new_multi_channel(noise(2, 100_000), sample_rate!(44100)).unwrap();
+    write(&path, &long).unwrap();
+    let chunk = AudioSamples::<i16>::zeros_mono(nzu!(1000), sample_rate!(44100));
+    let mut writer = create_streamed::<_, i16>(&path, 1, 44100).unwrap();
+    writer.write_frames(&chunk).unwrap();
+    writer.finalize().unwrap();
+    drop(writer);
+    let back = read::<_, i16>(&path).unwrap();
+    assert_eq!(back.samples_per_channel().get(), 1000);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 44 + 2_000);
+}
+
+#[cfg(unix)]
+#[test]
+fn overwriting_keeps_links_and_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let path = temp("linked.wav");
+    let link = temp("link.wav");
+    let hard = temp("hard.wav");
+    let audio = AudioSamples::new_multi_channel(noise(2, 1_000), sample_rate!(44100)).unwrap();
+    write(&path, &audio).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let _ = std::fs::remove_file(&link);
+    let _ = std::fs::remove_file(&hard);
+    std::os::unix::fs::symlink(&path, &link).unwrap();
+    std::fs::hard_link(&path, &hard).unwrap();
+    let other = AudioSamples::new_multi_channel(noise(2, 500), sample_rate!(44100)).unwrap();
+    write(&link, &other).unwrap();
+    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o640);
+    assert_eq!(read::<_, i16>(&hard).unwrap().samples_per_channel().get(), 500);
+}
+
+#[test]
+fn large_wav_reads_match_in_every_sample_type() {
+    // Large enough to be divided between threads.
+    let audio = noise(2, 2_000_000);
+    let path = temp("large.wav");
+    let source = AudioSamples::new_multi_channel(audio, sample_rate!(44100)).unwrap();
+    write(&path, &source).unwrap();
+    let back = read::<_, i16>(&path).unwrap();
+    assert!(back.to_interleaved_vec() == source.to_interleaved_vec());
+
+    let values: Vec<f32> = source
+        .to_interleaved_vec()
+        .iter()
+        .map(|&s| f32::from(s) / 40_000.0)
+        .collect();
+    let floats = AudioSamples::new_mono(Array1::from(values.clone()), sample_rate!(44100)).unwrap();
+    let path = temp("large_f32.wav");
+    write(&path, &floats).unwrap();
+    assert!(read::<_, f32>(&path).unwrap().to_interleaved_vec().as_slice() == values.as_slice());
+}
+
+#[test]
+fn large_flac_decodes_the_same_on_several_threads() {
+    let source = noise(2, 1_500_000);
+    let audio = AudioSamples::new_multi_channel(source, sample_rate!(44100)).unwrap();
+    let path = temp("large.flac");
+    let mut bytes = Vec::new();
+    write_flac(&mut bytes, &audio, CompressionLevel::FASTEST).unwrap();
+    assert!(bytes.len() > 4 * 1024 * 1024);
+    std::fs::write(&path, &bytes).unwrap();
+    let expected = audio.to_interleaved_vec();
+    assert!(read::<_, i16>(&path).unwrap().to_interleaved_vec() == expected);
+
+    // Trailing bytes after the last frame, as a tag would leave.
+    let mut tagged = bytes.clone();
+    tagged.extend_from_slice(b"TAG not audio not audio not audio");
+    let path = temp("tagged.flac");
+    std::fs::write(&path, &tagged).unwrap();
+    assert!(read::<_, i16>(&path).unwrap().to_interleaved_vec() == expected);
+
+    // 24-bit, through a conversion.
+    let values = audio.to_interleaved_vec();
+    let i24 = Array2::from_shape_fn((2, 1_500_000), |(c, f)| {
+        I24::wrapping_from_i32(i32::from(values[f * 2 + c]) << 8)
+    });
+    let audio = AudioSamples::new_multi_channel(i24, sample_rate!(44100)).unwrap();
+    let path = temp("large24.flac");
+    let file = std::fs::File::create(&path).unwrap();
+    write_flac(file, &audio, CompressionLevel::FASTEST).unwrap();
+    let back = read::<_, I24>(&path).unwrap();
+    assert!(back.to_interleaved_vec() == audio.to_interleaved_vec());
+}
