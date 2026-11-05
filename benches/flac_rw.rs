@@ -211,7 +211,7 @@ where
         data,
         NonZeroU32::new(sample_rate).expect("sample rate must be non-zero"),
     )
-    .unwrap()
+    .expect("valid channel layout")
 }
 
 fn channel_signal<T>(channel_idx: usize, duration: Duration, sample_rate: u32) -> AudioSamples<'static, T>

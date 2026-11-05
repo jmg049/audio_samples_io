@@ -97,8 +97,8 @@ impl<'a> DataChunk<'a> {
                 }
             },
             16 => {
-                for chunk in self.bytes.chunks_exact(2) {
-                    let v = i16::from_le_bytes([chunk[0], chunk[1]]);
+                for chunk in self.bytes.as_chunks::<2>().0 {
+                    let v = i16::from_le_bytes(*chunk);
                     // Safety: i16 and S share size (16 bits enforced above).
                     let s: S = unsafe { mem::transmute_copy(&v) };
                     out.push(s);
@@ -106,14 +106,14 @@ impl<'a> DataChunk<'a> {
             },
             32 => {
                 if TypeId::of::<S>() == TypeId::of::<f32>() {
-                    for chunk in self.bytes.chunks_exact(4) {
-                        let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    for chunk in self.bytes.as_chunks::<4>().0 {
+                        let v = f32::from_le_bytes(*chunk);
                         let s: S = unsafe { mem::transmute_copy(&v) };
                         out.push(s);
                     }
                 } else {
-                    for chunk in self.bytes.chunks_exact(4) {
-                        let v = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    for chunk in self.bytes.as_chunks::<4>().0 {
+                        let v = i32::from_le_bytes(*chunk);
                         let s: S = unsafe { mem::transmute_copy(&v) };
                         out.push(s);
                     }
@@ -135,10 +135,12 @@ impl<'a> DataChunk<'a> {
     /// they are represented as a 4-byte struct.
     fn read_i24_vec(&self) -> NonEmptyVec<I24> {
         // bytes multiple of 3 already validated
-        let chunks = self.bytes.chunks_exact(3);
-        let v = chunks
-            .into_iter()
-            .map(|c| I24::from_le_bytes([c[0], c[1], c[2]]))
+        let v = self
+            .bytes
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|c| I24::from_le_bytes(*c))
             .collect();
         // SAFETY: non-empty by design since data chunk must contain at least one sample to be valid
         unsafe { NonEmptyVec::new_unchecked(v) }

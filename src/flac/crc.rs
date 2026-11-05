@@ -241,8 +241,8 @@ impl Crc16 {
     #[inline]
     pub fn compute(data: &[u8]) -> u16 {
         let mut crc: u16 = 0;
-        let mut chunks = data.chunks_exact(4);
-        for chunk in &mut chunks {
+        let (chunks, rem) = data.as_chunks::<4>();
+        for chunk in chunks {
             crc = CRC16_TABLE_STATE_HI[(crc >> 8) as usize]
                 ^ CRC16_TABLE_STATE_LO[(crc & 0xFF) as usize]
                 ^ CRC16_TABLE_B0[chunk[0] as usize]
@@ -250,7 +250,7 @@ impl Crc16 {
                 ^ CRC16_TABLE_B2[chunk[2] as usize]
                 ^ CRC16_TABLE[chunk[3] as usize];
         }
-        for &byte in chunks.remainder() {
+        for &byte in rem {
             crc = (crc << 8) ^ CRC16_TABLE[((crc >> 8) as u8 ^ byte) as usize];
         }
         crc
