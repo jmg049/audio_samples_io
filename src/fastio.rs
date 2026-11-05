@@ -152,11 +152,67 @@ pub(crate) fn read_exact_at(mut file: &File, offset: u64, buf: &mut [u8]) -> io:
     file.read_exact(buf)
 }
 
+/// Whether a range of `file` must come from the device. Threads then only split one sequential
+/// stream into several, which reads 3 to 8% slower on a SATA SSD and worse on a hard disk, and the
+/// copy they speed up is a small part of the time. Linux tells, from 6.5; elsewhere, assume cached.
+#[cfg(target_os = "linux")]
+fn range_is_cold(file: &File, offset: u64, len: usize) -> bool {
+    use std::os::fd::AsRawFd;
+
+    #[repr(C)]
+    struct Range {
+        offset: u64,
+        len: u64,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct Stat {
+        nr_cache: u64,
+        nr_dirty: u64,
+        nr_writeback: u64,
+        nr_evicted: u64,
+        nr_recently_evicted: u64,
+    }
+    const SYS_CACHESTAT: libc::c_long = 451;
+    let range = Range {
+        offset,
+        len: len as u64,
+    };
+    let mut stat = Stat::default();
+    // SAFETY: the descriptor is open, and both pointers are to live values of the layout the call uses.
+    let result = unsafe {
+        libc::syscall(
+            SYS_CACHESTAT,
+            file.as_raw_fd(),
+            &raw const range,
+            &raw mut stat,
+            0 as libc::c_uint,
+        )
+    };
+    let pages = (len as u64).div_ceil(4096).max(1);
+    result == 0 && stat.nr_cache < pages - pages / 8
+}
+
+#[cfg(not(target_os = "linux"))]
+const fn range_is_cold(_file: &File, _offset: u64, _len: usize) -> bool {
+    false
+}
+
+/// The threads a transfer of `len` bytes from `file` should use, given a permit.
+pub(crate) fn threads_for_read(permit: &ThreadsPermit, file: &File, offset: u64, len: usize) -> usize {
+    let threads = permit.threads(transfer_threads().min(len / TRANSFER_BYTES_PER_THREAD));
+    if threads <= 1 || len < TRANSFER_MIN_BYTES || range_is_cold(file, offset, len) {
+        1
+    } else {
+        threads
+    }
+}
+
 /// [`read_exact_at`], on several threads for a large `buf`.
 pub(crate) fn read_exact_at_parallel(file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
     let permit = ThreadsPermit::try_acquire();
-    let threads = permit.threads(transfer_threads().min(buf.len() / TRANSFER_BYTES_PER_THREAD));
-    if threads <= 1 || buf.len() < TRANSFER_MIN_BYTES || cfg!(not(any(unix, windows))) {
+    let threads = threads_for_read(&permit, file, offset, buf.len());
+    if threads <= 1 || cfg!(not(any(unix, windows))) {
         return read_exact_at(file, offset, buf);
     }
     let len = buf.len();

@@ -22,7 +22,7 @@ All notable changes to this project will be documented in this file.
 - FLAC: levels use the conventional block sizes, LPC orders and partition ranges, and `qlp_precision` follows the block size, so levels 2 and 3 produce different frames. The encoder uses windowed LPC analysis, and output is within 0.2% of the reference encoder on real music at each level.
 - FLAC: with `flac-parallel`, `write_flac` encodes whole frames in parallel instead of subframes.
 - Writes to a path no longer truncate an existing file first; they overwrite it and cut it to length, which keeps its pages and avoids the flush btrfs does when a file truncated to zero is closed. Streamed writes shrink the old file to one byte for the same reason.
-- Reads of 1.5 MiB or more use up to 8 short-lived threads, and FLAC files of 512 KiB or more decode on up to 8. Whole-file FLAC writes work out the MD5 on one extra thread. They follow the process's CPU affinity; `AUDIO_SAMPLES_IO_THREADS` sets the limit, and `1` keeps all work on the calling thread. Only one such transfer runs at a time.
+- Reads of 1.5 MiB or more that are in the page cache use up to 8 short-lived threads, since threads slow a read from the device, and FLAC files of 512 KiB or more decode on up to 8. Whole-file FLAC writes work out the MD5 on one extra thread. They follow the process's CPU affinity; `AUDIO_SAMPLES_IO_THREADS` sets the limit, and `1` keeps all work on the calling thread. Only one such transfer runs at a time.
 - `numpy` feature: output arrays of 1 MiB or more on Linux come from memory aligned to a huge page. Freed ones are kept for later reads, up to 16 MiB in total.
 - Rust `read()` of WAV reads into memory directly for every sample type instead of mapping the file.
 - Integer to float conversion uses AVX2 where available, with the same values as `ConvertFrom`. 24-bit samples pack and unpack with SSSE3.
@@ -37,6 +37,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 - `flac::write_flac_without_md5`, `StreamedWavWriter::new_u8`, `CompressionLevel::window_parts`.
+- Dependency: `libc` on Linux.
 - `benches/python_io_bench.py`: reads and writes against other Python libraries on Linux, macOS and Windows, warm and cold, with fsync and CPU time.
 - `StreamedWavFile::new_forward_only`/`StreamedAiffFile::new_forward_only`/`StreamedFlacFile::new` (relaxed): decode wav/flac/aiff incrementally over a plain `Read` source (no `Seek` required) — for network transports and other non-seekable streams. `seek_to_frame`/`reset` (and the `AudioStreamReader`/`AudioStreamRead` trait impls) still require `Read + Seek`, but construction and `read_frames_into` no longer do. WAV and AIFF carry over any header bytes their scan buffered past the `data`/`SSND` chunk boundary as a `leftover` prefix rather than seeking back to discard them; FLAC's metadata-block parser already stops exactly at the frame boundary, so it needed no equivalent. All three verified over a `Read`-only (deliberately non-`Seek`) test wrapper, matching a `Read + Seek` decode exactly.
 - `StreamedAiffFile` (`aiff` feature): incremental AIFF/AIFF-C reader mirroring `StreamedWavFile`/`StreamedFlacFile` — parses `COMM`/`SSND` at construction, reads frames on demand, supports `seek_to_frame`/`reset`, and works over any `Read + Seek` source (not just files)
