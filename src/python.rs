@@ -18,154 +18,6 @@ use crate::types::{OpenOptions, ValidatedSampleType};
 use crate::wav::{WavFile, wav_file::parse_wav_header_streaming};
 use crate::{AudioIOError, AudioIOResult, BaseAudioInfo, FileType};
 
-/// Arrays of at least this many bytes use [`SampleMemory`]. Smaller ones are served from NumPy's
-/// allocator without a page fault for each page.
-#[cfg(target_os = "linux")]
-const SAMPLE_MEMORY_MIN_BYTES: usize = 1024 * 1024;
-
-/// On a single thread the allocator's reuse of freed memory competes with [`SampleMemory`] up to
-/// this size, the most that allocator serves from its heap.
-#[cfg(target_os = "linux")]
-const SAMPLE_MEMORY_ALWAYS_BYTES: usize = 32 * 1024 * 1024;
-
-/// Memory for a large output array.
-///
-/// A NumPy array of many pages takes a page fault per 4 KiB page during the read that fills it,
-/// which costs more than copying the data, because the allocator's mappings do not start on a
-/// huge page boundary. This mapping does, and freed mappings are kept for the next reads, up to a
-/// limit, which also spares the kernel from clearing their pages again.
-#[cfg(target_os = "linux")]
-#[pyclass(frozen, module = "audio_samples_io")]
-struct SampleMemory {
-    map: std::sync::Mutex<Option<memmap2::MmapMut>>,
-    data: usize,
-}
-
-#[cfg(target_os = "linux")]
-mod sample_memory {
-    use std::sync::Mutex;
-
-    use memmap2::{Advice, MmapMut, MmapOptions};
-
-    const HUGE_PAGE: usize = 2 * 1024 * 1024;
-    /// Bytes of freed mappings kept for later reads. Reads of up to this size repeat without
-    /// clearing pages; 60 s of 16-bit stereo takes 0.11 ms instead of 0.66. Keeping more only
-    /// helps much longer files, which win without it.
-    const KEEP_MAX_BYTES: usize = 16 * 1024 * 1024;
-
-    static SPARE: Mutex<Vec<MmapMut>> = Mutex::new(Vec::new());
-
-    /// A mapping holding `bytes` plus up to a page from its first huge page boundary, [`aligned`].
-    pub(super) fn acquire(bytes: usize) -> std::io::Result<MmapMut> {
-        let needed = (bytes + 4096).next_multiple_of(HUGE_PAGE) + HUGE_PAGE;
-        if let Ok(mut spare) = SPARE.try_lock() {
-            if let Some(at) = spare.iter().rposition(|m| m.len() >= needed && m.len() / 4 <= needed) {
-                return Ok(spare.swap_remove(at));
-            }
-            // Kept memory of another size would only add to this read's.
-            spare.clear();
-        }
-        let map = MmapOptions::new().len(needed).map_anon()?;
-        let start = map.as_ptr() as usize;
-        let inner = start.next_multiple_of(HUGE_PAGE) - start;
-        // Huge pages for whole units of the array; the rest stays in small pages, so that the
-        // resident size is the array's. Only an optimisation: without them the memory works the same.
-        let whole = (bytes + 4096) / HUGE_PAGE * HUGE_PAGE;
-        let _ = map.advise_range(Advice::HugePage, inner, whole);
-        let _ = map.advise_range(Advice::NoHugePage, inner + whole, needed - inner - whole);
-        Ok(map)
-    }
-
-    /// The offset of the first huge page boundary in `map`.
-    pub(super) fn aligned(map: &mut MmapMut) -> *mut u8 {
-        let start = map.as_mut_ptr() as usize;
-        (start.next_multiple_of(HUGE_PAGE)) as *mut u8
-    }
-
-    /// Keep `map` for a later read, dropping the oldest kept ones to stay within the limit.
-    pub(super) fn release(map: MmapMut) {
-        if map.len() > KEEP_MAX_BYTES {
-            return;
-        }
-        if let Ok(mut spare) = SPARE.try_lock() {
-            let mut held: usize = spare.iter().map(|m| m.len()).sum::<usize>() + map.len();
-            while held > KEEP_MAX_BYTES {
-                held -= spare.remove(0).len();
-            }
-            spare.push(map);
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl Drop for SampleMemory {
-    fn drop(&mut self) {
-        if let Ok(mut slot) = self.map.lock()
-            && let Some(map) = slot.take()
-        {
-            sample_memory::release(map);
-        }
-    }
-}
-
-/// An uninitialised `(channels, frames)` array in interleaved (`fortran`) or planar memory, with a
-/// pointer to its data. `file_offset` is where the samples start in the file: a large array starts at
-/// the same offset within a page where the sample type allows it, which makes the kernel's copy
-/// about 10% faster, both for this read and for writing the array to a file later.
-fn new_output_array<T>(
-    py: Python<'_>,
-    channels: usize,
-    frames: usize,
-    fortran: bool,
-    file_offset: u64,
-) -> (Bound<'_, PyArray2<T>>, usize)
-where
-    T: Element,
-{
-    #[cfg(target_os = "linux")]
-    {
-        let bytes = channels * frames * std::mem::size_of::<T>();
-        if bytes >= SAMPLE_MEMORY_MIN_BYTES
-            && (crate::fastio::transfer_threads() > 1 || bytes >= SAMPLE_MEMORY_ALWAYS_BYTES)
-            && let Ok(mut map) = sample_memory::acquire(bytes)
-        {
-            let shift = (file_offset % 4096) as usize;
-            let shift = if shift.is_multiple_of(std::mem::align_of::<T>()) {
-                shift
-            } else {
-                0
-            };
-            let data = sample_memory::aligned(&mut map).wrapping_add(shift);
-            let holder = SampleMemory {
-                map: std::sync::Mutex::new(Some(map)),
-                data: data as usize,
-            };
-            if let Ok(holder) = Bound::new(py, holder) {
-                use ndarray::ShapeBuilder;
-                let data = holder.get().data as *const T;
-                // SAFETY: the mapping holds at least `bytes` from `data`, is aligned for any T,
-                // and lives as long as `holder`, which becomes the array's base object.
-                unsafe {
-                    let array = if fortran {
-                        let view = ndarray::ArrayView2::from_shape_ptr((channels, frames).f(), data);
-                        PyArray2::borrow_from_array(&view, holder.into_any())
-                    } else {
-                        let view = ndarray::ArrayView2::from_shape_ptr((channels, frames), data);
-                        PyArray2::borrow_from_array(&view, holder.into_any())
-                    };
-                    // Filled by the caller before anyone else sees it.
-                    let data = array.data() as usize;
-                    return (array, data);
-                }
-            }
-        }
-    }
-    // SAFETY: the caller fills the array before it is seen by anything else.
-    let array = unsafe { PyArray2::<T>::new(py, [channels, frames], fortran) };
-    let data = array.data() as usize;
-    (array, data)
-}
-
 /// Type-erased container for a natively-typed audio array produced by [`read_pyarray_native`].
 ///
 /// Each variant holds a Fortran-layout `PyArray2<T>` matching the file's native sample type,
@@ -260,7 +112,9 @@ where
     let byte_count = total_samples * size_of::<T>();
 
     // Fortran (column-major) layout: element [c, f] → c + f*channels, matching WAV interleaved.
-    let (array, data_ptr_usize) = new_output_array::<T>(py, channels, frames, true, offset);
+    // SAFETY: the array is filled below before anything else sees it.
+    let array = unsafe { PyArray2::<T>::new(py, [channels, frames], true) };
+    let data_ptr_usize = array.data() as usize;
 
     let read_result: AudioIOResult<()> = py.detach(|| {
         // Safety: pointer valid (just allocated, not yet shared), CPython is non-moving.
@@ -379,7 +233,9 @@ where
     // Step 2: Allocate an array with Fortran (column-major) layout (GIL held, fast).
     // Fortran layout for shape (channels, frames) maps element [c, f] to index c + f*channels,
     // which is exactly WAV's interleaved on-disk format — no deinterleave needed.
-    let (array, data_ptr_usize) = new_output_array::<T>(py, channels, frames, true, offset);
+    // SAFETY: the array is filled below before anything else sees it.
+    let array = unsafe { PyArray2::<T>::new(py, [channels, frames], true) };
+    let data_ptr_usize = array.data() as usize;
 
     // Step 3: Read audio payload directly into the array's buffer (GIL released).
     let read_result: AudioIOResult<()> = py.detach(|| {
@@ -445,7 +301,9 @@ where
     }
     let frames = total_samples / channels;
 
-    let (array, data_ptr_usize) = new_output_array::<T>(py, channels, frames, false, 0);
+    // SAFETY: the array is filled below before anything else sees it.
+    let array = unsafe { PyArray2::<T>::new(py, [channels, frames], false) };
+    let data_ptr_usize = array.data() as usize;
     let decoded = py.detach(|| {
         // Whole-file decoding can divide the stream between threads; it reports failure for any
         // stream that needs the error handling of the sequential decoder below.

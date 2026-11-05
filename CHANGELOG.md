@@ -23,7 +23,6 @@ All notable changes to this project will be documented in this file.
 - FLAC: with `flac-parallel`, `write_flac` encodes whole frames in parallel instead of subframes.
 - Writes to a path no longer truncate an existing file first; they overwrite it and cut it to length, which keeps its pages and avoids the flush btrfs does when a file truncated to zero is closed. Streamed writes shrink the old file to one byte for the same reason.
 - Reads of 1.5 MiB or more that are in the page cache use up to 8 short-lived threads, since threads slow a read from the device, and FLAC files of 512 KiB or more decode on up to 8. Whole-file FLAC writes work out the MD5 on one extra thread. They follow the process's CPU affinity; `AUDIO_SAMPLES_IO_THREADS` sets the limit, and `1` keeps all work on the calling thread. Only one such transfer runs at a time.
-- `numpy` feature: output arrays of 1 MiB or more on Linux come from memory aligned to a huge page. Freed ones are kept for later reads, up to 16 MiB in total.
 - Rust `read()` of WAV reads into memory directly for every sample type instead of mapping the file.
 - Integer to float conversion uses AVX2 where available, with the same values as `ConvertFrom`. 24-bit samples pack and unpack with SSSE3.
 - FLAC: `StreamedFlacFile` decodes through a small sliding window, keeps an index of decoded frames and bisects by frame header on seek, so seeking no longer decodes from the start.
