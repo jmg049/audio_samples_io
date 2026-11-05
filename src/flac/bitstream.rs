@@ -4,6 +4,56 @@
 
 use crate::flac::error::FlacError;
 
+/// Decode groups of `N` Rice codes, each group from one 64-bit load, until a group does not fit,
+/// the data or `count` runs out.
+///
+/// # Safety
+///
+/// `out` must be valid for writes of `count` values.
+#[inline(always)]
+unsafe fn rice_group<const N: usize>(
+    data: &[u8],
+    bit: &mut usize,
+    done: &mut usize,
+    out: *mut i32,
+    count: usize,
+    k: u32,
+) {
+    if data.len() < 8 {
+        return;
+    }
+    let last_load = data.len() - 8;
+    let mut at = *bit;
+    let mut written = *done;
+    while written + N <= count && (at >> 3) <= last_load {
+        // SAFETY: the loop condition keeps the 8-byte load inside the data.
+        let mut word = u64::from_be(unsafe { data.as_ptr().add(at >> 3).cast::<u64>().read_unaligned() }) << (at & 7);
+        let mut used = 0u32;
+        let mut values = [0u32; N];
+        for value in &mut values {
+            let zeros = word.leading_zeros();
+            // Past the stop bit, then the top k bits. A word of zeros gives nonsense here, which
+            // the check on `used` discards.
+            word = word.wrapping_shl(zeros) << 1;
+            let remainder = (word >> 1) >> (63 - k);
+            word = word.checked_shl(k).unwrap_or(0);
+            *value = zeros.wrapping_shl(k) | remainder as u32;
+            used = used.wrapping_add(zeros.min(64) + 1 + k);
+        }
+        if used > 57 {
+            break;
+        }
+        for (i, &u) in values.iter().enumerate() {
+            // SAFETY: written + N <= count.
+            unsafe { out.add(written + i).write(((u >> 1) as i32) ^ -((u & 1) as i32)) };
+        }
+        written += N;
+        at += used as usize;
+    }
+    *bit = at;
+    *done = written;
+}
+
 /// Bitstream reader for decoding FLAC data.
 ///
 /// Uses a 64-bit left-aligned register for efficient bulk bit extraction.
@@ -109,6 +159,104 @@ impl<'a> BitReader<'a> {
     #[inline]
     pub const fn bits_remaining(&self) -> usize {
         self.data.len() * 8 - self.stream_bit_pos()
+    }
+
+    /// Decode `count` Rice codes with parameter `k` into `out` as signed values.
+    ///
+    /// Each code is taken from a 64-bit word loaded at the code's own byte, so there is no refill
+    /// branch, whose outcome varies with the code lengths and would often be mispredicted.
+    ///
+    /// # Safety
+    ///
+    /// `out` must be valid for writes of `count` values.
+    #[inline]
+    pub unsafe fn read_rice_run(&mut self, out: *mut i32, count: usize, k: u8) -> Result<(), FlacError> {
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("lzcnt") && is_x86_feature_detected!("bmi2") {
+            // SAFETY: the features were just detected; the caller's guarantee passes on.
+            return unsafe { self.read_rice_run_bmi(out, count, k) };
+        }
+        // SAFETY: the caller's guarantee passes on.
+        unsafe { self.read_rice_run_body(out, count, k) }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "lzcnt,bmi1,bmi2")]
+    unsafe fn read_rice_run_bmi(&mut self, out: *mut i32, count: usize, k: u8) -> Result<(), FlacError> {
+        // SAFETY: the caller's guarantee passes on.
+        unsafe { self.read_rice_run_body(out, count, k) }
+    }
+
+    #[inline(always)]
+    unsafe fn read_rice_run_body(&mut self, out: *mut i32, count: usize, k: u8) -> Result<(), FlacError> {
+        let data = self.data;
+        let mut bit = self.stream_bit_pos();
+        let mut done = 0usize;
+        // Codes taken from one load. Four codes of a typical length fit in its 57 usable bits, and
+        // when they do not, the check below sends them to the single-code loop.
+        match k {
+            0..=8 => unsafe { rice_group::<4>(data, &mut bit, &mut done, out, count, u32::from(k)) },
+            9..=22 => unsafe { rice_group::<2>(data, &mut bit, &mut done, out, count, u32::from(k)) },
+            _ => {},
+        }
+        let k32 = u32::from(k);
+        let last_load = data.len().saturating_sub(8);
+        while done < count {
+            let byte = bit >> 3;
+            if byte <= last_load && data.len() >= 8 {
+                // SAFETY: byte + 8 <= data.len().
+                let word = u64::from_be(unsafe { data.as_ptr().add(byte).cast::<u64>().read_unaligned() });
+                let word = word << (bit & 7);
+                let zeros = word.leading_zeros();
+                let used = zeros + 1 + k32;
+                // After the shift at least 57 bits of the word are real.
+                if used <= 57 {
+                    // Past the stop bit, then the top k bits. Two shifts, as k may be 0.
+                    let remainder = ((word << zeros << 1) >> 1) >> (63 - k32);
+                    let unsigned = (zeros << k32) | remainder as u32;
+                    // SAFETY: done < count.
+                    unsafe { out.add(done).write(((unsigned >> 1) as i32) ^ -((unsigned & 1) as i32)) };
+                    bit += used as usize;
+                    done += 1;
+                    if done + 4 <= count && used <= 24 {
+                        // The long code is behind: go back to groups.
+                        match k {
+                            0..=8 => unsafe { rice_group::<4>(data, &mut bit, &mut done, out, count, k32) },
+                            9..=22 => unsafe { rice_group::<2>(data, &mut bit, &mut done, out, count, k32) },
+                            _ => {},
+                        }
+                    }
+                    continue;
+                }
+            }
+            // A long code, or the end of the data: the general reader handles both.
+            self.seek_to_bit(bit);
+            let unsigned = if k == 0 {
+                self.read_unary()?
+            } else {
+                self.read_rice_unsigned(k)?
+            };
+            // SAFETY: done < count.
+            unsafe { out.add(done).write(((unsigned >> 1) as i32) ^ -((unsigned & 1) as i32)) };
+            bit = self.stream_bit_pos();
+            done += 1;
+        }
+        self.seek_to_bit(bit);
+        Ok(())
+    }
+
+    /// Continue reading from the bit `bit` of the data.
+    #[inline]
+    fn seek_to_bit(&mut self, bit: usize) {
+        self.byte_pos = bit >> 3;
+        self.buf = 0;
+        self.buf_bits = 0;
+        let skip = (bit & 7) as u32;
+        if skip != 0 {
+            self.refill();
+            self.buf <<= skip;
+            self.buf_bits = self.buf_bits.saturating_sub(skip);
+        }
     }
 
     /// Skip to the next byte boundary.

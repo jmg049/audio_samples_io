@@ -338,22 +338,10 @@ pub(crate) fn decode_subframe_into(
                         }
                         write_idx += 1;
                     }
-                } else if param == 0 {
-                    for _ in 0..samples {
-                        let v = crate::flac::rice::unsigned_to_signed(reader.read_unary()?);
-                        unsafe {
-                            ptr.add(write_idx).write(v);
-                        }
-                        write_idx += 1;
-                    }
                 } else {
-                    for _ in 0..samples {
-                        let v = crate::flac::rice::unsigned_to_signed(reader.read_rice_unsigned(param)?);
-                        unsafe {
-                            ptr.add(write_idx).write(v);
-                        }
-                        write_idx += 1;
-                    }
+                    // SAFETY: the capacity was reserved for all residuals of the block.
+                    unsafe { reader.read_rice_run(ptr.add(write_idx), samples, param)? };
+                    write_idx += samples;
                 }
             }
             unsafe {
@@ -427,22 +415,10 @@ pub(crate) fn decode_subframe_into(
                         }
                         write_idx += 1;
                     }
-                } else if param == 0 {
-                    for _ in 0..samples {
-                        let v = crate::flac::rice::unsigned_to_signed(reader.read_unary()?);
-                        unsafe {
-                            ptr.add(write_idx).write(v);
-                        }
-                        write_idx += 1;
-                    }
                 } else {
-                    for _ in 0..samples {
-                        let v = crate::flac::rice::unsigned_to_signed(reader.read_rice_unsigned(param)?);
-                        unsafe {
-                            ptr.add(write_idx).write(v);
-                        }
-                        write_idx += 1;
-                    }
+                    // SAFETY: the capacity was reserved for all residuals of the block.
+                    unsafe { reader.read_rice_run(ptr.add(write_idx), samples, param)? };
+                    write_idx += samples;
                 }
             }
             unsafe {
