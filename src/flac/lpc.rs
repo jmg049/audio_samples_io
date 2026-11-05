@@ -1344,6 +1344,7 @@ pub(crate) fn lpc_residual_into<const AVX2: bool>(
     // |prediction| <= 2^(width - 1) * sum |c|.
     let fits = magnitude == 0 || u32::from(width) + (64 - magnitude.leading_zeros()) <= 32;
     let dst = out.as_mut_ptr();
+    #[cfg(target_arch = "x86_64")]
     macro_rules! dispatch {
         ($f:ident) => {
             // SAFETY: `order` matches the const parameter, samples holds order + n values, dst has

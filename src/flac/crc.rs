@@ -267,6 +267,7 @@ impl Default for Crc16 {
 }
 
 /// x^n mod the CRC-16 polynomial.
+#[cfg(target_arch = "x86_64")]
 const fn x_pow_mod(n: u32) -> u64 {
     let mut r: u32 = 1;
     let mut i = 0;

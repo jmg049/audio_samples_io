@@ -221,6 +221,7 @@ pub(crate) struct FrameEncoder {
     /// One slot per channel; two more when all four stereo signals are planned.
     slots: Vec<Slot>,
     windows: Windows,
+    #[cfg(target_arch = "x86_64")]
     use_avx2: bool,
 }
 
@@ -235,7 +236,12 @@ impl FrameEncoder {
             side: Vec::with_capacity(if stereo { block_size } else { 0 }),
             slots: (0..slot_count).map(|_| Slot::new(block_size)).collect(),
             windows: Windows::empty(),
-            use_avx2: detect_avx2(),
+            #[cfg(target_arch = "x86_64")]
+            use_avx2: is_x86_feature_detected!("avx2")
+                && is_x86_feature_detected!("fma")
+                && is_x86_feature_detected!("bmi1")
+                && is_x86_feature_detected!("bmi2")
+                && is_x86_feature_detected!("lzcnt"),
         }
     }
 
@@ -249,7 +255,7 @@ impl FrameEncoder {
     ) -> Result<&[u8], FlacError> {
         #[cfg(target_arch = "x86_64")]
         if self.use_avx2 {
-            // SAFETY: `detect_avx2` found the features this function enables.
+            // SAFETY: `new` found the features this function enables.
             unsafe { self.encode_avx2(channels, bits_per_sample, sample_rate, frame_number)? };
             return Ok(self.bits.data());
         }
@@ -392,20 +398,6 @@ impl FrameEncoder {
         self.bits.align_to_byte();
         Ok(())
     }
-}
-
-#[cfg(target_arch = "x86_64")]
-fn detect_avx2() -> bool {
-    is_x86_feature_detected!("avx2")
-        && is_x86_feature_detected!("fma")
-        && is_x86_feature_detected!("bmi1")
-        && is_x86_feature_detected!("bmi2")
-        && is_x86_feature_detected!("lzcnt")
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-const fn detect_avx2() -> bool {
-    false
 }
 
 #[inline(always)]

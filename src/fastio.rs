@@ -22,10 +22,7 @@ use crate::error::AudioIOResult;
 
 /// Each thread of a file transfer gets at least this many bytes: below it, starting a thread
 /// costs more than it saves.
-#[cfg(target_os = "linux")]
 pub(crate) const TRANSFER_BYTES_PER_THREAD: usize = 512 * 1024;
-#[cfg(not(target_os = "linux"))]
-pub(crate) const TRANSFER_BYTES_PER_THREAD: usize = usize::MAX;
 
 /// A transfer below this stays on the calling thread: two threads would not pay for themselves.
 pub(crate) const TRANSFER_MIN_BYTES: usize = 3 * 512 * 1024;
@@ -132,7 +129,23 @@ pub(crate) fn read_exact_at(file: &File, offset: u64, buf: &mut [u8]) -> io::Res
     file.read_exact_at(buf, offset)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(crate) fn read_exact_at(file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    let mut done = 0;
+    while done < buf.len() {
+        match file.seek_read(&mut buf[done..], offset + done as u64) {
+            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(n) => done += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {},
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Without positioned reads, the single file position rules out threads.
+#[cfg(not(any(unix, windows)))]
 pub(crate) fn read_exact_at(mut file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
     use std::io::{Read, SeekFrom};
     file.seek(SeekFrom::Start(offset))?;
@@ -143,7 +156,7 @@ pub(crate) fn read_exact_at(mut file: &File, offset: u64, buf: &mut [u8]) -> io:
 pub(crate) fn read_exact_at_parallel(file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
     let permit = ThreadsPermit::try_acquire();
     let threads = permit.threads(transfer_threads().min(buf.len() / TRANSFER_BYTES_PER_THREAD));
-    if threads <= 1 || buf.len() < TRANSFER_MIN_BYTES {
+    if threads <= 1 || buf.len() < TRANSFER_MIN_BYTES || cfg!(not(any(unix, windows))) {
         return read_exact_at(file, offset, buf);
     }
     let len = buf.len();
