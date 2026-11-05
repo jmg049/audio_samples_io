@@ -94,6 +94,72 @@ pub(crate) fn decode_threads() -> usize {
 
 /// Run `work(0..count)`, each index on its own thread except the last, which runs here. An index
 /// whose thread cannot be started runs here as well. True if every call returned true.
+///
+/// On Linux the threads are plain pthreads. A `std::thread` also sets up a signal stack, a thread
+/// handle and thread-local destructors, which came to one more resident page per thread.
+#[cfg(target_os = "linux")]
+pub(crate) fn run_on_threads<F>(count: usize, work: F) -> bool
+where
+    F: Fn(usize) -> bool + Sync,
+{
+    struct Job<'a, F> {
+        work: &'a F,
+        index: usize,
+    }
+    extern "C" fn start<F: Fn(usize) -> bool + Sync>(job: *mut libc::c_void) -> *mut libc::c_void {
+        // SAFETY: `job` points to a `Job` in the frame below, which joins before returning.
+        let job = unsafe { &*job.cast::<Job<'_, F>>() };
+        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (job.work)(job.index))).unwrap_or(false);
+        usize::from(ok) as *mut libc::c_void
+    }
+
+    let spawned = count.saturating_sub(1);
+    let jobs: Vec<Job<'_, F>> = (0..spawned).map(|index| Job { work: &work, index }).collect();
+    let mut handles: Vec<libc::pthread_t> = Vec::with_capacity(spawned);
+    let mut inline: Vec<usize> = Vec::new();
+    // SAFETY: an all-zero value is valid storage for pthread_attr_init to fill.
+    let mut attr: libc::pthread_attr_t = unsafe { mem::zeroed() };
+    // SAFETY: `attr` is valid storage, initialised once and destroyed below.
+    unsafe {
+        libc::pthread_attr_init(&raw mut attr);
+        libc::pthread_attr_setstacksize(&raw mut attr, THREAD_STACK_BYTES);
+    }
+    for job in &jobs {
+        let mut handle: libc::pthread_t = 0;
+        // SAFETY: `start::<F>` matches the argument, and each job outlives its thread: every started
+        // thread is joined below, before `jobs` is dropped.
+        let result = unsafe {
+            libc::pthread_create(
+                &raw mut handle,
+                &raw const attr,
+                start::<F>,
+                std::ptr::from_ref(job).cast_mut().cast(),
+            )
+        };
+        if result == 0 {
+            handles.push(handle);
+        } else {
+            inline.push(job.index);
+        }
+    }
+    // SAFETY: `attr` was initialised above.
+    unsafe { libc::pthread_attr_destroy(&raw mut attr) };
+    let mut ok = count == 0 || work(count - 1);
+    for index in inline {
+        ok &= work(index);
+    }
+    for handle in handles {
+        let mut result: *mut libc::c_void = std::ptr::null_mut();
+        // SAFETY: the handle came from pthread_create and is joined once.
+        unsafe { libc::pthread_join(handle, &raw mut result) };
+        ok &= !result.is_null();
+    }
+    ok
+}
+
+/// Run `work(0..count)`, each index on its own thread except the last, which runs here. An index
+/// whose thread cannot be started runs here as well. True if every call returned true.
+#[cfg(not(target_os = "linux"))]
 pub(crate) fn run_on_threads<F>(count: usize, work: F) -> bool
 where
     F: Fn(usize) -> bool + Sync,
@@ -111,7 +177,7 @@ where
                 Err(_) => inline.push(index),
             }
         }
-        let mut ok = work(count - 1);
+        let mut ok = count == 0 || work(count - 1);
         for index in inline {
             ok &= work(index);
         }
@@ -156,7 +222,7 @@ pub(crate) fn read_exact_at(mut file: &File, offset: u64, buf: &mut [u8]) -> io:
 /// stream into several, which reads 3 to 8% slower on a SATA SSD and worse on a hard disk, and the
 /// copy they speed up is a small part of the time. Linux tells, from 6.5; elsewhere, assume cached.
 #[cfg(target_os = "linux")]
-fn range_is_cold(file: &File, offset: u64, len: usize) -> bool {
+pub(crate) fn range_is_cold(file: &File, offset: u64, len: usize) -> bool {
     use std::os::fd::AsRawFd;
 
     #[repr(C)]
@@ -194,7 +260,7 @@ fn range_is_cold(file: &File, offset: u64, len: usize) -> bool {
 }
 
 #[cfg(not(target_os = "linux"))]
-const fn range_is_cold(_file: &File, _offset: u64, _len: usize) -> bool {
+pub(crate) const fn range_is_cold(_file: &File, _offset: u64, _len: usize) -> bool {
     false
 }
 

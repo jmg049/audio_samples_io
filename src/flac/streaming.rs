@@ -405,6 +405,11 @@ impl<R: std::io::Read> StreamedFlacFile<R> {
         self
     }
 
+    /// The stream's parameters and where its frames start, for decoding the file as a whole.
+    pub(crate) const fn stream_parameters(&self) -> (&StreamInfo, u64) {
+        (&self.stream_info, self.audio_data_start)
+    }
+
     /// Fill `out`, planar with `out.len() / channels` samples per channel, from the decoded
     /// stream. Returns the samples per channel read, which is less than asked at the end of the
     /// stream. Channel `c` starts at `out[c * per_channel]` whatever the count read.
