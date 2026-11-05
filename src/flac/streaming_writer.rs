@@ -16,8 +16,7 @@
 //!
 //! The total sample count and block sizes in STREAMINFO are unknown up front, so the
 //! writer requires a [`WriteSeek`] destination and back-patches the STREAMINFO block on
-//! finalize. The MD5 signature is left zeroed (the "unknown" sentinel), exactly as the
-//! bulk encoder does.
+//! finalize, along with the MD5 signature of the samples.
 
 use std::io::SeekFrom;
 
@@ -27,7 +26,8 @@ use super::{
     CompressionLevel,
     constants::FLAC_MARKER,
     encoder::{EncoderConfig, FrameEncoder},
-    flac_file::{append_channel_i32, flac_bits_per_sample},
+    flac_file::{append_channel_i32, flac_bits_per_sample, interleave_le},
+    md5::Md5,
     metadata::StreamInfo,
 };
 use crate::{
@@ -75,7 +75,11 @@ where
     /// Encoding block size (samples per channel per full frame).
     block_size: u32,
     /// Frame encoder, with buffers kept between frames.
-    encoder: FrameEncoder,
+    encoder: Box<FrameEncoder>,
+    /// MD5 of the samples so far.
+    md5: Box<Md5>,
+    /// Interleaved bytes of a block, for `md5`.
+    md5_bytes: Vec<u8>,
     /// Per-channel buffer of i32 samples not yet emitted as a full block.
     accum: Vec<Vec<i32>>,
     /// Next frame number (FLAC fixed-blocksize frame counter).
@@ -200,11 +204,13 @@ where
             sample_rate,
             bits_per_sample,
             block_size,
-            encoder: FrameEncoder::new(
+            encoder: Box::new(FrameEncoder::new(
                 EncoderConfig::for_level(level, bits_per_sample, block_size),
                 channels as usize,
                 block_size as usize,
-            ),
+            )),
+            md5: Box::new(Md5::new()),
+            md5_bytes: vec![0; block_size as usize * channels as usize * (usize::from(bits_per_sample) / 8)],
             accum,
             frame_number: 0,
             frames_written: 0,
@@ -244,6 +250,13 @@ where
 {
     /// Encode `accum[..][start..start + len]` as one frame and write it.
     fn encode_block(&mut self, start: usize, len: usize) -> AudioIOResult<()> {
+        let width = usize::from(self.bits_per_sample) / 8;
+        self.md5.update(interleave_le(
+            &self.accum.iter().map(|c| &c[start..start + len]).collect::<Vec<_>>(),
+            len,
+            width,
+            &mut self.md5_bytes,
+        ));
         let mut slices = [&[][..]; 8];
         for (slice, channel) in slices.iter_mut().zip(&self.accum) {
             *slice = &channel[start..start + len];
@@ -306,7 +319,7 @@ where
             channels: self.channels as u8,
             bits_per_sample: self.bits_per_sample,
             total_samples: total,
-            md5_signature: [0; 16],
+            md5_signature: std::mem::replace(&mut *self.md5, Md5::new()).finish(),
         };
         let streaminfo_bytes = stream_info.to_bytes();
 

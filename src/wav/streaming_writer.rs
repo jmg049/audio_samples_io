@@ -11,9 +11,10 @@ use audio_samples::{AudioSamples, I24, StandardSample};
 use crate::{
     WriteSeek,
     error::{AudioIOError, AudioIOResult},
+    fastio::write_interleaved_le,
     traits::{AudioStreamWrite, AudioStreamWriter},
     types::{ValidatedSampleType, channel_frame_view},
-    wav::{FormatCode, wav_file::write_interleaved_le},
+    wav::FormatCode,
 };
 
 /// A streaming WAV file writer that encodes audio data incrementally.

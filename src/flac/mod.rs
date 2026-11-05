@@ -44,7 +44,8 @@ pub mod subframe;
 mod bitstream;
 mod constants;
 mod encoder;
-mod flac_file;
+pub(crate) mod flac_file;
+mod md5;
 mod parallel;
 mod streaming;
 mod streaming_writer;
@@ -53,7 +54,7 @@ mod streaming_writer;
 use core::fmt::{Display, Formatter, Result as FmtResult};
 
 pub use error::FlacError;
-pub use flac_file::{FlacFile, FlacFileInfo, write_flac};
+pub use flac_file::{FlacFile, FlacFileInfo, write_flac, write_flac_without_md5};
 pub use metadata::{MetadataBlock, MetadataBlockType, SeekPoint, SeekTable, StreamInfo, VorbisComment};
 pub use streaming::StreamedFlacFile;
 pub use streaming_writer::StreamedFlacWriter;

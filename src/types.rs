@@ -586,7 +586,6 @@ where
 /// # Safety
 ///
 /// `out` must be valid for `samples.len() * 3` bytes.
-#[cfg(feature = "wav")]
 pub(crate) unsafe fn pack_i24(samples: &[I24], out: *mut u8) {
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("ssse3") && std::mem::size_of::<I24>() == 4 && cfg!(target_endian = "little") {
@@ -600,7 +599,7 @@ pub(crate) unsafe fn pack_i24(samples: &[I24], out: *mut u8) {
     }
 }
 
-#[cfg(all(feature = "wav", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "ssse3,sse2")]
 unsafe fn pack_i24_ssse3(samples: &[I24], out: *mut u8) {
     use std::arch::x86_64::*;

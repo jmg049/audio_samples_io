@@ -915,8 +915,12 @@ where
             #[cfg(feature = "flac")]
             {
                 let mut file = fastio::open_for_overwrite(path)?;
-                let buf_writer = std::io::BufWriter::with_capacity(opts.write_buf_capacity, &mut file);
-                crate::flac::write_flac(buf_writer, audio, CompressionLevel::default())?;
+                crate::flac::flac_file::write_flac_file(
+                    &mut file,
+                    opts.write_buf_capacity,
+                    audio,
+                    CompressionLevel::default(),
+                )?;
                 Ok(fastio::finish_overwrite(&mut file)?)
             }
         },

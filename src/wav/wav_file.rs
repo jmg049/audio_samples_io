@@ -12,10 +12,10 @@ use std::{
 
 use audio_samples::{
     AudioSamples, I24, SampleType,
-    traits::{ConvertFrom, ConvertTo, StandardSample},
+    traits::{ConvertFrom, StandardSample},
 };
 use memmap2::MmapOptions;
-use ndarray::{Array1, Array2, ArrayView2, Axis, ShapeBuilder};
+use ndarray::{Array1, Array2, ShapeBuilder};
 use non_empty_slice::NonEmptyVec;
 
 use crate::{
@@ -1193,144 +1193,6 @@ where
     }
 }
 
-/// Bytes of interleaved samples converted at a time. The buffer lives on the stack, so writing
-/// a file makes no allocation that grows with its length. Smaller tiles mean more write calls, each
-/// of which costs about as much as converting a few KiB.
-const TILE_BYTES: usize = 64 * 1024;
-
-/// Convert `count` frames from the channel runs in `runs` to `U`, writing them interleaved
-/// little-endian at `out`. Each run holds one channel, or several already interleaved.
-///
-/// # Safety
-///
-/// `out` must be valid for `count * runs.len() * U::BYTES` bytes, and each run for `count` samples.
-#[inline(always)]
-unsafe fn pack_frames<T, U>(runs: &[&[T]], count: usize, out: *mut u8)
-where
-    T: StandardSample + ConvertTo<U>,
-    U: StandardSample,
-{
-    let size = U::BYTES as usize;
-    let stride = runs.len() * size;
-    // One channel at a time: each is read in order, and the tile stays in the cache.
-    for (c, run) in runs.iter().enumerate() {
-        // SAFETY: the last value lands at `(count - 1) * stride + c * size`, which ends within
-        // the caller's bound.
-        let mut p = unsafe { out.add(c * size) };
-        for &sample in &run[..count] {
-            let converted: U = sample.convert_to();
-            let bytes = converted.to_le_bytes();
-            // SAFETY: as above. `wrapping_add` steps past the end after the last value only.
-            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ref().as_ptr(), p, size) };
-            p = p.wrapping_add(stride);
-        }
-    }
-}
-
-/// Write the samples of `view`, shape `(channels, frames)`, interleaved and little-endian as `U`.
-///
-/// Samples whose memory is already the file's layout go straight to `writer`. Anything else
-/// passes through a buffer of [`TILE_BYTES`], so no copy of the signal is made. Returns the
-/// number of bytes written.
-pub(crate) fn write_interleaved_le<T, U, W>(writer: &mut W, view: ArrayView2<'_, T>) -> AudioIOResult<usize>
-where
-    T: StandardSample + ConvertTo<U> + 'static,
-    U: StandardSample + 'static,
-    W: Write,
-{
-    let (channels, frames) = view.dim();
-    let size = U::BYTES as usize;
-    let total = channels * frames * size;
-    if total == 0 {
-        return Ok(0);
-    }
-
-    // Interleaved memory: channel stride 1, frame stride `channels`.
-    let interleaved = if channels == 1 || view.strides() == [1, channels as isize] {
-        view.as_slice_memory_order()
-    } else {
-        None
-    };
-
-    #[cfg(target_endian = "little")]
-    if let Some(slice) = interleaved
-        && TypeId::of::<T>() == TypeId::of::<U>()
-        && TypeId::of::<T>() != TypeId::of::<I24>()
-    {
-        // SAFETY: T is a plain numeric type, for which any initialised memory is valid bytes,
-        // and its in-memory layout on a little-endian machine is the file's.
-        let bytes = unsafe { std::slice::from_raw_parts(slice.as_ptr().cast::<u8>(), total) };
-        writer.write_all(bytes)?;
-        return Ok(total);
-    }
-
-    let frame_bytes = channels * size;
-    #[repr(align(64))]
-    struct Tile([mem::MaybeUninit<u8>; TILE_BYTES]);
-    let mut stack = Tile([mem::MaybeUninit::uninit(); TILE_BYTES]);
-    // A frame larger than the stack buffer is only possible with over a thousand channels.
-    let mut heap: Vec<u8> = Vec::new();
-    let tile: *mut u8 = if frame_bytes > TILE_BYTES {
-        heap.reserve_exact(frame_bytes);
-        heap.as_mut_ptr()
-    } else {
-        stack.0.as_mut_ptr().cast()
-    };
-    let tile_frames = (TILE_BYTES / frame_bytes).max(1);
-
-    let row_slices: Option<Vec<&[T]>> = if interleaved.is_none() {
-        (0..channels).map(|c| view.index_axis(Axis(0), c).to_slice()).collect()
-    } else {
-        None
-    };
-
-    let packed_i24 = TypeId::of::<T>() == TypeId::of::<I24>() && TypeId::of::<U>() == TypeId::of::<I24>();
-    let mut tails: Vec<&[T]> = Vec::with_capacity(channels);
-    let mut start = 0usize;
-    while start < frames {
-        let count = tile_frames.min(frames - start);
-        let bytes = count * frame_bytes;
-        if let Some(slice) = interleaved
-            && packed_i24
-        {
-            let samples = &slice[start * channels..(start + count) * channels];
-            // SAFETY: T is I24, checked above, and the tile holds three bytes per sample.
-            unsafe {
-                crate::types::pack_i24(
-                    std::slice::from_raw_parts(samples.as_ptr().cast::<I24>(), samples.len()),
-                    tile,
-                );
-            }
-        } else if let Some(slice) = interleaved {
-            // SAFETY: the tile holds `count * channels * size` bytes, the slice that many samples
-            // from `start * channels`.
-            unsafe { pack_frames::<T, U>(&[&slice[start * channels..]], count * channels, tile) };
-        } else if let Some(rows) = &row_slices {
-            tails.clear();
-            tails.extend(rows.iter().map(|r| &r[start..]));
-            // SAFETY: the tile holds `count` frames and each tail that many samples.
-            unsafe { pack_frames::<T, U>(&tails, count, tile) };
-        } else {
-            let mut p = tile;
-            for f in start..start + count {
-                for c in 0..channels {
-                    let converted: U = view[[c, f]].convert_to();
-                    let encoded = converted.to_le_bytes();
-                    // SAFETY: at most `count * frame_bytes` bytes are written to the tile.
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(encoded.as_ref().as_ptr(), p, size);
-                        p = p.add(size);
-                    }
-                }
-            }
-        }
-        // SAFETY: every one of these bytes was written above.
-        writer.write_all(unsafe { std::slice::from_raw_parts(tile, bytes) })?;
-        start += count;
-    }
-    Ok(total)
-}
-
 /// Optional metadata chunks written after the audio `data` chunk.
 ///
 /// Lets callers persist tags and markers that would otherwise be lost on a read→write round-trip.
@@ -1446,7 +1308,7 @@ where
     writer.write_all(&(data_size as u32).to_le_bytes())?;
 
     // Write audio data (interleaved for multi-channel)
-    write_interleaved_le::<T, T, _>(&mut writer, channel_frame_view(audio))?;
+    crate::fastio::write_interleaved_le::<T, T, _>(&mut writer, channel_frame_view(audio))?;
 
     // Add padding byte if needed
     if data_size % 2 == 1 {

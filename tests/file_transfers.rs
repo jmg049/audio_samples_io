@@ -86,6 +86,23 @@ fn overwriting_keeps_links_and_permissions() {
     assert_eq!(read::<_, i16>(&hard).unwrap().samples_per_channel().get(), 500);
 }
 
+/// Whole-file FLAC writes work out the signature on another thread and write it afterwards.
+#[test]
+fn large_flac_file_has_a_valid_signature() {
+    let audio = AudioSamples::new_multi_channel(noise(2, 800_000), sample_rate!(44100)).unwrap();
+    let path = temp("signed.flac");
+    write(&path, &audio).unwrap();
+    let Ok(status) = std::process::Command::new("flac")
+        .args(["-t", "-w", "-s"])
+        .arg(&path)
+        .status()
+    else {
+        return;
+    };
+    assert!(status.success());
+    assert!(read::<_, i16>(&path).unwrap().to_interleaved_vec() == audio.to_interleaved_vec());
+}
+
 #[test]
 fn large_wav_reads_match_in_every_sample_type() {
     // Large enough to be divided between threads.

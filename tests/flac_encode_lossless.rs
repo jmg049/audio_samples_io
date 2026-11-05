@@ -103,7 +103,8 @@ fn reference_decode(bytes: &[u8], bits: u32) -> Option<Vec<i32>> {
     )
 }
 
-/// Assert that `bytes` decodes to `expected` through the reference tool, if present.
+/// Assert that `bytes` decodes to `expected` through the reference tool, if present. `-w` makes
+/// the tool treat an unset or wrong MD5 signature as an error.
 fn check_reference(bytes: &[u8], bits: u32, expected: &[i32], context: &str) {
     if let Some(decoded) = reference_decode(bytes, bits) {
         assert!(decoded == expected, "reference decoder: {context}");

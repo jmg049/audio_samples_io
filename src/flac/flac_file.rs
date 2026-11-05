@@ -11,7 +11,7 @@
 use core::fmt::{Display, Formatter, Result as FmtResult};
 use std::{
     fs::File,
-    io::{BufReader, BufWriter, Read, Write},
+    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     num::NonZeroU32,
     ops::Range,
     path::{Path, PathBuf},
@@ -32,7 +32,10 @@ use super::{
 use crate::{
     MAX_MMAP_SIZE,
     error::{AudioIOError, AudioIOResult, ErrorPosition},
-    flac::encoder::{EncoderConfig, FrameEncoder},
+    flac::{
+        encoder::{EncoderConfig, FrameEncoder},
+        md5::Md5,
+    },
     traits::{AudioFile, AudioFileMetadata, AudioFileRead, AudioFileWrite, AudioInfoMarker},
     types::{AudioDataSource, BaseAudioInfo, FileType, OpenOptions, ValidatedSampleType, channel_frame_view},
 };
@@ -660,11 +663,134 @@ impl<'a> AudioFileWrite for FlacFile<'a> {
 /// - `f32` and `f64` are rounded to 24-bit integers, with values outside \[-1, 1\] clipped.
 ///
 /// The signal is encoded block by block, so memory use depends on the block size and channel
-/// count and not on the length of the signal. The STREAMINFO MD5 signature is left unset,
-/// which the format defines as unknown.
+/// count and not on the length of the signal. STREAMINFO holds the MD5 signature of the audio, so
+/// that decoders can verify the file; [`write_flac_without_md5`] leaves it out.
 ///
 /// With the `flac-parallel` feature, frames are encoded on rayon's global thread pool.
-pub fn write_flac<W: Write, T>(mut writer: W, audio: &AudioSamples<T>, level: CompressionLevel) -> AudioIOResult<()>
+pub fn write_flac<W: Write, T>(writer: W, audio: &AudioSamples<T>, level: CompressionLevel) -> AudioIOResult<()>
+where
+    T: StandardSample + 'static,
+{
+    let md5 = audio_md5(channel_frame_view(audio));
+    write_flac_stream(writer, audio, level, md5)
+}
+
+/// [`write_flac`] without the MD5 signature of the audio: STREAMINFO says it is unknown, which
+/// the format allows, and decoders cannot verify the file against it. Encoding takes less time.
+pub fn write_flac_without_md5<W: Write, T>(
+    writer: W,
+    audio: &AudioSamples<T>,
+    level: CompressionLevel,
+) -> AudioIOResult<()>
+where
+    T: StandardSample + 'static,
+{
+    write_flac_stream(writer, audio, level, [0; 16])
+}
+
+/// Write a whole FLAC file, working out the MD5 signature on another thread while the frames
+/// are encoded when that helps, and writing it into STREAMINFO afterwards.
+pub(crate) fn write_flac_file<T>(
+    file: &mut File,
+    buffer: usize,
+    audio: &AudioSamples<T>,
+    level: CompressionLevel,
+) -> AudioIOResult<()>
+where
+    T: StandardSample + 'static,
+{
+    const MD5_OFFSET: u64 = 4 + 4 + 18;
+    let view = channel_frame_view(audio);
+    let large = view.len() * size_of::<T>() >= 1024 * 1024;
+    if !large || crate::fastio::transfer_threads() < 2 {
+        return write_flac(BufWriter::with_capacity(buffer, file), audio, level);
+    }
+    let digest = std::thread::scope(|scope| {
+        let md5 = std::thread::Builder::new().spawn_scoped(scope, move || audio_md5(view));
+        let encoded = write_flac_stream(BufWriter::with_capacity(buffer, &mut *file), audio, level, [0; 16]);
+        let digest = match md5 {
+            Ok(handle) => handle.join().unwrap_or_else(|_| audio_md5(view)),
+            Err(_) => audio_md5(view),
+        };
+        encoded.map(|()| digest)
+    })?;
+    let end = file.stream_position()?;
+    file.seek(SeekFrom::Start(MD5_OFFSET))?;
+    file.write_all(&digest)?;
+    file.seek(SeekFrom::Start(end))?;
+    Ok(())
+}
+
+/// MD5 of the samples as FLAC stores them for `T`: interleaved, little-endian, two or three bytes.
+pub(crate) fn audio_md5<T>(view: ndarray::ArrayView2<'_, T>) -> [u8; 16]
+where
+    T: StandardSample + 'static,
+{
+    let mut md5 = Md5::new();
+    let channels = view.dim().0;
+    let frames = view.dim().1;
+    let width = usize::from(flac_bits_per_sample::<T>()) / 8;
+
+    // These types are stored unchanged, so their bytes go straight through.
+    let id = std::any::TypeId::of::<T>();
+    if id == std::any::TypeId::of::<i16>() {
+        if crate::fastio::write_interleaved_le::<T, i16, _>(&mut md5, view).is_ok() {
+            return md5.finish();
+        }
+        md5 = Md5::new();
+    } else if id == std::any::TypeId::of::<I24>() {
+        if crate::fastio::write_interleaved_le::<T, I24, _>(&mut md5, view).is_ok() {
+            return md5.finish();
+        }
+        md5 = Md5::new();
+    }
+
+    const BLOCK_FRAMES: usize = 4096;
+    let mut block: Vec<Vec<i32>> = vec![Vec::with_capacity(BLOCK_FRAMES); channels];
+    let mut bytes = vec![0u8; BLOCK_FRAMES * channels * width];
+    let mut start = 0usize;
+    while start < frames {
+        let len = BLOCK_FRAMES.min(frames - start);
+        for (c, out) in block.iter_mut().enumerate() {
+            out.clear();
+            append_channel_i32(view, c, start, len, out);
+        }
+        md5.update(interleave_le(&block, len, width, &mut bytes));
+        start += len;
+    }
+    md5.finish()
+}
+
+/// `len` samples of each channel, interleaved at `width` little-endian bytes, into `bytes`.
+pub(crate) fn interleave_le<'a, S: AsRef<[i32]>>(
+    channels: &[S],
+    len: usize,
+    width: usize,
+    bytes: &'a mut [u8],
+) -> &'a [u8] {
+    let stride = channels.len() * width;
+    for (c, channel) in channels.iter().enumerate() {
+        let samples = &channel.as_ref()[..len];
+        if width == 2 {
+            for (out, &s) in bytes[c * 2..].chunks_mut(stride).zip(samples) {
+                out[..2].copy_from_slice(&(s as i16).to_le_bytes());
+            }
+        } else {
+            for (out, &s) in bytes[c * 3..].chunks_mut(stride).zip(samples) {
+                out[..3].copy_from_slice(&s.to_le_bytes()[..3]);
+            }
+        }
+    }
+    &bytes[..len * stride]
+}
+
+/// Write the stream with `md5` in STREAMINFO.
+fn write_flac_stream<W: Write, T>(
+    mut writer: W,
+    audio: &AudioSamples<T>,
+    level: CompressionLevel,
+    md5: [u8; 16],
+) -> AudioIOResult<()>
 where
     T: StandardSample + 'static,
 {
@@ -692,7 +818,7 @@ where
         channels: channels as u8,
         bits_per_sample,
         total_samples: samples_per_channel as u64,
-        md5_signature: [0; 16],
+        md5_signature: md5,
     };
     let streaminfo_bytes = stream_info.to_bytes();
     writer.write_all(&[0x80, 0, 0, streaminfo_bytes.len() as u8])?; // Last block, type 0 (STREAMINFO)
