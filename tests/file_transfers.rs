@@ -174,7 +174,8 @@ fn tmpfs_mapped_save_matches_plain_save() {
 
     let id = std::process::id();
     let mapped = shm.join(format!("asio_mapped_{id}.wav"));
-    let plain = std::env::temp_dir().join(format!("asio_plain_{id}.wav"));
+    // A build directory rather than the temporary one, which can itself be tmpfs.
+    let plain = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("asio_plain_{id}.wav"));
     audio_samples_io::write(&mapped, &audio).unwrap();
     audio_samples_io::write(&plain, &audio).unwrap();
     assert!(std::fs::read(&mapped).unwrap() == std::fs::read(&plain).unwrap());
