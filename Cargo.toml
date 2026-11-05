@@ -7,11 +7,23 @@ license = "MIT"
 readme = "README.md"
 description = "A Rust library for audio input and output operations."
 repository = "https://github.com/jmg049/audio_samples_io"
-homepage = "https://jmg049.github.io/audio_samples_io"
+homepage = "https://github.com/jmg049/audio_samples_io"
 documentation = "https://docs.rs/audio_samples_io"
-keywords = ["audio", "io"]
-categories = ["encoding", "multimedia", "science"]
-exclude = ["/examples/*", "/tests/*", "/target/*", "/benches/*", "*.wav", "*.flac"]
+keywords = ["audio", "io", "wav", "flac"]
+categories = ["multimedia::audio", "multimedia::encoding"]
+# The unit tests in src/ read resources/test.wav and resources/test.flac, so those
+# two files ship with the crate and `cargo test` works from the published package.
+exclude = [
+    "/examples/*",
+    "/tests/*",
+    "/target/*",
+    "/benches/*",
+    "/.github/*",
+    "*.wav",
+    "*.flac",
+    "!/resources/test.wav",
+    "!/resources/test.flac",
+]
 
 [dependencies]
 audio_samples = "2.0.0"

@@ -1,0 +1,28 @@
+{
+  "title": "audio_samples_io: audio file input and output for Rust",
+  "description": "Reads and writes WAV, FLAC and AIFF audio as audio_samples objects, with streaming decoders.",
+  "upload_type": "software",
+  "access_right": "open",
+  "license": "MIT",
+  "creators": [
+    {
+      "name": "Geraghty, Jack"
+    }
+  ],
+  "keywords": [
+    "audio",
+    "input/output",
+    "wav",
+    "flac",
+    "aiff",
+    "rust"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "10.1145/3793853.3799811",
+      "scheme": "doi",
+      "relation": "isSupplementTo",
+      "resource_type": "publication-conferencepaper"
+    }
+  ]
+}

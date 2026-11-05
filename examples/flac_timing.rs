@@ -11,14 +11,14 @@ use audio_samples_io::flac::{CompressionLevel, write_flac};
 
 #[cfg(feature = "flac")]
 fn main() {
-    let sr = NonZeroU32::new(44100).unwrap();
+    let sr = NonZeroU32::new(44100).expect("non-zero sample rate");
     let duration = std::time::Duration::from_millis(250);
     let audio = sine_wave::<i16>(110.0, duration, sr, 0.5);
 
     // warm up
     for _ in 0..200 {
         let w = Cursor::new(Vec::with_capacity(32768));
-        let _: () = write_flac(w, &audio, CompressionLevel::DEFAULT).unwrap();
+        let _: () = write_flac(w, &audio, CompressionLevel::DEFAULT).expect("encode");
         black_box(());
     }
 
@@ -27,7 +27,7 @@ fn main() {
     let t0 = Instant::now();
     for _ in 0..iters {
         let w = Cursor::new(Vec::with_capacity(32768));
-        let _: () = write_flac(w, &audio, CompressionLevel::DEFAULT).unwrap();
+        let _: () = write_flac(w, &audio, CompressionLevel::DEFAULT).expect("encode");
         black_box(());
     }
     let elapsed = t0.elapsed();

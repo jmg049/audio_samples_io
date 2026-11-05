@@ -19,8 +19,8 @@ mod wav_write {
     }
 
     fn mono<T: StandardSample + 'static>(samples: &[T], sr: u32) -> AudioSamples<'static, T> {
-        let sr = std::num::NonZeroU32::new(sr).unwrap();
-        let len = std::num::NonZeroUsize::new(samples.len()).unwrap();
+        let sr = std::num::NonZeroU32::new(sr).expect("non-zero sample rate");
+        let len = std::num::NonZeroUsize::new(samples.len()).expect("non-empty samples");
         let mut audio = AudioSamples::zeros_mono(len, sr);
         if let Some(slice) = audio.as_slice_mut() {
             slice.copy_from_slice(samples);
@@ -30,7 +30,7 @@ mod wav_write {
 
     fn open(path: &Path) -> WavFile<'static> {
         <WavFile as AudioFile>::open_with_options(path, OpenOptions::default())
-            .unwrap_or_else(|e| panic!("failed to open {}: {e}", path.display()))
+            .expect("failed to open the test file")
     }
 
     fn interleaved<T: StandardSample + 'static>(wav: &WavFile<'_>) -> Vec<T> {

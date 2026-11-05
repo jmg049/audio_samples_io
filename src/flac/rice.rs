@@ -749,7 +749,7 @@ mod tests {
         let partition_order = 0;
 
         // Pad to block size
-        let mut padded = residuals.clone();
+        let mut padded = residuals;
         padded.resize(block_size, 0);
 
         let mut writer = BitWriter::new();

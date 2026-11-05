@@ -800,28 +800,38 @@ impl<R: std::io::Read> StreamedWavFile<R> {
             ValidatedSampleType::U8 => out.extend(bytes.iter().map(|&b| T::convert_from(b))),
             ValidatedSampleType::I16 => out.extend(
                 bytes
-                    .chunks_exact(2)
-                    .map(|c| T::convert_from(i16::from_le_bytes([c[0], c[1]]))),
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|c| T::convert_from(i16::from_le_bytes(*c))),
             ),
             ValidatedSampleType::I24 => out.extend(
                 bytes
-                    .chunks_exact(3)
-                    .map(|c| T::convert_from(I24::from_le_bytes([c[0], c[1], c[2]]))),
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .map(|c| T::convert_from(I24::from_le_bytes(*c))),
             ),
             ValidatedSampleType::I32 => out.extend(
                 bytes
-                    .chunks_exact(4)
-                    .map(|c| T::convert_from(i32::from_le_bytes([c[0], c[1], c[2], c[3]]))),
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| T::convert_from(i32::from_le_bytes(*c))),
             ),
             ValidatedSampleType::F32 => out.extend(
                 bytes
-                    .chunks_exact(4)
-                    .map(|c| T::convert_from(f32::from_le_bytes([c[0], c[1], c[2], c[3]]))),
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| T::convert_from(f32::from_le_bytes(*c))),
             ),
             ValidatedSampleType::F64 => out.extend(
                 bytes
-                    .chunks_exact(8)
-                    .map(|c| T::convert_from(f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))),
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|c| T::convert_from(f64::from_le_bytes(*c))),
             ),
         }
     }
