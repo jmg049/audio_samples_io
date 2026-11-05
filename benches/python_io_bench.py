@@ -320,10 +320,12 @@ def float_readers(fmt, sample_type):
 def stream_readers(fmt, sample_type):
     r = {}
     if aus:
+        native = getattr(aus.SampleType, sample_type.upper())
+
         def stream_ours(p):
             total = 0
             with aus.io.StreamedAudioReader(p) as s:
-                for block in s.frames(BLOCK_FRAMES):
+                for block in s.frames(BLOCK_FRAMES, native):
                     total += block.samples_per_channel()
             return total
         r["ours"] = stream_ours
