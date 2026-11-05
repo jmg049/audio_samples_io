@@ -32,8 +32,8 @@ const SAMPLE_MEMORY_ALWAYS_BYTES: usize = 32 * 1024 * 1024;
 ///
 /// A NumPy array of many pages takes a page fault per 4 KiB page during the read that fills it,
 /// which costs more than copying the data, because the allocator's mappings do not start on a
-/// huge page boundary. This mapping does, and is released to the kernel only when replaced: the
-/// most recently freed one is kept for the next read.
+/// huge page boundary. This mapping does, and freed mappings are kept for the next reads, up to a
+/// limit, which also spares the kernel from clearing their pages again.
 #[cfg(target_os = "linux")]
 #[pyclass(frozen, module = "audio_samples_io")]
 struct SampleMemory {
@@ -48,18 +48,18 @@ mod sample_memory {
     use memmap2::{Advice, MmapMut, MmapOptions};
 
     const HUGE_PAGE: usize = 2 * 1024 * 1024;
-    /// Largest mapping kept after its array is freed.
+    /// Bytes of freed mappings kept for later reads.
     const KEEP_MAX_BYTES: usize = 256 * 1024 * 1024;
 
-    static SPARE: Mutex<Option<MmapMut>> = Mutex::new(None);
+    static SPARE: Mutex<Vec<MmapMut>> = Mutex::new(Vec::new());
 
     /// A mapping holding `bytes` plus up to 64 from its first huge page boundary, [`aligned`].
     pub(super) fn acquire(bytes: usize) -> std::io::Result<MmapMut> {
         let needed = (bytes + 64).next_multiple_of(HUGE_PAGE) + HUGE_PAGE;
         if let Ok(mut spare) = SPARE.try_lock()
-            && let Some(map) = spare.take_if(|m| m.len() >= needed && m.len() / 4 <= needed)
+            && let Some(at) = spare.iter().rposition(|m| m.len() >= needed && m.len() / 4 <= needed)
         {
-            return Ok(map);
+            return Ok(spare.swap_remove(at));
         }
         let map = MmapOptions::new().len(needed).map_anon()?;
         let start = map.as_ptr() as usize;
@@ -78,13 +78,17 @@ mod sample_memory {
         (start.next_multiple_of(HUGE_PAGE)) as *mut u8
     }
 
-    /// Keep `map` for the next read, if it is not too large.
+    /// Keep `map` for a later read, dropping the oldest kept ones to stay within the limit.
     pub(super) fn release(map: MmapMut) {
         if map.len() > KEEP_MAX_BYTES {
             return;
         }
         if let Ok(mut spare) = SPARE.try_lock() {
-            *spare = Some(map);
+            let mut held: usize = spare.iter().map(|m| m.len()).sum::<usize>() + map.len();
+            while held > KEEP_MAX_BYTES {
+                held -= spare.remove(0).len();
+            }
+            spare.push(map);
         }
     }
 }
