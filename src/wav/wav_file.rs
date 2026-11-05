@@ -1151,35 +1151,39 @@ where
     Ok(())
 }
 
-/// Read a WAV file whose samples are already `T` straight into memory, without mapping it.
-/// `None` when the file needs the general path: another sample type, a compressed format, or
-/// anything unusual about it, which that path reports properly.
-#[cfg(target_endian = "little")]
-pub(crate) fn read_same_type<T>(path: &Path) -> Option<AudioSamples<'static, T>>
+/// Read a PCM or float WAV file into memory without mapping it, on several threads when large.
+/// `None` when the file needs the general path: a compressed format, or anything unusual about
+/// it, which that path reports properly.
+#[cfg(all(any(unix, windows), target_endian = "little"))]
+pub(crate) fn read_direct<T>(path: &Path) -> Option<AudioSamples<'static, T>>
 where
     T: StandardSample + 'static,
 {
-    if TypeId::of::<T>() == TypeId::of::<I24>() {
-        return None;
-    }
     let file = File::open(path).ok()?;
     let mut reader = BufReader::with_capacity(4096, file);
     let (info, offset) = parse_wav_header_streaming(&mut reader).ok()?;
-    if info.sample_type != T::SAMPLE_TYPE {
-        return None;
-    }
     let file = reader.into_inner();
     let channels = info.channels as usize;
     let total = info.total_samples;
     if channels == 0 || total == 0 || total % channels != 0 {
         return None;
     }
+    let file_type = ValidatedSampleType::try_from(info.sample_type).ok()?;
     let mut samples: Vec<T> = Vec::with_capacity(total);
-    // SAFETY: the capacity holds `total` samples; they are only read after this fills them.
-    let bytes =
-        unsafe { std::slice::from_raw_parts_mut(samples.as_mut_ptr().cast::<u8>(), total * mem::size_of::<T>()) };
-    crate::fastio::read_exact_at_parallel(&file, offset, bytes).ok()?;
-    // SAFETY: every byte of the first `total` samples was just written, and T accepts any bytes.
+    if info.sample_type == T::SAMPLE_TYPE && TypeId::of::<T>() != TypeId::of::<I24>() {
+        // SAFETY: the capacity holds `total` samples; they are only read after this fills them.
+        let bytes =
+            unsafe { std::slice::from_raw_parts_mut(samples.as_mut_ptr().cast::<u8>(), total * mem::size_of::<T>()) };
+        crate::fastio::read_exact_at_parallel(&file, offset, bytes).ok()?;
+    } else {
+        // SAFETY: as above; T is a plain numeric type that the conversion only writes.
+        let out = unsafe { std::slice::from_raw_parts_mut(samples.as_mut_ptr(), total) };
+        let read = crate::wav::streaming::read_converted_parallel(&file, offset, file_type, out, channels).ok()?;
+        if read != total {
+            return None;
+        }
+    }
+    // SAFETY: every sample of the first `total` was just written.
     unsafe { samples.set_len(total) };
     if channels == 1 {
         AudioSamples::new_mono(Array1::from_vec(samples), info.sample_rate).ok()
@@ -1190,8 +1194,9 @@ where
 }
 
 /// Bytes of interleaved samples converted at a time. The buffer lives on the stack, so writing
-/// a file makes no allocation that grows with its length.
-const TILE_BYTES: usize = 8 * 1024;
+/// a file makes no allocation that grows with its length. Smaller tiles mean more write calls, each
+/// of which costs about as much as converting a few KiB.
+const TILE_BYTES: usize = 64 * 1024;
 
 /// Convert `count` frames from the channel runs in `runs` to `U`, writing them interleaved
 /// little-endian at `out`. Each run holds one channel, or several already interleaved.

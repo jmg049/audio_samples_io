@@ -213,8 +213,8 @@ where
 
             #[cfg(feature = "wav")]
             {
-                #[cfg(target_endian = "little")]
-                if let Some(samples) = crate::wav::wav_file::read_same_type::<T>(path) {
+                #[cfg(all(any(unix, windows), target_endian = "little"))]
+                if let Some(samples) = crate::wav::wav_file::read_direct::<T>(path) {
                     return Ok(samples);
                 }
                 let wav_file = WavFile::open_with_options(path, OpenOptions::default())?;

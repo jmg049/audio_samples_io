@@ -970,6 +970,54 @@ fn read_full<R: std::io::Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Resul
     Ok(filled)
 }
 
+/// Convert the samples of a WAV payload at `offset` into `out`, on several threads when large.
+/// Returns the samples written.
+#[cfg(all(any(unix, windows), target_endian = "little"))]
+pub(crate) fn read_converted_parallel<T>(
+    file: &std::fs::File,
+    offset: u64,
+    sample_type: ValidatedSampleType,
+    out: &mut [T],
+    channels: usize,
+) -> std::io::Result<usize>
+where
+    T: StandardSample + 'static,
+{
+    let size = sample_type.bytes_per_sample().get();
+    let threads = crate::fastio::transfer_threads().min((out.len() * size) / crate::fastio::TRANSFER_BYTES_PER_THREAD);
+    if threads <= 1 {
+        let mut reader = crate::fastio::FileAt { file, offset };
+        return read_converted(&mut reader, sample_type, out);
+    }
+    let total = out.len();
+    // Whole frames per thread; a thread's part of a frame is never split across threads.
+    let chunk = total.div_ceil(threads).next_multiple_of(channels.max(1));
+    let base = out.as_mut_ptr() as usize;
+    let written = std::sync::atomic::AtomicUsize::new(0);
+    let ok = crate::fastio::run_on_threads(total.div_ceil(chunk), |index| {
+        let start = index * chunk;
+        let end = (start + chunk).min(total);
+        // SAFETY: indices give disjoint ranges inside `out`, which outlives the threads.
+        let part = unsafe { std::slice::from_raw_parts_mut((base as *mut T).add(start), end - start) };
+        let mut reader = crate::fastio::FileAt {
+            file,
+            offset: offset + (start * size) as u64,
+        };
+        match read_converted(&mut reader, sample_type, part) {
+            Ok(n) => {
+                written.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+                n == end - start
+            },
+            Err(_) => false,
+        }
+    });
+    if ok {
+        Ok(total)
+    } else {
+        Ok(written.into_inner().min(total.saturating_sub(1)))
+    }
+}
+
 /// Fill `out` from little-endian samples of `sample_type` in `reader`, converting block by block
 /// through a buffer on the stack. Returns the samples written.
 pub(crate) fn read_converted<R, T>(

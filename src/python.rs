@@ -365,7 +365,7 @@ where
             // Another sample type: convert block by block, through no copy of the whole file.
             // Safety: as below.
             let out = unsafe { std::slice::from_raw_parts_mut(data_ptr_usize as *mut T, total_samples) };
-            let read = read_converted_parallel(&file, offset, file_type, out, channels)?;
+            let read = crate::wav::streaming::read_converted_parallel(&file, offset, file_type, out, channels)?;
             if read != total_samples {
                 return Err(AudioIOError::corrupted_data_simple(
                     "Truncated WAV data",
@@ -385,54 +385,6 @@ where
     }
 
     Some(Ok((array.unbind(), info)))
-}
-
-/// Convert the samples of a WAV payload at `offset` into `out`, on several threads when large.
-/// Returns the samples written.
-#[cfg(target_endian = "little")]
-fn read_converted_parallel<T>(
-    file: &std::fs::File,
-    offset: u64,
-    sample_type: ValidatedSampleType,
-    out: &mut [T],
-    channels: usize,
-) -> std::io::Result<usize>
-where
-    T: StandardSample + 'static,
-{
-    let size = sample_type.bytes_per_sample().get();
-    let threads = crate::fastio::transfer_threads().min((out.len() * size) / crate::fastio::TRANSFER_BYTES_PER_THREAD);
-    if threads <= 1 {
-        let mut reader = crate::fastio::FileAt { file, offset };
-        return crate::wav::streaming::read_converted(&mut reader, sample_type, out);
-    }
-    let total = out.len();
-    // Whole frames per thread; a thread's part of a frame is never split across threads.
-    let chunk = total.div_ceil(threads).next_multiple_of(channels.max(1));
-    let base = out.as_mut_ptr() as usize;
-    let written = std::sync::atomic::AtomicUsize::new(0);
-    let ok = crate::fastio::run_on_threads(total.div_ceil(chunk), |index| {
-        let start = index * chunk;
-        let end = (start + chunk).min(total);
-        // SAFETY: indices give disjoint ranges inside `out`, which outlives the threads.
-        let part = unsafe { std::slice::from_raw_parts_mut((base as *mut T).add(start), end - start) };
-        let mut reader = crate::fastio::FileAt {
-            file,
-            offset: offset + (start * size) as u64,
-        };
-        match crate::wav::streaming::read_converted(&mut reader, sample_type, part) {
-            Ok(n) => {
-                written.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
-                n == end - start
-            },
-            Err(_) => false,
-        }
-    });
-    if ok {
-        Ok(total)
-    } else {
-        Ok(written.into_inner().min(total.saturating_sub(1)))
-    }
 }
 
 /// Compressed size from which a FLAC file is decoded as a whole rather than as a stream.

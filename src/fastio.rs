@@ -126,17 +126,19 @@ pub(crate) fn read_exact_at_parallel(file: &File, offset: u64, buf: &mut [u8]) -
 
 /// A reader over part of a file that leaves the file position alone, so that several threads
 /// can read one file.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(crate) struct FileAt<'a> {
     pub file: &'a File,
     pub offset: u64,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl io::Read for FileAt<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        use std::os::unix::fs::FileExt;
-        let n = self.file.read_at(buf, self.offset)?;
+        #[cfg(unix)]
+        let n = std::os::unix::fs::FileExt::read_at(self.file, buf, self.offset)?;
+        #[cfg(windows)]
+        let n = std::os::windows::fs::FileExt::seek_read(self.file, buf, self.offset)?;
         self.offset += n as u64;
         Ok(n)
     }
