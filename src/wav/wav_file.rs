@@ -12,7 +12,7 @@ use std::{
 
 use audio_samples::{
     AudioSamples, I24, SampleType,
-    traits::{ConvertFrom, StandardSample},
+    traits::{ConvertFrom, ConvertTo, StandardSample},
 };
 use memmap2::MmapOptions;
 use ndarray::{Array1, Array2, ShapeBuilder};
@@ -1246,12 +1246,28 @@ where
     T: StandardSample + 'static,
     W: Write,
 {
+    write_wav_as::<T, T, W>(writer, audio, opts, metadata)
+}
+
+/// Write a complete WAV file of samples of type `U`, each converted from `T` as it is written, so
+/// that no copy of the signal is made.
+pub(crate) fn write_wav_as<T, U, W>(
+    writer: W,
+    audio: &AudioSamples<T>,
+    opts: WriteOptions,
+    metadata: &WavMetadata,
+) -> AudioIOResult<()>
+where
+    T: StandardSample + ConvertTo<U> + 'static,
+    U: StandardSample + 'static,
+    W: Write,
+{
     let sample_rate = audio.sample_rate().get();
     let channels = audio.num_channels().get() as u16;
-    let bytes_per_sample_disk = if TypeId::of::<T>() == TypeId::of::<I24>() {
+    let bytes_per_sample_disk = if TypeId::of::<U>() == TypeId::of::<I24>() {
         3usize
     } else {
-        mem::size_of::<T>()
+        mem::size_of::<U>()
     };
     let data_size = audio
         .samples_per_channel()
@@ -1274,7 +1290,7 @@ where
     let padded_data_size = if data_size % 2 == 1 { data_size + 1 } else { data_size };
 
     // Determine FMT chunk size
-    let fmt_chunk_size = if needs_extensible_format::<T>(channels) { 40 } else { 16 };
+    let fmt_chunk_size = if needs_extensible_format::<U>(channels) { 40 } else { 16 };
     let fmt_total_size = 8 + fmt_chunk_size; // chunk header + data
 
     // Serialise trailing metadata chunks up front so their bytes are counted in the RIFF size.
@@ -1297,10 +1313,10 @@ where
     writer.write_all(b"WAVE")?;
 
     // Write FMT chunk
-    if needs_extensible_format::<T>(channels) {
-        write_extensible_fmt::<T, _>(&mut writer, channels, sample_rate)?;
+    if needs_extensible_format::<U>(channels) {
+        write_extensible_fmt::<U, _>(&mut writer, channels, sample_rate)?;
     } else {
-        write_base_fmt::<T, _>(&mut writer, channels, sample_rate)?;
+        write_base_fmt::<U, _>(&mut writer, channels, sample_rate)?;
     }
 
     // Write DATA chunk header
@@ -1308,7 +1324,7 @@ where
     writer.write_all(&(data_size as u32).to_le_bytes())?;
 
     // Write audio data (interleaved for multi-channel)
-    crate::fastio::write_interleaved_le::<T, T, _>(
+    crate::fastio::write_interleaved_le::<T, U, _>(
         &mut writer,
         channel_frame_view(audio),
         (12 + fmt_total_size + 8) as u64,

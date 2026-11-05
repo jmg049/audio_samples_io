@@ -1,8 +1,9 @@
 //! File transfers shared by the read and write paths.
 //!
 //! Large reads and decodes run on a few short-lived threads, which end before the call returns.
-//! The number follows the process's CPU affinity and is capped; setting the environment variable
-//! `AUDIO_SAMPLES_IO_THREADS` replaces the cap, and `1` keeps everything on the calling thread.
+//! The number follows the process's CPU affinity and is capped; [`set_thread_limit`] or the
+//! environment variable `AUDIO_SAMPLES_IO_THREADS` replaces the cap, and `1` keeps everything on the
+//! calling thread.
 
 use std::any::TypeId;
 use std::fs::File;
@@ -10,7 +11,7 @@ use std::io::{self, Seek, Write};
 use std::mem;
 use std::path::Path;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use audio_samples::{
     I24,
@@ -36,7 +37,27 @@ const MAX_DECODE_THREADS: usize = 8;
 /// could be backed by one.
 const THREAD_STACK_BYTES: usize = 256 * 1024;
 
+/// The limit set by [`set_thread_limit`]; zero when there is none.
+static THREAD_LIMIT: AtomicUsize = AtomicUsize::new(0);
+
+/// Set how many threads a file transfer or decode may use, in place of the default cap and of
+/// `AUDIO_SAMPLES_IO_THREADS`. `Some(1)` keeps everything on the calling thread. `None` returns to
+/// the default. Transfers already running keep the threads they have.
+pub fn set_thread_limit(limit: Option<std::num::NonZeroUsize>) {
+    THREAD_LIMIT.store(limit.map_or(0, std::num::NonZeroUsize::get), Ordering::Relaxed);
+}
+
+/// The most threads a large file read will use at present.
+#[must_use]
+pub fn thread_limit() -> usize {
+    transfer_threads()
+}
+
 fn available_threads() -> (usize, bool) {
+    let set = THREAD_LIMIT.load(Ordering::Relaxed);
+    if set > 0 {
+        return (set, true);
+    }
     static THREADS: OnceLock<(usize, bool)> = OnceLock::new();
     *THREADS.get_or_init(|| {
         if let Some(n) = std::env::var("AUDIO_SAMPLES_IO_THREADS")

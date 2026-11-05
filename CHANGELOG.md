@@ -16,6 +16,11 @@ All notable changes to this project will be documented in this file.
 - WAV: tolerate real-world/streaming files — over-declared RIFF/`data` size fields (including the `0xFFFFFFFF` placeholder written by streaming encoders) are clamped to the bytes actually present, and a ragged `data` chunk decodes its whole frames instead of erroring
 - Streaming: `AudioStreamReader` now exposes `num_channels()`, allowing `Box<dyn AudioStreamReader>` callers to allocate read buffers without a separate `info()` call (eliminating the probe → drop → reopen two-pass latency)
 
+### Added
+- `write_as` writes a WAV or FLAC file of another sample type block by block, without a copy of the signal.
+- `write_flac_file_as` does the same for a FLAC file, and can leave out the MD5 signature.
+- `set_thread_limit` and `thread_limit` set and read the limit on the threads of file transfers and decodes, alongside `AUDIO_SAMPLES_IO_THREADS`.
+
 ### Changed
 - `DEFAULT_WRITE_BUF_CAPACITY` is 256 bytes, enough for a header. Samples go straight to the destination, or through a 64 KiB stack buffer when their memory is not the file's layout.
 - FLAC: files carry the MD5 signature of the audio. `write_flac_without_md5` leaves it out.

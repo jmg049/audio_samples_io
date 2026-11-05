@@ -29,8 +29,7 @@ mod wav_write {
     }
 
     fn open(path: &Path) -> WavFile<'static> {
-        <WavFile as AudioFile>::open_with_options(path, OpenOptions::default())
-            .expect("failed to open the test file")
+        <WavFile as AudioFile>::open_with_options(path, OpenOptions::default()).expect("failed to open the test file")
     }
 
     fn interleaved<T: StandardSample + 'static>(wav: &WavFile<'_>) -> Vec<T> {

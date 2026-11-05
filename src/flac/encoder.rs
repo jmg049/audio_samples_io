@@ -673,7 +673,7 @@ fn plan_rice(
     let mut size = leaves;
     for _ in min_order..max_order {
         let (done, rest) = sums[base..].split_at_mut(size);
-        for (merged, pair) in rest[..size / 2].iter_mut().zip(done.chunks_exact(2)) {
+        for (merged, pair) in rest[..size / 2].iter_mut().zip(done.as_chunks::<2>().0) {
             *merged = pair[0] + pair[1];
         }
         base += size;

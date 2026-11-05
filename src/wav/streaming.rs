@@ -1162,8 +1162,8 @@ unsafe fn unpack_i24_ssse3(bytes: &[u8], out: &mut [I24]) {
         }
         i += 4;
     }
-    for (d, c) in out[i..samples].iter_mut().zip(bytes[i * 3..].chunks_exact(3)) {
-        *d = I24::from_le_bytes([c[0], c[1], c[2]]);
+    for (d, c) in out[i..samples].iter_mut().zip(bytes[i * 3..].as_chunks::<3>().0) {
+        *d = I24::from_le_bytes(*c);
     }
 }
 

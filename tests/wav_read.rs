@@ -17,8 +17,7 @@ mod wav_read {
     }
 
     fn open(path: &Path) -> WavFile<'static> {
-        <WavFile as AudioFile>::open_with_options(path, OpenOptions::default())
-            .expect("failed to open the test file")
+        <WavFile as AudioFile>::open_with_options(path, OpenOptions::default()).expect("failed to open the test file")
     }
 
     fn interleaved_i16(wav: &WavFile<'_>) -> Vec<i16> {

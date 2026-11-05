@@ -160,11 +160,10 @@ impl Md5 {
             compress(&mut self.state, &block);
             self.pending_len = 0;
         }
-        let mut blocks = data.chunks_exact(64);
-        for block in &mut blocks {
+        let (blocks, rest) = data.as_chunks::<64>();
+        for block in blocks {
             compress(&mut self.state, block);
         }
-        let rest = blocks.remainder();
         self.pending[..rest.len()].copy_from_slice(rest);
         self.pending_len = rest.len();
     }
@@ -178,8 +177,8 @@ impl Md5 {
         self.update(&tail[..pad + 8]);
         debug_assert_eq!(self.pending_len, 0);
         let mut out = [0u8; 16];
-        for (bytes, word) in out.chunks_exact_mut(4).zip(self.state) {
-            bytes.copy_from_slice(&word.to_le_bytes());
+        for (bytes, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(self.state) {
+            *bytes = word.to_le_bytes();
         }
         out
     }

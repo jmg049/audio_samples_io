@@ -608,9 +608,9 @@ unsafe fn pack_i24_ssse3(samples: &[I24], out: *mut u8) {
     // Keep the low three bytes of each 32-bit value, closed up.
     let keep = _mm_setr_epi8(0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, -1, -1, -1, -1);
     let mut p = out;
-    let mut chunks = samples.chunks_exact(4);
-    let last = samples.len() / 4;
-    for (index, chunk) in (&mut chunks).enumerate() {
+    let (chunks, rest) = samples.as_chunks::<4>();
+    let last = chunks.len();
+    for (index, chunk) in chunks.iter().enumerate() {
         // SAFETY: I24 occupies 4 bytes with its value in the low three (checked by the caller),
         // and each chunk holds four. 16-byte stores stay in bounds except on the last chunk,
         // which stores through a local copy.
@@ -626,7 +626,7 @@ unsafe fn pack_i24_ssse3(samples: &[I24], out: *mut u8) {
             p = p.add(12);
         }
     }
-    for s in chunks.remainder() {
+    for s in rest {
         // SAFETY: within the caller's bound.
         unsafe {
             std::ptr::copy_nonoverlapping(s.to_le_bytes().as_ptr(), p, 3);

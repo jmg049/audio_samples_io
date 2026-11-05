@@ -79,8 +79,7 @@ fn fmt_chunk_raw(fmt_data: &[u8]) -> Vec<u8> {
 fn read_i16(bytes: &[u8], name: &str) -> Vec<i16> {
     let path = temp_path(name);
     std::fs::write(&path, bytes).expect("write temp wav");
-    let wav = <WavFile as AudioFile>::open_with_options(&path, OpenOptions::default())
-        .expect("open the test file");
+    let wav = <WavFile as AudioFile>::open_with_options(&path, OpenOptions::default()).expect("open the test file");
     let audio = <WavFile as AudioFileRead>::read::<i16>(&wav).expect("read the test file");
     let out = audio.to_interleaved_vec().into_vec();
     std::fs::remove_file(&path).ok();

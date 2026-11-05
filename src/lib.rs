@@ -29,6 +29,7 @@ pub use crate::streaming::StreamedAudioWriter;
 
 #[allow(dead_code)] // Which helpers are used depends on the enabled formats.
 mod fastio;
+pub use crate::fastio::{set_thread_limit, thread_limit};
 #[cfg(feature = "numpy")]
 pub mod python;
 
@@ -45,7 +46,10 @@ use std::{
 pub use audio_samples::operations::ResamplingQuality;
 #[cfg(feature = "resampling")]
 pub use audio_samples::operations::resample;
-use audio_samples::{AudioSamples, traits::StandardSample};
+use audio_samples::{
+    AudioSamples, AudioTypeConversion,
+    traits::{ConvertFrom, ConvertTo, StandardSample},
+};
 
 #[cfg(feature = "numpy")]
 pub use crate::python::read_pyarray;
@@ -915,11 +919,12 @@ where
             #[cfg(feature = "flac")]
             {
                 let mut file = fastio::open_for_overwrite(path)?;
-                crate::flac::flac_file::write_flac_file(
+                crate::flac::flac_file::write_flac_file::<T, T>(
                     &mut file,
                     opts.write_buf_capacity,
                     audio,
                     CompressionLevel::default(),
+                    true,
                 )?;
                 Ok(fastio::finish_overwrite(&mut file)?)
             }
@@ -942,6 +947,61 @@ where
             "Unsupported format: {other:?}"
         ))),
     }
+}
+
+/// Write audio to a file as samples of type `U`, converting each block as it is written.
+///
+/// The result is the same as `write_with_options(fp, &audio.to_format::<U>(), opts)`, but WAV and
+/// FLAC make no copy of the signal, so memory use does not grow with its length.
+///
+/// ```no_run
+/// use audio_samples_io::{write_as, WriteOptions};
+/// use audio_samples::{sine_wave, sample_rate};
+/// use std::time::Duration;
+///
+/// let audio = sine_wave::<f32>(440.0, Duration::from_secs(60), sample_rate!(44100), 0.5);
+/// write_as::<i16, _, _>("long.flac", &audio, WriteOptions::default())?;
+/// # Ok::<(), audio_samples_io::error::AudioIOError>(())
+/// ```
+pub fn write_as<U, P, T>(fp: P, audio: &AudioSamples<T>, opts: WriteOptions) -> AudioIOResult<()>
+where
+    P: AsRef<Path>,
+    T: StandardSample + ConvertTo<U> + ConvertFrom<U> + 'static,
+    U: StandardSample + 'static,
+{
+    let path = fp.as_ref();
+    match FileType::from_path(path) {
+        #[cfg(feature = "wav")]
+        FileType::WAV => {
+            let mut file = fastio::open_for_overwrite(path)?;
+            crate::wav::wav_file::write_wav_as::<T, U, _>(&mut file, audio, opts, &crate::wav::WavMetadata::default())?;
+            Ok(fastio::finish_overwrite(&mut file)?)
+        },
+        #[cfg(feature = "flac")]
+        FileType::FLAC => write_flac_file_as::<U, _, T>(path, audio, opts, CompressionLevel::default(), true),
+        _ => write_with_options(path, &audio.to_format::<U>(), opts),
+    }
+}
+
+/// Write a FLAC file of samples of type `U`, converting each block as it is encoded. With `md5`
+/// false, STREAMINFO says the signature of the audio is unknown, as in
+/// [`write_flac_without_md5`](crate::flac::write_flac_without_md5).
+#[cfg(feature = "flac")]
+pub fn write_flac_file_as<U, P, T>(
+    fp: P,
+    audio: &AudioSamples<T>,
+    opts: WriteOptions,
+    level: CompressionLevel,
+    md5: bool,
+) -> AudioIOResult<()>
+where
+    P: AsRef<Path>,
+    T: StandardSample + ConvertTo<U> + 'static,
+    U: StandardSample + 'static,
+{
+    let mut file = fastio::open_for_overwrite(fp.as_ref())?;
+    crate::flac::flac_file::write_flac_file::<T, U>(&mut file, opts.write_buf_capacity, audio, level, md5)?;
+    Ok(fastio::finish_overwrite(&mut file)?)
 }
 
 /// Write a WAV file with trailing metadata chunks (LIST/INFO tags, cue points).
