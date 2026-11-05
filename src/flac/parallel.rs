@@ -7,7 +7,7 @@
 
 use audio_samples::{I24, traits::StandardSample};
 
-use crate::fastio::{decode_threads, run_on_threads};
+use crate::fastio::{ThreadsPermit, decode_threads, run_on_threads};
 use crate::flac::frame::{decode_frame_into_scratch, parse_frame_position};
 use crate::flac::metadata::StreamInfo;
 
@@ -71,7 +71,8 @@ where
     const RELEASE_BYTES: usize = 128 * 1024;
 
     let channels = info.channels as usize;
-    let threads = decode_threads().min(data.len() / MIN_BYTES_PER_THREAD).max(1);
+    let permit = ThreadsPermit::try_acquire();
+    let threads = permit.threads(decode_threads().min(data.len() / MIN_BYTES_PER_THREAD).max(1));
     if channels == 0 || threads < 2 {
         return false;
     }

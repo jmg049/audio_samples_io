@@ -984,7 +984,9 @@ where
     T: StandardSample + 'static,
 {
     let size = sample_type.bytes_per_sample().get();
-    let threads = crate::fastio::transfer_threads().min((out.len() * size) / crate::fastio::TRANSFER_BYTES_PER_THREAD);
+    let permit = crate::fastio::ThreadsPermit::try_acquire();
+    let threads = permit
+        .threads(crate::fastio::transfer_threads().min((out.len() * size) / crate::fastio::TRANSFER_BYTES_PER_THREAD));
     if threads <= 1 {
         let mut reader = crate::fastio::FileAt { file, offset };
         return read_converted(&mut reader, sample_type, out);

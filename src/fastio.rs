@@ -10,6 +10,7 @@ use std::io::{self, Seek, Write};
 use std::mem;
 use std::path::Path;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use audio_samples::{
     I24,
@@ -50,6 +51,32 @@ pub(crate) fn transfer_threads() -> usize {
     match available_threads() {
         (n, true) => n,
         (n, false) => n.min(MAX_TRANSFER_THREADS),
+    }
+}
+
+/// Held by the one transfer allowed to use several threads at a time. A program that reads many
+/// files on its own threads already has the parallelism, and more would only contend.
+pub(crate) struct ThreadsPermit(bool);
+
+static THREADED_TRANSFER: AtomicBool = AtomicBool::new(false);
+
+impl ThreadsPermit {
+    /// Claim the permit if it is free.
+    pub(crate) fn try_acquire() -> Self {
+        Self(!THREADED_TRANSFER.swap(true, Ordering::Acquire))
+    }
+
+    /// The threads this transfer may use, out of `wanted`.
+    pub(crate) const fn threads(&self, wanted: usize) -> usize {
+        if self.0 { wanted } else { 1 }
+    }
+}
+
+impl Drop for ThreadsPermit {
+    fn drop(&mut self) {
+        if self.0 {
+            THREADED_TRANSFER.store(false, Ordering::Release);
+        }
     }
 }
 
@@ -104,7 +131,8 @@ pub(crate) fn read_exact_at(mut file: &File, offset: u64, buf: &mut [u8]) -> io:
 
 /// [`read_exact_at`], on several threads for a large `buf`.
 pub(crate) fn read_exact_at_parallel(file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-    let threads = transfer_threads().min(buf.len() / TRANSFER_BYTES_PER_THREAD);
+    let permit = ThreadsPermit::try_acquire();
+    let threads = permit.threads(transfer_threads().min(buf.len() / TRANSFER_BYTES_PER_THREAD));
     if threads <= 1 {
         return read_exact_at(file, offset, buf);
     }
@@ -179,6 +207,115 @@ pub(crate) fn finish_overwrite(file: &mut File) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// A file being written whole. Writes that extend a file on tmpfs by a lot go through a shared
+/// mapping on several threads, because allocating and filling pages through `write` is serialised
+/// by the file's lock and a mapping's page faults are not. 10 MB takes 1.2 ms instead of 1.6, and
+/// 100 MB 13 ms instead of 18. Other file systems do more work per fault, so they use `write`.
+pub(crate) struct WholeFileWriter<'a> {
+    file: &'a mut File,
+    #[cfg(target_os = "linux")]
+    path: &'a Path,
+}
+
+impl<'a> WholeFileWriter<'a> {
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+    pub(crate) const fn new(file: &'a mut File, path: &'a Path) -> Self {
+        Self {
+            file,
+            #[cfg(target_os = "linux")]
+            path,
+        }
+    }
+
+    /// Write `buf` through a mapping, if this write qualifies. A failure of any step before the
+    /// copy returns false, and the caller writes as usual.
+    #[cfg(target_os = "linux")]
+    fn write_mapped(&mut self, buf: &[u8]) -> io::Result<bool> {
+        use std::os::fd::AsRawFd;
+
+        const MIN_BYTES: usize = 4 * 1024 * 1024;
+        const PAGE: u64 = 4096;
+        const TMPFS_MAGIC: i64 = 0x0102_1994;
+        if buf.len() < MIN_BYTES {
+            return Ok(false);
+        }
+        let permit = ThreadsPermit::try_acquire();
+        let threads = permit.threads(transfer_threads().min(buf.len() / (1024 * 1024)));
+        if threads <= 1 {
+            return Ok(false);
+        }
+        let position = self.file.stream_position()?;
+        if self.file.metadata()?.len() > position {
+            return Ok(false);
+        }
+        let mut stats: libc::statfs = unsafe { mem::zeroed() };
+        // SAFETY: `stats` is a valid out-pointer and the descriptor is open.
+        if unsafe { libc::fstatfs(self.file.as_raw_fd(), &mut stats) } != 0 || stats.f_type as i64 != TMPFS_MAGIC {
+            return Ok(false);
+        }
+        // A fault on a full tmpfs would be fatal rather than an error. Going ahead only with twice
+        // the room leaves no realistic way to run out; `write` reports it properly otherwise.
+        let unlimited = stats.f_blocks == 0;
+        let free = (stats.f_bavail as u64).saturating_mul(stats.f_bsize as u64);
+        if !unlimited && free < 2 * buf.len() as u64 {
+            return Ok(false);
+        }
+        // The mapping needs a descriptor that can read.
+        let Ok(mappable) = std::fs::OpenOptions::new().read(true).write(true).open(self.path) else {
+            return Ok(false);
+        };
+        let end = position + buf.len() as u64;
+        mappable.set_len(end)?;
+        let start = position / PAGE * PAGE;
+        let lead = (position - start) as usize;
+        // SAFETY: the file is as long as the range, was just created or extended by this call, and
+        // the mapping does not outlive this function. Nothing else in this process maps it.
+        let mut map = match unsafe {
+            memmap2::MmapOptions::new()
+                .offset(start)
+                .len(lead + buf.len())
+                .map_mut(&mappable)
+        } {
+            Ok(map) => map,
+            Err(_) => {
+                self.file.set_len(position)?;
+                return Ok(false);
+            },
+        };
+        let target = map[lead..].as_mut_ptr() as usize;
+        let source = buf.as_ptr() as usize;
+        let chunk = buf.len().div_ceil(threads);
+        let len = buf.len();
+        run_on_threads(threads, |index| {
+            let from = index * chunk;
+            let to = (from + chunk).min(len);
+            // SAFETY: indices give disjoint ranges of `buf` and of the mapping, which outlive the
+            // threads.
+            unsafe {
+                std::ptr::copy_nonoverlapping((source + from) as *const u8, (target + from) as *mut u8, to - from)
+            };
+            true
+        });
+        drop(map);
+        self.file.seek(io::SeekFrom::Start(end))?;
+        Ok(true)
+    }
+}
+
+impl Write for WholeFileWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        #[cfg(target_os = "linux")]
+        if self.write_mapped(buf)? {
+            return Ok(buf.len());
+        }
+        self.file.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
 }
 
 /// Open `path` for a streamed write, whose length is unknown until it ends. The old contents
