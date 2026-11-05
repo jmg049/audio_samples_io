@@ -7,6 +7,7 @@
 use std::any::TypeId;
 use std::fs::File;
 use std::io::{self, Seek, Write};
+use std::marker::PhantomData;
 use std::mem;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -334,11 +335,12 @@ impl io::Read for FileAt<'_> {
 /// allocates it again, and btrfs flushes a file truncated to zero when it is closed. Overwriting
 /// reuses the pages. Permissions, ownership and hard links stay as they are, as with truncation.
 pub(crate) fn open_for_overwrite(path: &Path) -> io::Result<File> {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(false);
+    // Read access as well if the file allows it, which a mapping of it needs.
+    let mut readable = options.clone();
+    readable.read(true);
+    readable.open(path).or_else(|_| options.open(path))
 }
 
 /// Cut a file opened by [`open_for_overwrite`] at the current write position. Anything that is
@@ -459,13 +461,7 @@ where
     };
     let tile_frames = (TILE_BYTES / frame_bytes).max(1);
 
-    let row_slices: Option<Vec<&[T]>> = if interleaved.is_none() {
-        (0..channels).map(|c| view.index_axis(Axis(0), c).to_slice()).collect()
-    } else {
-        None
-    };
-
-    let packed_i24 = TypeId::of::<T>() == TypeId::of::<I24>() && TypeId::of::<U>() == TypeId::of::<I24>();
+    let source = FrameSource::<T, U>::new(view);
     let mut tails: Vec<&[T]> = Vec::with_capacity(channels);
     let mut start = 0usize;
     while start < frames {
@@ -474,33 +470,98 @@ where
         let position = file_offset as usize + start * frame_bytes;
         // SAFETY: the buffer has room for a page and a bit beyond the tile.
         let tile = unsafe { tile_base.add(position % PAGE + ABOVE) };
-        if let Some(slice) = interleaved
-            && packed_i24
-        {
+        // SAFETY: the tile holds `count` frames, and they lie within the view.
+        unsafe { source.pack(start, count, tile, &mut tails) };
+        // SAFETY: every one of these bytes was written above.
+        writer.write_all(unsafe { std::slice::from_raw_parts(tile, bytes) })?;
+        start += count;
+    }
+    Ok(total)
+}
+
+/// Frames of a view, for packing into the file's layout in any order.
+struct FrameSource<'a, T, U> {
+    view: ArrayView2<'a, T>,
+    /// The view's memory, when interleaved.
+    interleaved: Option<&'a [T]>,
+    /// Each channel's memory, when planar.
+    rows: Option<Vec<&'a [T]>>,
+    /// In memory the samples already are as the file has them.
+    same_layout: bool,
+    packed_i24: bool,
+    _to: PhantomData<U>,
+}
+
+impl<'a, T, U> FrameSource<'a, T, U>
+where
+    T: StandardSample + ConvertTo<U> + 'static,
+    U: StandardSample + 'static,
+{
+    fn new(view: ArrayView2<'a, T>) -> Self {
+        let (channels, _) = view.dim();
+        // Interleaved memory: channel stride 1, frame stride `channels`.
+        let interleaved = if channels == 1 || view.strides() == [1, channels as isize] {
+            view.to_slice_memory_order()
+        } else {
+            None
+        };
+        let rows = if interleaved.is_none() {
+            (0..channels)
+                .map(|c| view.index_axis_move(Axis(0), c).to_slice())
+                .collect()
+        } else {
+            None
+        };
+        Self {
+            view,
+            interleaved,
+            rows,
+            same_layout: cfg!(target_endian = "little")
+                && interleaved.is_some()
+                && TypeId::of::<T>() == TypeId::of::<U>()
+                && TypeId::of::<T>() != TypeId::of::<I24>(),
+            packed_i24: TypeId::of::<T>() == TypeId::of::<I24>() && TypeId::of::<U>() == TypeId::of::<I24>(),
+            _to: PhantomData,
+        }
+    }
+
+    /// Write `count` frames from frame `start` to `out`, as the file has them.
+    ///
+    /// # Safety
+    ///
+    /// `out` holds `count` frames of `U`, and the frames lie within the view. `tails` is scratch.
+    unsafe fn pack(&self, start: usize, count: usize, out: *mut u8, tails: &mut Vec<&'a [T]>) {
+        let (channels, _) = self.view.dim();
+        let size = U::BYTES as usize;
+        if let Some(slice) = self.interleaved {
             let samples = &slice[start * channels..(start + count) * channels];
-            // SAFETY: T is I24, checked above, and the tile holds three bytes per sample.
-            unsafe {
-                crate::types::pack_i24(
-                    std::slice::from_raw_parts(samples.as_ptr().cast::<I24>(), samples.len()),
-                    tile,
-                );
+            if self.same_layout {
+                // SAFETY: T is plain numeric and already laid out as the file has it.
+                unsafe { std::ptr::copy_nonoverlapping(samples.as_ptr().cast::<u8>(), out, samples.len() * size) };
+            } else if self.packed_i24 {
+                // SAFETY: T is I24, checked in `new`, and `out` holds three bytes per sample.
+                unsafe {
+                    crate::types::pack_i24(
+                        std::slice::from_raw_parts(samples.as_ptr().cast::<I24>(), samples.len()),
+                        out,
+                    );
+                }
+            } else {
+                // SAFETY: `out` holds `count * channels` samples, and so does the slice.
+                unsafe { pack_frames::<T, U>(&[samples], count * channels, out) };
             }
-        } else if let Some(slice) = interleaved {
-            // SAFETY: the tile holds `count * channels * size` bytes, the slice that many samples
-            // from `start * channels`.
-            unsafe { pack_frames::<T, U>(&[&slice[start * channels..]], count * channels, tile) };
-        } else if let Some(rows) = &row_slices {
+        } else if let Some(rows) = &self.rows {
             tails.clear();
             tails.extend(rows.iter().map(|r| &r[start..]));
-            // SAFETY: the tile holds `count` frames and each tail that many samples.
-            unsafe { pack_frames::<T, U>(&tails, count, tile) };
+            // SAFETY: `out` holds `count` frames and each tail that many samples.
+            unsafe { pack_frames::<T, U>(tails, count, out) };
         } else {
-            let mut p = tile;
+            let mut p = out;
             for f in start..start + count {
                 for c in 0..channels {
-                    let converted: U = view[[c, f]].convert_to();
+                    let converted: U = self.view[[c, f]].convert_to();
                     let encoded = converted.to_le_bytes();
-                    // SAFETY: at most `count * frame_bytes` bytes are written to the tile.
+                    // SAFETY: at most `count` frames of bytes are written to `out`.
                     unsafe {
                         std::ptr::copy_nonoverlapping(encoded.as_ref().as_ptr(), p, size);
                         p = p.add(size);
@@ -508,9 +569,110 @@ where
                 }
             }
         }
-        // SAFETY: every one of these bytes was written above.
-        writer.write_all(unsafe { std::slice::from_raw_parts(tile, bytes) })?;
-        start += count;
     }
-    Ok(total)
+}
+
+/// Bytes of samples from which [`write_samples_mapped`] is used.
+#[cfg(target_os = "linux")]
+const MAPPED_MIN_BYTES: usize = 8 * 1024 * 1024;
+
+/// Whether `file` lives in memory, where its pages can be filled from several threads at once.
+#[cfg(target_os = "linux")]
+fn is_tmpfs(file: &File) -> bool {
+    use std::os::fd::AsRawFd;
+    const TMPFS_MAGIC: i64 = 0x0102_1994;
+    // SAFETY: an all-zero value is valid storage for fstatfs to fill.
+    let mut info: libc::statfs = unsafe { mem::zeroed() };
+    // SAFETY: the descriptor is open and `info` is valid storage.
+    let result = unsafe { libc::fstatfs(file.as_raw_fd(), &raw mut info) };
+    result == 0 && info.f_type as i64 == TMPFS_MAGIC
+}
+
+/// Fill a large file in tmpfs through a mapping, from several threads, with the samples of `view` in
+/// the file's layout at `file_offset`, which is the file's current position; a write on such a file
+/// runs on one thread at a time and takes 20 to 60% longer. True if done; on false nothing is written
+/// that counts, the position is unchanged, and the ordinary write is left to report what is wrong.
+///
+/// Each thread populates its pages before touching them, so a full filesystem is an error here and
+/// not a signal. Only another process truncating the file during the write can still raise one.
+#[cfg(target_os = "linux")]
+pub(crate) fn write_samples_mapped<T, U>(file: &File, view: ArrayView2<'_, T>, file_offset: u64) -> io::Result<bool>
+where
+    T: StandardSample + ConvertTo<U> + Sync + 'static,
+    U: StandardSample + 'static,
+{
+    let (channels, frames) = view.dim();
+    let frame_bytes = channels * U::BYTES as usize;
+    let total = frames * frame_bytes;
+    let permit = ThreadsPermit::try_acquire();
+    let threads = permit.threads(transfer_threads());
+    if total < MAPPED_MIN_BYTES || threads < 4 || !is_tmpfs(file) {
+        return Ok(false);
+    }
+    use std::os::fd::AsRawFd;
+    let offset = file_offset as usize;
+    let end = offset + total;
+    let before = file.metadata()?.len();
+    if before < end as u64 {
+        file.set_len(end as u64)?;
+    }
+    // SAFETY: a new shared mapping of the open file, within its length, unmapped below.
+    let map = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            end,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            file.as_raw_fd(),
+            0,
+        )
+    };
+    if map == libc::MAP_FAILED {
+        file.set_len(before)?;
+        return Ok(false);
+    }
+    let base = map as usize;
+    let source = FrameSource::<T, U>::new(view);
+    let chunk = frames.div_ceil(threads).max(1);
+    let source = &source;
+    let done = run_on_threads(frames.div_ceil(chunk), |index| {
+        let first = index * chunk;
+        let last = (first + chunk).min(frames);
+        let from = (base + offset + first * frame_bytes) & !4095;
+        let to = (base + offset + last * frame_bytes)
+            .next_multiple_of(4096)
+            .min(base + end.next_multiple_of(4096));
+        // SAFETY: the range lies in the mapping, and populating pages changes no contents.
+        if unsafe { libc::madvise(from as *mut libc::c_void, to - from, libc::MADV_POPULATE_WRITE) } != 0 {
+            return false;
+        }
+        let mut tails = Vec::with_capacity(channels);
+        let step = (TILE_BYTES / frame_bytes).max(1);
+        let mut at = first;
+        while at < last {
+            let count = step.min(last - at);
+            // SAFETY: these frames lie in the populated part of the mapping given to this index alone.
+            unsafe { source.pack(at, count, (base + offset + at * frame_bytes) as *mut u8, &mut tails) };
+            at += count;
+        }
+        true
+    });
+    // SAFETY: the mapping was made above, and the threads have gone.
+    unsafe { libc::munmap(map, end) };
+    if !done {
+        file.set_len(before)?;
+        return Ok(false);
+    }
+    let mut position = file;
+    position.seek(io::SeekFrom::Start(end as u64))?;
+    Ok(true)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn write_samples_mapped<T, U>(_file: &File, _view: ArrayView2<'_, T>, _file_offset: u64) -> io::Result<bool>
+where
+    T: StandardSample + ConvertTo<U> + Sync + 'static,
+    U: StandardSample + 'static,
+{
+    Ok(false)
 }
