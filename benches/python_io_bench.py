@@ -364,6 +364,9 @@ def writers(directory, fmt, sample_type, channels, seconds):
         else:
             a = aus.AudioSamples.new_multi(x.T, sample_rate=SAMPLE_RATE)
         w["ours"] = lambda p: aus.io.save(p, a)
+        # The usual pipeline: audio that was read with this library and is saved again.
+        loaded = aus.io.read(input_file(directory, "wav", sample_type, channels, seconds))
+        w["ours, array from read"] = lambda p: aus.io.save(p, loaded)
     if sf:
         w["soundfile"] = lambda p: sf.write(p, sf_x, SAMPLE_RATE, subtype=SUBTYPE[sample_type], format=fmt.upper())
     if fmt == "wav":
