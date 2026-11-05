@@ -423,7 +423,8 @@ where
 
         let frames_per_channel = samples.samples_per_channel();
 
-        let bytes_written = write_frames_converted::<T, W>(&mut self.writer, samples, self.sample_type)?;
+        let position = self.data_size_offset + 4 + self.data_bytes_written;
+        let bytes_written = write_frames_converted::<T, W>(&mut self.writer, samples, self.sample_type, position)?;
 
         self.frames_written += frames_per_channel.get();
         self.data_bytes_written += bytes_written as u64;
@@ -439,6 +440,7 @@ pub(crate) fn write_frames_converted<T, W>(
     writer: &mut W,
     samples: &AudioSamples<'_, T>,
     target: ValidatedSampleType,
+    file_offset: u64,
 ) -> AudioIOResult<usize>
 where
     T: StandardSample + 'static,
@@ -446,12 +448,12 @@ where
 {
     let view = channel_frame_view(samples);
     match target {
-        ValidatedSampleType::U8 => write_interleaved_le::<T, u8, W>(writer, view),
-        ValidatedSampleType::I16 => write_interleaved_le::<T, i16, W>(writer, view),
-        ValidatedSampleType::I24 => write_interleaved_le::<T, I24, W>(writer, view),
-        ValidatedSampleType::I32 => write_interleaved_le::<T, i32, W>(writer, view),
-        ValidatedSampleType::F32 => write_interleaved_le::<T, f32, W>(writer, view),
-        ValidatedSampleType::F64 => write_interleaved_le::<T, f64, W>(writer, view),
+        ValidatedSampleType::U8 => write_interleaved_le::<T, u8, W>(writer, view, file_offset),
+        ValidatedSampleType::I16 => write_interleaved_le::<T, i16, W>(writer, view, file_offset),
+        ValidatedSampleType::I24 => write_interleaved_le::<T, I24, W>(writer, view, file_offset),
+        ValidatedSampleType::I32 => write_interleaved_le::<T, i32, W>(writer, view, file_offset),
+        ValidatedSampleType::F32 => write_interleaved_le::<T, f32, W>(writer, view, file_offset),
+        ValidatedSampleType::F64 => write_interleaved_le::<T, f64, W>(writer, view, file_offset),
     }
 }
 

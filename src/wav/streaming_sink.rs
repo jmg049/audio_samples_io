@@ -39,6 +39,8 @@ where
     declared_frames: Option<usize>,
     frames_written: usize,
     data_bytes_written: u64,
+    /// Bytes of the header, for working out where samples land.
+    header_len: u64,
     finalized: bool,
 }
 
@@ -69,6 +71,7 @@ where
             None => build_wav_header_infinite(channels, sample_rate, sample_type)?,
         };
         writer.write_all(&header)?;
+        let header_len = header.len() as u64;
 
         Ok(WavSink {
             writer,
@@ -78,6 +81,7 @@ where
             declared_frames: total_frames,
             frames_written: 0,
             data_bytes_written: 0,
+            header_len,
             finalized: false,
         })
     }
@@ -129,7 +133,8 @@ where
             ));
         }
 
-        let bytes_written = write_frames_converted::<T, W>(&mut self.writer, samples, self.sample_type)?;
+        let position = self.header_len + self.data_bytes_written;
+        let bytes_written = write_frames_converted::<T, W>(&mut self.writer, samples, self.sample_type, position)?;
 
         self.frames_written += frames_per_channel;
         self.data_bytes_written += bytes_written as u64;

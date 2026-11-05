@@ -27,10 +27,17 @@ pub(crate) const TRANSFER_BYTES_PER_THREAD: usize = 512 * 1024;
 #[cfg(not(target_os = "linux"))]
 pub(crate) const TRANSFER_BYTES_PER_THREAD: usize = usize::MAX;
 
+/// A transfer below this stays on the calling thread: two threads would not pay for themselves.
+pub(crate) const TRANSFER_MIN_BYTES: usize = 3 * 512 * 1024;
+
 /// Most threads a file transfer uses: the copy is limited by memory bandwidth beyond this.
 const MAX_TRANSFER_THREADS: usize = 8;
 /// Most threads a decode uses.
 const MAX_DECODE_THREADS: usize = 8;
+
+/// Stack of a transfer thread: the work on them uses little, and a stack of a huge page or more
+/// could be backed by one.
+const THREAD_STACK_BYTES: usize = 256 * 1024;
 
 fn available_threads() -> (usize, bool) {
     static THREADS: OnceLock<(usize, bool)> = OnceLock::new();
@@ -99,7 +106,10 @@ where
         let mut handles = Vec::with_capacity(count.saturating_sub(1));
         let mut inline = Vec::new();
         for index in 0..count.saturating_sub(1) {
-            match std::thread::Builder::new().spawn_scoped(scope, move || work(index)) {
+            match std::thread::Builder::new()
+                .stack_size(THREAD_STACK_BYTES)
+                .spawn_scoped(scope, move || work(index))
+            {
                 Ok(handle) => handles.push(handle),
                 Err(_) => inline.push(index),
             }
@@ -133,7 +143,7 @@ pub(crate) fn read_exact_at(mut file: &File, offset: u64, buf: &mut [u8]) -> io:
 pub(crate) fn read_exact_at_parallel(file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
     let permit = ThreadsPermit::try_acquire();
     let threads = permit.threads(transfer_threads().min(buf.len() / TRANSFER_BYTES_PER_THREAD));
-    if threads <= 1 {
+    if threads <= 1 || buf.len() < TRANSFER_MIN_BYTES {
         return read_exact_at(file, offset, buf);
     }
     let len = buf.len();
@@ -209,115 +219,6 @@ pub(crate) fn finish_overwrite(file: &mut File) -> io::Result<()> {
     Ok(())
 }
 
-/// A file being written whole. Writes that extend a file on tmpfs by a lot go through a shared
-/// mapping on several threads, because allocating and filling pages through `write` is serialised
-/// by the file's lock and a mapping's page faults are not. 10 MB takes 1.2 ms instead of 1.6, and
-/// 100 MB 13 ms instead of 18. Other file systems do more work per fault, so they use `write`.
-pub(crate) struct WholeFileWriter<'a> {
-    file: &'a mut File,
-    #[cfg(target_os = "linux")]
-    path: &'a Path,
-}
-
-impl<'a> WholeFileWriter<'a> {
-    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
-    pub(crate) const fn new(file: &'a mut File, path: &'a Path) -> Self {
-        Self {
-            file,
-            #[cfg(target_os = "linux")]
-            path,
-        }
-    }
-
-    /// Write `buf` through a mapping, if this write qualifies. A failure of any step before the
-    /// copy returns false, and the caller writes as usual.
-    #[cfg(target_os = "linux")]
-    fn write_mapped(&mut self, buf: &[u8]) -> io::Result<bool> {
-        use std::os::fd::AsRawFd;
-
-        const MIN_BYTES: usize = 4 * 1024 * 1024;
-        const PAGE: u64 = 4096;
-        const TMPFS_MAGIC: i64 = 0x0102_1994;
-        if buf.len() < MIN_BYTES {
-            return Ok(false);
-        }
-        let permit = ThreadsPermit::try_acquire();
-        let threads = permit.threads(transfer_threads().min(buf.len() / (1024 * 1024)));
-        if threads <= 1 {
-            return Ok(false);
-        }
-        let position = self.file.stream_position()?;
-        if self.file.metadata()?.len() > position {
-            return Ok(false);
-        }
-        let mut stats: libc::statfs = unsafe { mem::zeroed() };
-        // SAFETY: `stats` is a valid out-pointer and the descriptor is open.
-        if unsafe { libc::fstatfs(self.file.as_raw_fd(), &mut stats) } != 0 || stats.f_type as i64 != TMPFS_MAGIC {
-            return Ok(false);
-        }
-        // A fault on a full tmpfs would be fatal rather than an error. Going ahead only with twice
-        // the room leaves no realistic way to run out; `write` reports it properly otherwise.
-        let unlimited = stats.f_blocks == 0;
-        let free = (stats.f_bavail as u64).saturating_mul(stats.f_bsize as u64);
-        if !unlimited && free < 2 * buf.len() as u64 {
-            return Ok(false);
-        }
-        // The mapping needs a descriptor that can read.
-        let Ok(mappable) = std::fs::OpenOptions::new().read(true).write(true).open(self.path) else {
-            return Ok(false);
-        };
-        let end = position + buf.len() as u64;
-        mappable.set_len(end)?;
-        let start = position / PAGE * PAGE;
-        let lead = (position - start) as usize;
-        // SAFETY: the file is as long as the range, was just created or extended by this call, and
-        // the mapping does not outlive this function. Nothing else in this process maps it.
-        let mut map = match unsafe {
-            memmap2::MmapOptions::new()
-                .offset(start)
-                .len(lead + buf.len())
-                .map_mut(&mappable)
-        } {
-            Ok(map) => map,
-            Err(_) => {
-                self.file.set_len(position)?;
-                return Ok(false);
-            },
-        };
-        let target = map[lead..].as_mut_ptr() as usize;
-        let source = buf.as_ptr() as usize;
-        let chunk = buf.len().div_ceil(threads);
-        let len = buf.len();
-        run_on_threads(threads, |index| {
-            let from = index * chunk;
-            let to = (from + chunk).min(len);
-            // SAFETY: indices give disjoint ranges of `buf` and of the mapping, which outlive the
-            // threads.
-            unsafe {
-                std::ptr::copy_nonoverlapping((source + from) as *const u8, (target + from) as *mut u8, to - from)
-            };
-            true
-        });
-        drop(map);
-        self.file.seek(io::SeekFrom::Start(end))?;
-        Ok(true)
-    }
-}
-
-impl Write for WholeFileWriter<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        #[cfg(target_os = "linux")]
-        if self.write_mapped(buf)? {
-            return Ok(buf.len());
-        }
-        self.file.write(buf)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.file.flush()
-    }
-}
-
 /// Open `path` for a streamed write, whose length is unknown until it ends. The old contents
 /// shrink to one byte instead of none: see [`open_for_overwrite`] for what zero costs, and every
 /// streamed format writes its header over that byte at once.
@@ -368,8 +269,14 @@ where
 ///
 /// Samples whose memory is already the file's layout go straight to `writer`. Anything else
 /// passes through a buffer of [`TILE_BYTES`], so no copy of the signal is made. Returns the
-/// number of bytes written.
-pub(crate) fn write_interleaved_le<T, U, W>(writer: &mut W, view: ArrayView2<'_, T>) -> AudioIOResult<usize>
+/// number of bytes written. `file_offset` is where the samples start in the destination: each tile
+/// is placed a little above that offset within a page, which makes the kernel's copy into the
+/// page cache about 15% faster than when the source's page offset is the lower of the two.
+pub(crate) fn write_interleaved_le<T, U, W>(
+    writer: &mut W,
+    view: ArrayView2<'_, T>,
+    file_offset: u64,
+) -> AudioIOResult<usize>
 where
     T: StandardSample + ConvertTo<U> + 'static,
     U: StandardSample + 'static,
@@ -402,13 +309,15 @@ where
     }
 
     let frame_bytes = channels * size;
-    #[repr(align(64))]
-    struct Tile([mem::MaybeUninit<u8>; TILE_BYTES]);
-    let mut stack = Tile([mem::MaybeUninit::uninit(); TILE_BYTES]);
+    const PAGE: usize = 4096;
+    const ABOVE: usize = 64;
+    #[repr(align(4096))]
+    struct Tile([mem::MaybeUninit<u8>; TILE_BYTES + PAGE + ABOVE]);
+    let mut stack = Tile([mem::MaybeUninit::uninit(); TILE_BYTES + PAGE + ABOVE]);
     // A frame larger than the stack buffer is only possible with over a thousand channels.
     let mut heap: Vec<u8> = Vec::new();
-    let tile: *mut u8 = if frame_bytes > TILE_BYTES {
-        heap.reserve_exact(frame_bytes);
+    let tile_base: *mut u8 = if frame_bytes > TILE_BYTES {
+        heap.reserve_exact(frame_bytes + PAGE + ABOVE);
         heap.as_mut_ptr()
     } else {
         stack.0.as_mut_ptr().cast()
@@ -427,6 +336,9 @@ where
     while start < frames {
         let count = tile_frames.min(frames - start);
         let bytes = count * frame_bytes;
+        let position = file_offset as usize + start * frame_bytes;
+        // SAFETY: the buffer has room for a page and a bit beyond the tile.
+        let tile = unsafe { tile_base.add(position % PAGE + ABOVE) };
         if let Some(slice) = interleaved
             && packed_i24
         {

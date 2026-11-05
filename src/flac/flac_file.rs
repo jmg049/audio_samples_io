@@ -218,6 +218,8 @@ impl<'a> FlacFile<'a> {
             }
         };
 
+        const RELEASE_BYTES: usize = 32 * 1024;
+        let mut released = 0usize;
         let mut offset = 0;
         let mut written = 0usize;
 
@@ -240,6 +242,10 @@ impl<'a> FlacFile<'a> {
                     let block = scratch[0].len();
                     if written + block > total_spc {
                         return Ok(None);
+                    }
+                    if offset - released >= RELEASE_BYTES {
+                        release(released..offset);
+                        released = offset;
                     }
                     for (ch, samples) in scratch.iter().enumerate() {
                         // SAFETY: `written + block <= total_spc`, so the range lies in
@@ -734,12 +740,12 @@ where
     // These types are stored unchanged, so their bytes go straight through.
     let id = std::any::TypeId::of::<T>();
     if id == std::any::TypeId::of::<i16>() {
-        if crate::fastio::write_interleaved_le::<T, i16, _>(&mut md5, view).is_ok() {
+        if crate::fastio::write_interleaved_le::<T, i16, _>(&mut md5, view, 0).is_ok() {
             return md5.finish();
         }
         md5 = Md5::new();
     } else if id == std::any::TypeId::of::<I24>() {
-        if crate::fastio::write_interleaved_le::<T, I24, _>(&mut md5, view).is_ok() {
+        if crate::fastio::write_interleaved_le::<T, I24, _>(&mut md5, view, 0).is_ok() {
             return md5.finish();
         }
         md5 = Md5::new();

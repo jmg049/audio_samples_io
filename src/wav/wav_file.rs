@@ -1308,7 +1308,11 @@ where
     writer.write_all(&(data_size as u32).to_le_bytes())?;
 
     // Write audio data (interleaved for multi-channel)
-    crate::fastio::write_interleaved_le::<T, T, _>(&mut writer, channel_frame_view(audio))?;
+    crate::fastio::write_interleaved_le::<T, T, _>(
+        &mut writer,
+        channel_frame_view(audio),
+        (12 + fmt_total_size + 8) as u64,
+    )?;
 
     // Add padding byte if needed
     if data_size % 2 == 1 {

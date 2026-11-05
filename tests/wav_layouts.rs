@@ -89,6 +89,18 @@ fn check_layouts<T: StandardSample + 'static>(make: impl Fn(i64) -> T) {
     }
 }
 
+/// However large, the file is plain: samples at byte 44 for up to two channels of 16-bit audio.
+#[test]
+fn large_payload_stays_at_the_plain_offset() {
+    let frames = 1024 * 1024;
+    let values = Array2::from_shape_fn((2, frames), |(c, f)| (value(c, f) >> 8) as i16);
+    let audio = AudioSamples::new_multi_channel(values.clone(), sample_rate!(44100)).unwrap();
+    let mut out = Vec::new();
+    write_with(Cursor::new(&mut out), &audio, FileType::WAV).unwrap();
+    assert_eq!(&out[36..40], b"data");
+    assert!(data_chunk(&out) == expected_data(&values).as_slice());
+}
+
 #[test]
 fn u8_layouts() {
     check_layouts(|v| (v & 0xFF) as u8);

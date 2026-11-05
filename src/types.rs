@@ -414,7 +414,9 @@ impl<'a> AudioDataSource<'a> {
         #[cfg(target_os = "linux")]
         if let AudioDataSource::MemoryMapped(mmap) = self {
             const PAGE: usize = 4096;
-            let start = range.start.next_multiple_of(PAGE);
+            // Down at both ends: the page holding the end is still in use, and the next range
+            // starts in it.
+            let start = range.start / PAGE * PAGE;
             let end = range.end / PAGE * PAGE;
             if end > start {
                 // SAFETY: the mapping is a private view of a file, never written through here, so

@@ -68,7 +68,7 @@ where
     T: StandardSample + 'static,
 {
     /// Bytes a thread decodes between calls to `consumed`.
-    const RELEASE_BYTES: usize = 128 * 1024;
+    const RELEASE_BYTES: usize = 32 * 1024;
 
     let channels = info.channels as usize;
     let permit = ThreadsPermit::try_acquire();

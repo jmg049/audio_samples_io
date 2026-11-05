@@ -48,25 +48,29 @@ mod sample_memory {
     use memmap2::{Advice, MmapMut, MmapOptions};
 
     const HUGE_PAGE: usize = 2 * 1024 * 1024;
-    /// Bytes of freed mappings kept for later reads.
-    const KEEP_MAX_BYTES: usize = 256 * 1024 * 1024;
+    /// Bytes of freed mappings kept for later reads. Reads of up to this size repeat without
+    /// clearing pages; 60 s of 16-bit stereo takes 0.11 ms instead of 0.66. Keeping more only
+    /// helps much longer files, which win without it.
+    const KEEP_MAX_BYTES: usize = 16 * 1024 * 1024;
 
     static SPARE: Mutex<Vec<MmapMut>> = Mutex::new(Vec::new());
 
-    /// A mapping holding `bytes` plus up to 64 from its first huge page boundary, [`aligned`].
+    /// A mapping holding `bytes` plus up to a page from its first huge page boundary, [`aligned`].
     pub(super) fn acquire(bytes: usize) -> std::io::Result<MmapMut> {
-        let needed = (bytes + 64).next_multiple_of(HUGE_PAGE) + HUGE_PAGE;
-        if let Ok(mut spare) = SPARE.try_lock()
-            && let Some(at) = spare.iter().rposition(|m| m.len() >= needed && m.len() / 4 <= needed)
-        {
-            return Ok(spare.swap_remove(at));
+        let needed = (bytes + 4096).next_multiple_of(HUGE_PAGE) + HUGE_PAGE;
+        if let Ok(mut spare) = SPARE.try_lock() {
+            if let Some(at) = spare.iter().rposition(|m| m.len() >= needed && m.len() / 4 <= needed) {
+                return Ok(spare.swap_remove(at));
+            }
+            // Kept memory of another size would only add to this read's.
+            spare.clear();
         }
         let map = MmapOptions::new().len(needed).map_anon()?;
         let start = map.as_ptr() as usize;
         let inner = start.next_multiple_of(HUGE_PAGE) - start;
         // Huge pages for whole units of the array; the rest stays in small pages, so that the
         // resident size is the array's. Only an optimisation: without them the memory works the same.
-        let whole = (bytes + 64) / HUGE_PAGE * HUGE_PAGE;
+        let whole = (bytes + 4096) / HUGE_PAGE * HUGE_PAGE;
         let _ = map.advise_range(Advice::HugePage, inner, whole);
         let _ = map.advise_range(Advice::NoHugePage, inner + whole, needed - inner - whole);
         Ok(map)
@@ -106,8 +110,8 @@ impl Drop for SampleMemory {
 
 /// An uninitialised `(channels, frames)` array in interleaved (`fortran`) or planar memory, with a
 /// pointer to its data. `file_offset` is where the samples start in the file: a large array starts at
-/// the same offset within a cache line where the sample type allows it, which makes the kernel's
-/// copy about 10% faster, both for this read and for writing the array to a file later.
+/// the same offset within a page where the sample type allows it, which makes the kernel's copy
+/// about 10% faster, both for this read and for writing the array to a file later.
 fn new_output_array<T>(
     py: Python<'_>,
     channels: usize,
@@ -125,7 +129,7 @@ where
             && (crate::fastio::transfer_threads() > 1 || bytes >= SAMPLE_MEMORY_ALWAYS_BYTES)
             && let Ok(mut map) = sample_memory::acquire(bytes)
         {
-            let shift = (file_offset % 64) as usize;
+            let shift = (file_offset % 4096) as usize;
             let shift = if shift.is_multiple_of(std::mem::align_of::<T>()) {
                 shift
             } else {

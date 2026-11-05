@@ -902,7 +902,7 @@ where
             #[cfg(feature = "wav")]
             {
                 let mut file = fastio::open_for_overwrite(path)?;
-                crate::wav::wav_file::write_wav(fastio::WholeFileWriter::new(&mut file, path), audio, opts)?;
+                crate::wav::wav_file::write_wav(&mut file, audio, opts)?;
                 Ok(fastio::finish_overwrite(&mut file)?)
             }
         },
