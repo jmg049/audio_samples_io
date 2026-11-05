@@ -74,3 +74,21 @@ fn thread_limit_replaces_the_default() {
     audio_samples_io::set_thread_limit(None);
     assert!(audio_samples_io::thread_limit() >= 1);
 }
+
+/// Large enough for the mapped write on tmpfs, which has its own conversion path.
+#[cfg(target_os = "linux")]
+#[test]
+fn write_as_on_tmpfs_matches_converting_first() {
+    let Ok(dir) = tempfile::tempdir_in("/dev/shm") else {
+        return;
+    };
+    audio_samples_io::set_thread_limit(NonZeroUsize::new(4));
+    let data = Array2::from_shape_fn((2, 12_000_000), |(c, i)| (((i + c) % 997) as f32 / 997.0) - 0.5);
+    let audio = AudioSamples::new_multi_channel(data, sample_rate!(44100)).unwrap();
+    let direct = dir.path().join("direct.wav");
+    let converted = dir.path().join("converted.wav");
+    write_as::<i16, _, _>(&direct, &audio, WriteOptions::default()).unwrap();
+    write_with_options(&converted, &audio.to_format::<i16>(), WriteOptions::default()).unwrap();
+    audio_samples_io::set_thread_limit(None);
+    assert!(std::fs::read(&direct).unwrap() == std::fs::read(&converted).unwrap());
+}

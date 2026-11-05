@@ -155,3 +155,36 @@ fn large_flac_decodes_the_same_on_several_threads() {
     let back = read::<_, I24>(&path).unwrap();
     assert!(back.to_interleaved_vec() == audio.to_interleaved_vec());
 }
+
+/// Large saves on tmpfs go through a mapping: bytes and position must match an ordinary save, for
+/// interleaved and planar memory, a new file and a longer old one.
+#[cfg(target_os = "linux")]
+#[test]
+fn tmpfs_mapped_save_matches_plain_save() {
+    use audio_samples::{AudioSamples, sample_rate};
+    use ndarray::Array2;
+
+    let shm = std::path::Path::new("/dev/shm");
+    if !shm.is_dir() {
+        return;
+    }
+    let frames = 1_200_000usize;
+    let planar = Array2::from_shape_fn((2, frames), |(c, f)| (f as i32).wrapping_mul(31).wrapping_add(c as i32));
+    let audio = AudioSamples::new_multi_channel(planar.clone(), sample_rate!(44100)).unwrap();
+
+    let id = std::process::id();
+    let mapped = shm.join(format!("asio_mapped_{id}.wav"));
+    // A build directory rather than the temporary one, which can itself be tmpfs.
+    let plain = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("asio_plain_{id}.wav"));
+    audio_samples_io::write(&mapped, &audio).unwrap();
+    audio_samples_io::write(&plain, &audio).unwrap();
+    assert!(std::fs::read(&mapped).unwrap() == std::fs::read(&plain).unwrap());
+
+    // Over a longer file, which the save must cut.
+    std::fs::write(&mapped, vec![7u8; 30_000_000]).unwrap();
+    audio_samples_io::write(&mapped, &audio).unwrap();
+    assert!(std::fs::read(&mapped).unwrap() == std::fs::read(&plain).unwrap());
+
+    let _ = std::fs::remove_file(&mapped);
+    let _ = std::fs::remove_file(&plain);
+}

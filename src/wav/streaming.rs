@@ -1029,6 +1029,45 @@ where
     }
 }
 
+/// Fill `out` from samples that take no more room in memory than in the file: each block is read into
+/// the end of its own place and converted forward, through no buffer. Returns the samples written.
+#[inline(never)]
+fn read_in_place<R, T>(reader: &mut R, sample_type: ValidatedSampleType, out: &mut [T]) -> std::io::Result<usize>
+where
+    R: std::io::Read,
+    T: StandardSample + 'static,
+{
+    const BLOCK_SAMPLES: usize = 16 * 1024;
+    let size = sample_type.bytes_per_sample().get();
+    let mut written = 0;
+    while written < out.len() {
+        let count = BLOCK_SAMPLES.min(out.len() - written);
+        let place = &mut out[written..written + count];
+        let room = std::mem::size_of_val(place);
+        let bytes = place.as_mut_ptr().cast::<u8>();
+        let want = count * size;
+        // SAFETY: the last `want` of the block's `room` bytes belong to `place`.
+        let tail = unsafe { std::slice::from_raw_parts_mut(bytes.add(room - want), want) };
+        let got = read_full(reader, tail)?;
+        let samples = got / size;
+        // SAFETY: the bytes just read lie in `place`, and an output is at least as large as its
+        // source and they end together or the source ends later, which is the overlap allowed.
+        unsafe {
+            convert_raw(
+                sample_type,
+                bytes.add(room - want).cast_const(),
+                samples,
+                place.as_mut_ptr(),
+            )
+        };
+        written += samples;
+        if got < want {
+            break;
+        }
+    }
+    Ok(written)
+}
+
 /// Fill `out` from little-endian samples of `sample_type` in `reader`, converting block by block
 /// through a buffer on the stack. Returns the samples written.
 pub(crate) fn read_converted<R, T>(
@@ -1073,7 +1112,12 @@ where
         Ok(written)
     }
 
-    if out.len() * sample_type.bytes_per_sample().get() > SMALL {
+    let size = sample_type.bytes_per_sample().get();
+    if std::mem::size_of::<T>() >= size {
+        return read_in_place(reader, sample_type, out);
+    }
+
+    if out.len() * size > SMALL {
         go::<R, T, LARGE>(reader, sample_type, out)
     } else {
         go::<R, T, SMALL>(reader, sample_type, out)
@@ -1085,7 +1129,12 @@ where
 /// left for the caller, and the number converted is returned.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,ssse3")]
-unsafe fn int_to_float_avx2<T: 'static>(sample_type: ValidatedSampleType, bytes: &[u8], out: &mut [T]) -> usize {
+unsafe fn int_to_float_avx2<T: 'static>(
+    sample_type: ValidatedSampleType,
+    bytes: *const u8,
+    count: usize,
+    out: *mut T,
+) -> usize {
     use std::any::TypeId;
     use std::arch::x86_64::*;
 
@@ -1103,7 +1152,7 @@ unsafe fn int_to_float_avx2<T: 'static>(sample_type: ValidatedSampleType, bytes:
     };
     // Bytes one load of eight samples reads: the 24-bit load reads 4 past the samples it uses.
     let reach = if size == 3 { 28 } else { 8 * size };
-    let count = out.len().min(bytes.len() / size);
+    let byte_len = count * size;
     // In the top three bytes of each lane, so an arithmetic shift extends the sign.
     let spread = _mm256_setr_epi8(
         -1, 0, 1, 2, -1, 3, 4, 5, -1, 6, 7, 8, -1, 9, 10, 11, -1, 0, 1, 2, -1, 3, 4, 5, -1, 6, 7, 8, -1, 9, 10, 11,
@@ -1111,10 +1160,10 @@ unsafe fn int_to_float_avx2<T: 'static>(sample_type: ValidatedSampleType, bytes:
     let (neg32, pos32) = (_mm256_set1_ps(negative as f32), _mm256_set1_ps(positive as f32));
     let (neg64, pos64) = (_mm256_set1_pd(negative), _mm256_set1_pd(positive));
     let mut i = 0usize;
-    while i + 8 <= count && i * size + reach <= bytes.len() {
+    while i + 8 <= count && i * size + reach <= byte_len {
         // SAFETY: the loop condition bounds the loads by `bytes` and the stores by `out`.
         unsafe {
-            let p = bytes.as_ptr().add(i * size);
+            let p = bytes.add(i * size);
             let values = match size {
                 2 => _mm256_cvtepi16_epi32(_mm_loadu_si128(p.cast())),
                 3 => _mm256_srai_epi32::<8>(_mm256_shuffle_epi8(
@@ -1126,7 +1175,7 @@ unsafe fn int_to_float_avx2<T: 'static>(sample_type: ValidatedSampleType, bytes:
             if to_f32 {
                 let denominators = _mm256_blendv_ps(pos32, neg32, _mm256_castsi256_ps(values));
                 let result = _mm256_div_ps(_mm256_cvtepi32_ps(values), denominators);
-                _mm256_storeu_ps(out.as_mut_ptr().add(i).cast(), result);
+                _mm256_storeu_ps(out.add(i).cast(), result);
             } else {
                 for (lane, part) in [_mm256_castsi256_si128(values), _mm256_extracti128_si256::<1>(values)]
                     .into_iter()
@@ -1135,7 +1184,7 @@ unsafe fn int_to_float_avx2<T: 'static>(sample_type: ValidatedSampleType, bytes:
                     let signs = _mm256_castsi256_pd(_mm256_cvtepi32_epi64(part));
                     let denominators = _mm256_blendv_pd(pos64, neg64, signs);
                     let result = _mm256_div_pd(_mm256_cvtepi32_pd(part), denominators);
-                    _mm256_storeu_pd(out.as_mut_ptr().add(i + lane * 4).cast(), result);
+                    _mm256_storeu_pd(out.add(i + lane * 4).cast(), result);
                 }
             }
         }
@@ -1147,24 +1196,21 @@ unsafe fn int_to_float_avx2<T: 'static>(sample_type: ValidatedSampleType, bytes:
 /// Spread packed three-byte samples to I24 values, four at a time.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "ssse3,sse2")]
-unsafe fn unpack_i24_ssse3(bytes: &[u8], out: &mut [I24]) {
+unsafe fn unpack_i24_ssse3(bytes: *const u8, samples: usize, out: *mut I24) -> usize {
     use std::arch::x86_64::*;
     // I24 holds its value in the low three bytes and a zero above them.
     let spread = _mm_setr_epi8(0, 1, 2, -1, 3, 4, 5, -1, 6, 7, 8, -1, 9, 10, 11, -1);
-    let samples = out.len().min(bytes.len() / 3);
     let mut i = 0;
     // A 16-byte load covers four samples plus four more bytes, so stop while those exist.
-    while i + 4 <= samples && (i + 4) * 3 + 4 <= bytes.len() {
+    while i + 4 <= samples && (i + 4) * 3 + 4 <= samples * 3 {
         // SAFETY: the loop condition bounds both the 16-byte load and the 16-byte store.
         unsafe {
-            let v = _mm_loadu_si128(bytes.as_ptr().add(i * 3).cast());
-            _mm_storeu_si128(out.as_mut_ptr().add(i).cast(), _mm_shuffle_epi8(v, spread));
+            let v = _mm_loadu_si128(bytes.add(i * 3).cast());
+            _mm_storeu_si128(out.add(i).cast(), _mm_shuffle_epi8(v, spread));
         }
         i += 4;
     }
-    for (d, c) in out[i..samples].iter_mut().zip(bytes[i * 3..].as_chunks::<3>().0) {
-        *d = I24::from_le_bytes(*c);
-    }
+    i
 }
 
 /// Convert little-endian samples of `sample_type` into `out`.
@@ -1172,43 +1218,57 @@ fn convert_bytes_into<T>(sample_type: ValidatedSampleType, bytes: &[u8], out: &m
 where
     T: StandardSample + 'static,
 {
+    let count = out.len().min(bytes.len() / sample_type.bytes_per_sample().get());
+    // SAFETY: both slices hold `count` samples, and being a shared and a unique borrow they are disjoint.
+    unsafe { convert_raw(sample_type, bytes.as_ptr(), count, out.as_mut_ptr()) };
+}
+
+/// Convert `count` little-endian samples at `bytes` to `out`, in order.
+///
+/// # Safety
+///
+/// `bytes` holds `count` samples of `sample_type`; `out` has room for `count` values of `T`. The two
+/// may overlap if no output reaches a source byte not yet converted, as when an output is at least as
+/// large as its source and the last of each end together.
+unsafe fn convert_raw<T>(sample_type: ValidatedSampleType, bytes: *const u8, count: usize, out: *mut T)
+where
+    T: StandardSample + 'static,
+{
+    let size = sample_type.bytes_per_sample().get();
+    let mut done = 0usize;
     #[cfg(target_arch = "x86_64")]
-    if matches!(sample_type, ValidatedSampleType::I24)
-        && std::any::TypeId::of::<T>() == std::any::TypeId::of::<I24>()
-        && std::mem::size_of::<I24>() == 4
-        && is_x86_feature_detected!("ssse3")
     {
-        // SAFETY: T is I24, checked above, so the cast is the identity; the feature was detected.
-        unsafe {
-            let out = std::slice::from_raw_parts_mut(out.as_mut_ptr().cast::<I24>(), out.len());
-            unpack_i24_ssse3(bytes, out);
+        if matches!(sample_type, ValidatedSampleType::I24)
+            && std::any::TypeId::of::<T>() == std::any::TypeId::of::<I24>()
+            && std::mem::size_of::<I24>() == 4
+            && is_x86_feature_detected!("ssse3")
+        {
+            // SAFETY: T is I24, checked above; the feature was detected; the caller's guarantee covers the rest.
+            done = unsafe { unpack_i24_ssse3(bytes, count, out.cast::<I24>()) };
+        } else if is_x86_feature_detected!("avx2") {
+            // SAFETY: the feature was just detected; the caller's guarantee covers the rest.
+            done = unsafe { int_to_float_avx2(sample_type, bytes, count, out) };
         }
-        return;
     }
-    #[cfg(target_arch = "x86_64")]
-    let (bytes, out) = if is_x86_feature_detected!("avx2") {
-        // SAFETY: the feature was just detected.
-        let done = unsafe { int_to_float_avx2(sample_type, bytes, out) };
-        (&bytes[done * sample_type.bytes_per_sample().get()..], &mut out[done..])
-    } else {
-        (bytes, out)
-    };
     macro_rules! go {
         ($size:literal, |$c:ident| $value:expr) => {
-            for (d, $c) in out.iter_mut().zip(bytes.chunks_exact($size)) {
-                *d = T::convert_from($value);
+            for i in done..count {
+                // SAFETY: i < count, within the caller's bounds. The source bytes are copied out
+                // before the output is written.
+                unsafe {
+                    let $c: [u8; $size] = bytes.add(i * size).cast::<[u8; $size]>().read_unaligned();
+                    out.add(i).write(T::convert_from($value));
+                }
             }
         };
     }
     match sample_type {
         ValidatedSampleType::U8 => go!(1, |c| c[0]),
-        ValidatedSampleType::I16 => go!(2, |c| i16::from_le_bytes([c[0], c[1]])),
-        ValidatedSampleType::I24 => go!(3, |c| I24::from_le_bytes([c[0], c[1], c[2]])),
-        ValidatedSampleType::I32 => go!(4, |c| i32::from_le_bytes([c[0], c[1], c[2], c[3]])),
-        ValidatedSampleType::F32 => go!(4, |c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
-        ValidatedSampleType::F64 => go!(8, |c| f64::from_le_bytes([
-            c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]
-        ])),
+        ValidatedSampleType::I16 => go!(2, |c| i16::from_le_bytes(c)),
+        ValidatedSampleType::I24 => go!(3, |c| I24::from_le_bytes(c)),
+        ValidatedSampleType::I32 => go!(4, |c| i32::from_le_bytes(c)),
+        ValidatedSampleType::F32 => go!(4, |c| f32::from_le_bytes(c)),
+        ValidatedSampleType::F64 => go!(8, |c| f64::from_le_bytes(c)),
     }
 }
 

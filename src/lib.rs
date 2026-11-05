@@ -906,7 +906,7 @@ where
             #[cfg(feature = "wav")]
             {
                 let mut file = fastio::open_for_overwrite(path)?;
-                crate::wav::wav_file::write_wav(&mut file, audio, opts)?;
+                crate::wav::wav_file::write_wav_file(&mut file, audio, opts, &crate::wav::WavMetadata::default())?;
                 Ok(fastio::finish_overwrite(&mut file)?)
             }
         },
@@ -966,7 +966,7 @@ where
 pub fn write_as<U, P, T>(fp: P, audio: &AudioSamples<T>, opts: WriteOptions) -> AudioIOResult<()>
 where
     P: AsRef<Path>,
-    T: StandardSample + ConvertTo<U> + ConvertFrom<U> + 'static,
+    T: StandardSample + ConvertTo<U> + ConvertFrom<U> + Sync + 'static,
     U: StandardSample + 'static,
 {
     let path = fp.as_ref();
@@ -974,7 +974,12 @@ where
         #[cfg(feature = "wav")]
         FileType::WAV => {
             let mut file = fastio::open_for_overwrite(path)?;
-            crate::wav::wav_file::write_wav_as::<T, U, _>(&mut file, audio, opts, &crate::wav::WavMetadata::default())?;
+            crate::wav::wav_file::write_wav_file_as::<T, U>(
+                &mut file,
+                audio,
+                opts,
+                &crate::wav::WavMetadata::default(),
+            )?;
             Ok(fastio::finish_overwrite(&mut file)?)
         },
         #[cfg(feature = "flac")]
@@ -1034,7 +1039,7 @@ where
     T: StandardSample + 'static,
 {
     let mut file = fastio::open_for_overwrite(fp.as_ref())?;
-    crate::wav::wav_file::write_wav_with_metadata(&mut file, audio, WriteOptions::default(), metadata)?;
+    crate::wav::wav_file::write_wav_file(&mut file, audio, WriteOptions::default(), metadata)?;
     Ok(fastio::finish_overwrite(&mut file)?)
 }
 

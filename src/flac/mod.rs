@@ -46,7 +46,7 @@ mod constants;
 mod encoder;
 pub(crate) mod flac_file;
 mod md5;
-mod parallel;
+pub(crate) mod parallel;
 mod streaming;
 mod streaming_writer;
 

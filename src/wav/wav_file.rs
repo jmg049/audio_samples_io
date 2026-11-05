@@ -1246,21 +1246,57 @@ where
     T: StandardSample + 'static,
     W: Write,
 {
-    write_wav_as::<T, T, W>(writer, audio, opts, metadata)
+    write_wav_parts::<T, T, W, _>(writer, audio, opts, metadata, |writer, view, offset| {
+        crate::fastio::write_interleaved_le::<T, T, _>(writer, view, offset).map(|_| ())
+    })
 }
 
-/// Write a complete WAV file of samples of type `U`, each converted from `T` as it is written, so
-/// that no copy of the signal is made.
-pub(crate) fn write_wav_as<T, U, W>(
-    writer: W,
+/// [`write_wav_with_metadata`] to a file, which large samples on tmpfs reach through a mapping.
+pub(crate) fn write_wav_file<T>(
+    file: &mut std::fs::File,
     audio: &AudioSamples<T>,
     opts: WriteOptions,
     metadata: &WavMetadata,
 ) -> AudioIOResult<()>
 where
-    T: StandardSample + ConvertTo<U> + 'static,
+    T: StandardSample + Sync + 'static,
+{
+    write_wav_file_as::<T, T>(file, audio, opts, metadata)
+}
+
+/// Write a complete WAV file of samples of type `U`, each converted from `T` as it is written, so
+/// that no copy of the signal is made.
+pub(crate) fn write_wav_file_as<T, U>(
+    file: &mut std::fs::File,
+    audio: &AudioSamples<T>,
+    opts: WriteOptions,
+    metadata: &WavMetadata,
+) -> AudioIOResult<()>
+where
+    T: StandardSample + ConvertTo<U> + Sync + 'static,
+    U: StandardSample + 'static,
+{
+    write_wav_parts::<T, U, _, _>(file, audio, opts, metadata, |writer, view, offset| {
+        writer.flush()?;
+        if crate::fastio::write_samples_mapped::<T, U>(writer.get_ref(), view, offset)? {
+            return Ok(());
+        }
+        crate::fastio::write_interleaved_le::<T, U, _>(writer, view, offset).map(|_| ())
+    })
+}
+
+fn write_wav_parts<T, U, W, F>(
+    writer: W,
+    audio: &AudioSamples<T>,
+    opts: WriteOptions,
+    metadata: &WavMetadata,
+    write_samples: F,
+) -> AudioIOResult<()>
+where
+    T: StandardSample + 'static,
     U: StandardSample + 'static,
     W: Write,
+    F: FnOnce(&mut BufWriter<W>, ndarray::ArrayView2<'_, T>, u64) -> AudioIOResult<()>,
 {
     let sample_rate = audio.sample_rate().get();
     let channels = audio.num_channels().get() as u16;
@@ -1324,11 +1360,7 @@ where
     writer.write_all(&(data_size as u32).to_le_bytes())?;
 
     // Write audio data (interleaved for multi-channel)
-    crate::fastio::write_interleaved_le::<T, U, _>(
-        &mut writer,
-        channel_frame_view(audio),
-        (12 + fmt_total_size + 8) as u64,
-    )?;
+    write_samples(&mut writer, channel_frame_view(audio), (12 + fmt_total_size + 8) as u64)?;
 
     // Add padding byte if needed
     if data_size % 2 == 1 {
@@ -1352,7 +1384,7 @@ impl<'a> AudioFileWrite for WavFile<'a> {
     {
         let audio = self.read::<T>()?;
         let mut file = crate::fastio::open_for_overwrite(out_fp.as_ref())?;
-        write_wav(&mut file, &audio, WriteOptions::default())?;
+        write_wav_file(&mut file, &audio, WriteOptions::default(), &WavMetadata::default())?;
         Ok(crate::fastio::finish_overwrite(&mut file)?)
     }
 }

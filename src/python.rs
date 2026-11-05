@@ -307,10 +307,6 @@ where
     Some(Ok((array.unbind(), info)))
 }
 
-/// Compressed size from which a FLAC file is decoded as a whole rather than as a stream.
-#[cfg(feature = "flac")]
-const PARALLEL_FLAC_MIN_BYTES: u64 = 512 * 1024;
-
 /// FLAC: decode into a C-order `(channels, frames)` NumPy array in one pass, with the GIL
 /// released. Frames decode to planar samples, so the array needs no reordering.
 ///
@@ -347,13 +343,21 @@ where
     let decoded = py.detach(|| {
         // Whole-file decoding can divide the stream between threads; it reports failure for any
         // stream that needs the error handling of the sequential decoder below.
-        if std::fs::metadata(path).is_ok_and(|m| m.len() >= PARALLEL_FLAC_MIN_BYTES)
-            && let Ok(whole) = crate::flac::FlacFile::open_with_options(path, OpenOptions::default())
+        let (stream_info, data_start) = flac.stream_parameters();
+        if let Ok(metadata) = std::fs::metadata(path)
             // SAFETY: the array holds `frames` samples for each of its channels.
-            && let Ok(Some(written)) = unsafe { whole.decode_planar_into(data_ptr_usize as *mut T, frames) }
-            && written == frames
+            && unsafe {
+                crate::flac::parallel::decode_planar_file(
+                    path,
+                    data_start,
+                    metadata.len(),
+                    stream_info,
+                    data_ptr_usize as *mut T,
+                    frames,
+                )
+            }
         {
-            return Ok(written);
+            return Ok(frames);
         }
         // SAFETY: as in `read_pyarray_direct`: the fresh array is kept alive by `array` and no
         // other thread has seen it; it holds `total_samples` values.
