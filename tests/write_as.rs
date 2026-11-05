@@ -67,8 +67,12 @@ fn flac_without_md5_differs_only_in_the_signature() {
     assert_eq!(with[SIGNATURE.end..], without[SIGNATURE.end..]);
 }
 
+/// The thread limit belongs to the process, and the tests of this file run at the same time.
+static THREAD_LIMIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn thread_limit_replaces_the_default() {
+    let _guard = THREAD_LIMIT.lock().unwrap();
     audio_samples_io::set_thread_limit(NonZeroUsize::new(3));
     assert_eq!(audio_samples_io::thread_limit(), 3);
     audio_samples_io::set_thread_limit(None);
@@ -82,6 +86,7 @@ fn write_as_on_tmpfs_matches_converting_first() {
     let Ok(dir) = tempfile::tempdir_in("/dev/shm") else {
         return;
     };
+    let _guard = THREAD_LIMIT.lock().unwrap();
     audio_samples_io::set_thread_limit(NonZeroUsize::new(4));
     let data = Array2::from_shape_fn((2, 12_000_000), |(c, i)| (((i + c) % 997) as f32 / 997.0) - 0.5);
     let audio = AudioSamples::new_multi_channel(data, sample_rate!(44100)).unwrap();
