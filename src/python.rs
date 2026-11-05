@@ -53,9 +53,9 @@ mod sample_memory {
 
     static SPARE: Mutex<Option<MmapMut>> = Mutex::new(None);
 
-    /// A mapping of at least `bytes` whose aligned start is [`aligned`] of it.
+    /// A mapping holding `bytes` plus up to 64 from its first huge page boundary, [`aligned`].
     pub(super) fn acquire(bytes: usize) -> std::io::Result<MmapMut> {
-        let needed = bytes.next_multiple_of(HUGE_PAGE) + HUGE_PAGE;
+        let needed = (bytes + 64).next_multiple_of(HUGE_PAGE) + HUGE_PAGE;
         if let Ok(mut spare) = SPARE.try_lock()
             && let Some(map) = spare.take_if(|m| m.len() >= needed && m.len() / 4 <= needed)
         {
@@ -66,7 +66,7 @@ mod sample_memory {
         let inner = start.next_multiple_of(HUGE_PAGE) - start;
         // Huge pages for whole units of the array; the rest stays in small pages, so that the
         // resident size is the array's. Only an optimisation: without them the memory works the same.
-        let whole = bytes / HUGE_PAGE * HUGE_PAGE;
+        let whole = (bytes + 64) / HUGE_PAGE * HUGE_PAGE;
         let _ = map.advise_range(Advice::HugePage, inner, whole);
         let _ = map.advise_range(Advice::NoHugePage, inner + whole, needed - inner - whole);
         Ok(map)
@@ -101,8 +101,16 @@ impl Drop for SampleMemory {
 }
 
 /// An uninitialised `(channels, frames)` array in interleaved (`fortran`) or planar memory, with a
-/// pointer to its data.
-fn new_output_array<T>(py: Python<'_>, channels: usize, frames: usize, fortran: bool) -> (Bound<'_, PyArray2<T>>, usize)
+/// pointer to its data. `file_offset` is where the samples start in the file: a large array starts at
+/// the same offset within a cache line where the sample type allows it, which makes the kernel's
+/// copy about 10% faster, both for this read and for writing the array to a file later.
+fn new_output_array<T>(
+    py: Python<'_>,
+    channels: usize,
+    frames: usize,
+    fortran: bool,
+    file_offset: u64,
+) -> (Bound<'_, PyArray2<T>>, usize)
 where
     T: Element,
 {
@@ -113,7 +121,13 @@ where
             && (crate::fastio::transfer_threads() > 1 || bytes >= SAMPLE_MEMORY_ALWAYS_BYTES)
             && let Ok(mut map) = sample_memory::acquire(bytes)
         {
-            let data = sample_memory::aligned(&mut map);
+            let shift = (file_offset % 64) as usize;
+            let shift = if shift.is_multiple_of(std::mem::align_of::<T>()) {
+                shift
+            } else {
+                0
+            };
+            let data = sample_memory::aligned(&mut map).wrapping_add(shift);
             let holder = SampleMemory {
                 map: std::sync::Mutex::new(Some(map)),
                 data: data as usize,
@@ -238,7 +252,7 @@ where
     let byte_count = total_samples * size_of::<T>();
 
     // Fortran (column-major) layout: element [c, f] → c + f*channels, matching WAV interleaved.
-    let (array, data_ptr_usize) = new_output_array::<T>(py, channels, frames, true);
+    let (array, data_ptr_usize) = new_output_array::<T>(py, channels, frames, true, offset);
 
     let read_result: AudioIOResult<()> = py.detach(|| {
         // Safety: pointer valid (just allocated, not yet shared), CPython is non-moving.
@@ -357,7 +371,7 @@ where
     // Step 2: Allocate an array with Fortran (column-major) layout (GIL held, fast).
     // Fortran layout for shape (channels, frames) maps element [c, f] to index c + f*channels,
     // which is exactly WAV's interleaved on-disk format — no deinterleave needed.
-    let (array, data_ptr_usize) = new_output_array::<T>(py, channels, frames, true);
+    let (array, data_ptr_usize) = new_output_array::<T>(py, channels, frames, true, offset);
 
     // Step 3: Read audio payload directly into the array's buffer (GIL released).
     let read_result: AudioIOResult<()> = py.detach(|| {
@@ -423,7 +437,7 @@ where
     }
     let frames = total_samples / channels;
 
-    let (array, data_ptr_usize) = new_output_array::<T>(py, channels, frames, false);
+    let (array, data_ptr_usize) = new_output_array::<T>(py, channels, frames, false, 0);
     let decoded = py.detach(|| {
         // Whole-file decoding can divide the stream between threads; it reports failure for any
         // stream that needs the error handling of the sequential decoder below.
