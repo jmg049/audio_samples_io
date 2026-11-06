@@ -1073,8 +1073,8 @@ where
 {
     // Use extensible format for more than 2 channels or non-standard bit depths.
     // 8-bit, 16-bit, and 32-bit PCM/float formats use base format for 1-2 channels
-    // for maximum compatibility (e.g. soundfile/libsndfile doesn't support
-    // WAVE_FORMAT_EXTENSIBLE with 8-bit PCM).
+    // for maximum compatibility: some readers reject WAVE_FORMAT_EXTENSIBLE with
+    // 8-bit PCM.
     channels > 2 || (T::BITS != 8 && T::BITS != 16 && T::BITS != 32)
 }
 
