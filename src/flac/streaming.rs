@@ -406,6 +406,7 @@ impl<R: std::io::Read> StreamedFlacFile<R> {
     }
 
     /// The stream's parameters and where its frames start, for decoding the file as a whole.
+    #[cfg(feature = "numpy")]
     pub(crate) const fn stream_parameters(&self) -> (&StreamInfo, u64) {
         (&self.stream_info, self.audio_data_start)
     }

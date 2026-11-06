@@ -27,7 +27,6 @@ pub mod streaming;
 #[cfg(any(feature = "wav", feature = "flac"))]
 pub use crate::streaming::StreamedAudioWriter;
 
-#[allow(dead_code)] // Which helpers are used depends on the enabled formats.
 mod fastio;
 pub use crate::fastio::{set_thread_limit, thread_limit};
 #[cfg(feature = "numpy")]
@@ -35,17 +34,21 @@ pub mod python;
 
 #[cfg(feature = "resampling")]
 use std::num::NonZeroU32;
+#[cfg(any(feature = "wav", feature = "flac"))]
 use std::{
     any::TypeId,
     fs::File,
-    io::{BufReader, BufWriter, Read, Seek, Write},
+    io::{BufReader, BufWriter},
+};
+use std::{
+    io::{Read, Seek, Write},
     path::Path,
 };
 
 #[cfg(feature = "resampling")]
 pub use audio_samples::operations::ResamplingQuality;
 #[cfg(feature = "resampling")]
-pub use audio_samples::operations::resample;
+pub use audio_samples::resample;
 use audio_samples::{
     AudioSamples, AudioTypeConversion,
     traits::{ConvertFrom, ConvertTo, StandardSample},
@@ -61,7 +64,9 @@ pub use crate::{
     types::{BaseAudioInfo, FileType, OpenOptions, ValidatedSampleType, WriteOptions},
 };
 
+#[cfg(feature = "wav")]
 pub(crate) const MAX_WAV_SIZE: u64 = 2 * 1024 * 1024 * 1024; // 2GB limit
+#[cfg(any(feature = "wav", feature = "flac", feature = "aiff"))]
 pub(crate) const MAX_MMAP_SIZE: u64 = 512 * 1024 * 1024; // 512MB for memory mapping
 
 /// Buffer of the streamed writers that open a file themselves.
@@ -895,6 +900,9 @@ where
     T: StandardSample + 'static,
 {
     let path = fp.as_ref();
+    // Every format is compiled out, so nothing reads the signal.
+    #[cfg(not(any(feature = "wav", feature = "flac", feature = "aiff")))]
+    let _ = (audio, opts);
 
     match FileType::from_path(path) {
         FileType::WAV => {
@@ -1106,6 +1114,12 @@ where
     T: StandardSample + 'static,
     W: Write,
 {
+    // Only the WAV writer takes options; with no format compiled in, nothing is written.
+    #[cfg(not(feature = "wav"))]
+    let _ = opts;
+    #[cfg(not(any(feature = "wav", feature = "flac", feature = "aiff")))]
+    let _ = (writer, audio);
+
     match format {
         FileType::WAV => {
             #[cfg(not(feature = "wav"))]

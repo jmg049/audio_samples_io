@@ -8,7 +8,9 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use audio_samples::{AudioSamples, I24, SampleType, traits::StandardSample};
+#[cfg(any(feature = "wav", feature = "flac"))]
+use audio_samples::I24;
+use audio_samples::SampleType;
 use memmap2::Mmap;
 
 use crate::error::AudioIOError;
@@ -573,9 +575,10 @@ impl Default for OpenOptions {
 }
 
 /// The samples of `audio` as a `(channels, frames)` view, for mono and multi-channel alike.
-pub(crate) fn channel_frame_view<'b, T>(audio: &'b AudioSamples<'_, T>) -> ndarray::ArrayView2<'b, T>
+#[cfg(any(feature = "wav", feature = "flac", feature = "aiff"))]
+pub(crate) fn channel_frame_view<'b, T>(audio: &'b audio_samples::AudioSamples<'_, T>) -> ndarray::ArrayView2<'b, T>
 where
-    T: StandardSample,
+    T: audio_samples::traits::StandardSample,
 {
     match audio.data() {
         audio_samples::AudioData::Mono(m) => m.as_view().insert_axis(ndarray::Axis(0)),
@@ -588,6 +591,7 @@ where
 /// # Safety
 ///
 /// `out` must be valid for `samples.len() * 3` bytes.
+#[cfg(any(feature = "wav", feature = "flac"))]
 pub(crate) unsafe fn pack_i24(samples: &[I24], out: *mut u8) {
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("ssse3") && std::mem::size_of::<I24>() == 4 && cfg!(target_endian = "little") {
@@ -601,6 +605,7 @@ pub(crate) unsafe fn pack_i24(samples: &[I24], out: *mut u8) {
     }
 }
 
+#[cfg(any(feature = "wav", feature = "flac"))]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "ssse3,sse2")]
 unsafe fn pack_i24_ssse3(samples: &[I24], out: *mut u8) {

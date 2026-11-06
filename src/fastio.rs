@@ -5,37 +5,54 @@
 //! environment variable `AUDIO_SAMPLES_IO_THREADS` replaces the cap, and `1` keeps everything on the
 //! calling thread.
 
+#[cfg(any(feature = "wav", feature = "flac"))]
 use std::any::TypeId;
+#[cfg(any(feature = "wav", feature = "flac", feature = "aiff"))]
 use std::fs::File;
-use std::io::{self, Seek, Write};
+#[cfg(any(feature = "wav", feature = "flac"))]
+use std::io::Write;
+#[cfg(any(feature = "wav", feature = "flac", feature = "aiff"))]
+use std::io::{self, Seek};
+#[cfg(any(feature = "wav", feature = "flac"))]
 use std::marker::PhantomData;
+#[cfg(any(feature = "wav", feature = "flac"))]
 use std::mem;
+#[cfg(any(feature = "wav", feature = "flac", feature = "aiff"))]
 use std::path::Path;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(any(feature = "wav", feature = "flac"))]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(any(feature = "wav", feature = "flac"))]
 use audio_samples::{
     I24,
     traits::{ConvertTo, StandardSample},
 };
+#[cfg(any(feature = "wav", feature = "flac"))]
 use ndarray::{ArrayView2, Axis};
 
+#[cfg(any(feature = "wav", feature = "flac"))]
 use crate::error::AudioIOResult;
 
 /// Each thread of a file transfer gets at least this many bytes: below it, starting a thread
 /// costs more than it saves.
+#[cfg(feature = "wav")]
 pub(crate) const TRANSFER_BYTES_PER_THREAD: usize = 512 * 1024;
 
 /// A transfer below this stays on the calling thread: two threads would not pay for themselves.
+#[cfg(feature = "wav")]
 pub(crate) const TRANSFER_MIN_BYTES: usize = 3 * 512 * 1024;
 
 /// Most threads a file transfer uses: the copy is limited by memory bandwidth beyond this.
 const MAX_TRANSFER_THREADS: usize = 8;
 /// Most threads a decode uses.
+#[cfg(feature = "flac")]
 const MAX_DECODE_THREADS: usize = 8;
 
 /// Stack of a transfer thread: the work on them uses little, and a stack of a huge page or more
 /// could be backed by one.
+#[cfg(any(feature = "wav", feature = "flac"))]
 const THREAD_STACK_BYTES: usize = 256 * 1024;
 
 /// The limit set by [`set_thread_limit`]; zero when there is none.
@@ -82,10 +99,13 @@ pub(crate) fn transfer_threads() -> usize {
 
 /// Held by the one transfer allowed to use several threads at a time. A program that reads many
 /// files on its own threads already has the parallelism, and more would only contend.
+#[cfg(any(feature = "wav", feature = "flac"))]
 pub(crate) struct ThreadsPermit(bool);
 
+#[cfg(any(feature = "wav", feature = "flac"))]
 static THREADED_TRANSFER: AtomicBool = AtomicBool::new(false);
 
+#[cfg(any(feature = "wav", feature = "flac"))]
 impl ThreadsPermit {
     /// Claim the permit if it is free.
     pub(crate) fn try_acquire() -> Self {
@@ -98,6 +118,7 @@ impl ThreadsPermit {
     }
 }
 
+#[cfg(any(feature = "wav", feature = "flac"))]
 impl Drop for ThreadsPermit {
     fn drop(&mut self) {
         if self.0 {
@@ -107,6 +128,7 @@ impl Drop for ThreadsPermit {
 }
 
 /// Threads for CPU-bound decoding.
+#[cfg(feature = "flac")]
 pub(crate) fn decode_threads() -> usize {
     match available_threads() {
         (n, true) => n,
@@ -119,6 +141,7 @@ pub(crate) fn decode_threads() -> usize {
 ///
 /// On Linux the threads are plain pthreads. A `std::thread` also sets up a signal stack, a thread
 /// handle and thread-local destructors, which came to one more resident page per thread.
+#[cfg(any(feature = "wav", feature = "flac"))]
 #[cfg(target_os = "linux")]
 pub(crate) fn run_on_threads<F>(count: usize, work: F) -> bool
 where
@@ -181,6 +204,7 @@ where
 
 /// Run `work(0..count)`, each index on its own thread except the last, which runs here. An index
 /// whose thread cannot be started runs here as well. True if every call returned true.
+#[cfg(any(feature = "wav", feature = "flac"))]
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn run_on_threads<F>(count: usize, work: F) -> bool
 where
@@ -211,12 +235,14 @@ where
 }
 
 /// Fill `buf` from `file` at `offset`, leaving the file position alone.
+#[cfg(feature = "wav")]
 #[cfg(unix)]
 pub(crate) fn read_exact_at(file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
     use std::os::unix::fs::FileExt;
     file.read_exact_at(buf, offset)
 }
 
+#[cfg(feature = "wav")]
 #[cfg(windows)]
 pub(crate) fn read_exact_at(file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
     use std::os::windows::fs::FileExt;
@@ -233,6 +259,7 @@ pub(crate) fn read_exact_at(file: &File, offset: u64, buf: &mut [u8]) -> io::Res
 }
 
 /// Without positioned reads, the single file position rules out threads.
+#[cfg(feature = "wav")]
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn read_exact_at(mut file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
     use std::io::{Read, SeekFrom};
@@ -243,6 +270,7 @@ pub(crate) fn read_exact_at(mut file: &File, offset: u64, buf: &mut [u8]) -> io:
 /// Whether a range of `file` must come from the device. Threads then only split one sequential
 /// stream into several, which reads 3 to 8% slower on a SATA SSD and worse on a hard disk, and the
 /// copy they speed up is a small part of the time. Linux tells, from 6.5; elsewhere, assume cached.
+#[cfg(feature = "wav")]
 #[cfg(target_os = "linux")]
 pub(crate) fn range_is_cold(file: &File, offset: u64, len: usize) -> bool {
     use std::os::fd::AsRawFd;
@@ -281,12 +309,14 @@ pub(crate) fn range_is_cold(file: &File, offset: u64, len: usize) -> bool {
     result == 0 && stat.nr_cache < pages - pages / 8
 }
 
+#[cfg(feature = "wav")]
 #[cfg(not(target_os = "linux"))]
 pub(crate) const fn range_is_cold(_file: &File, _offset: u64, _len: usize) -> bool {
     false
 }
 
 /// The threads a transfer of `len` bytes from `file` should use, given a permit.
+#[cfg(feature = "wav")]
 pub(crate) fn threads_for_read(permit: &ThreadsPermit, file: &File, offset: u64, len: usize) -> usize {
     let threads = permit.threads(transfer_threads().min(len / TRANSFER_BYTES_PER_THREAD));
     if threads <= 1 || len < TRANSFER_MIN_BYTES || range_is_cold(file, offset, len) {
@@ -297,6 +327,7 @@ pub(crate) fn threads_for_read(permit: &ThreadsPermit, file: &File, offset: u64,
 }
 
 /// [`read_exact_at`], on several threads for a large `buf`.
+#[cfg(feature = "wav")]
 pub(crate) fn read_exact_at_parallel(file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
     let permit = ThreadsPermit::try_acquire();
     let threads = threads_for_read(&permit, file, offset, buf.len());
@@ -331,12 +362,14 @@ pub(crate) fn read_exact_at_parallel(file: &File, offset: u64, buf: &mut [u8]) -
 
 /// A reader over part of a file that leaves the file position alone, so that several threads
 /// can read one file.
+#[cfg(feature = "wav")]
 #[cfg(any(unix, windows))]
 pub(crate) struct FileAt<'a> {
     pub file: &'a File,
     pub offset: u64,
 }
 
+#[cfg(feature = "wav")]
 #[cfg(any(unix, windows))]
 impl io::Read for FileAt<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -355,6 +388,7 @@ impl io::Read for FileAt<'_> {
 /// Truncating first costs more than the write in two common cases: tmpfs frees every page and
 /// allocates it again, and btrfs flushes a file truncated to zero when it is closed. Overwriting
 /// reuses the pages. Permissions, ownership and hard links stay as they are, as with truncation.
+#[cfg(any(feature = "wav", feature = "flac", feature = "aiff"))]
 pub(crate) fn open_for_overwrite(path: &Path) -> io::Result<File> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(false);
@@ -366,6 +400,7 @@ pub(crate) fn open_for_overwrite(path: &Path) -> io::Result<File> {
 
 /// Cut a file opened by [`open_for_overwrite`] at the current write position. Anything that is
 /// not a regular file, such as a pipe, is left alone.
+#[cfg(any(feature = "wav", feature = "flac", feature = "aiff"))]
 pub(crate) fn finish_overwrite(file: &mut File) -> io::Result<()> {
     let metadata = file.metadata()?;
     if metadata.is_file() {
@@ -380,6 +415,7 @@ pub(crate) fn finish_overwrite(file: &mut File) -> io::Result<()> {
 /// Open `path` for a streamed write, whose length is unknown until it ends. The old contents
 /// shrink to one byte instead of none: see [`open_for_overwrite`] for what zero costs, and every
 /// streamed format writes its header over that byte at once.
+#[cfg(any(feature = "wav", feature = "flac"))]
 pub(crate) fn open_for_streaming(path: &Path) -> io::Result<File> {
     let file = open_for_overwrite(path)?;
     let metadata = file.metadata()?;
@@ -392,6 +428,7 @@ pub(crate) fn open_for_streaming(path: &Path) -> io::Result<File> {
 /// Bytes of interleaved samples converted at a time. The buffer lives on the stack, so writing
 /// a file makes no allocation that grows with its length. Smaller tiles mean more write calls, each
 /// of which costs about as much as converting a few KiB.
+#[cfg(any(feature = "wav", feature = "flac"))]
 const TILE_BYTES: usize = 64 * 1024;
 
 /// Convert `count` frames from the channel runs in `runs` to `U`, writing them interleaved
@@ -400,6 +437,7 @@ const TILE_BYTES: usize = 64 * 1024;
 /// # Safety
 ///
 /// `out` must be valid for `count * runs.len() * U::BYTES` bytes, and each run for `count` samples.
+#[cfg(any(feature = "wav", feature = "flac"))]
 #[inline(always)]
 unsafe fn pack_frames<T, U>(runs: &[&[T]], count: usize, out: *mut u8)
 where
@@ -430,6 +468,7 @@ where
 /// number of bytes written. `file_offset` is where the samples start in the destination: each tile
 /// is placed a little above that offset within a page, which makes the kernel's copy into the
 /// page cache about 15% faster than when the source's page offset is the lower of the two.
+#[cfg(any(feature = "wav", feature = "flac"))]
 pub(crate) fn write_interleaved_le<T, U, W>(
     writer: &mut W,
     view: ArrayView2<'_, T>,
@@ -501,6 +540,7 @@ where
 }
 
 /// Frames of a view, for packing into the file's layout in any order.
+#[cfg(any(feature = "wav", feature = "flac"))]
 struct FrameSource<'a, T, U> {
     view: ArrayView2<'a, T>,
     /// The view's memory, when interleaved.
@@ -513,6 +553,7 @@ struct FrameSource<'a, T, U> {
     _to: PhantomData<U>,
 }
 
+#[cfg(any(feature = "wav", feature = "flac"))]
 impl<'a, T, U> FrameSource<'a, T, U>
 where
     T: StandardSample + ConvertTo<U> + 'static,
@@ -594,10 +635,12 @@ where
 }
 
 /// Bytes of samples from which [`write_samples_mapped`] is used.
+#[cfg(feature = "wav")]
 #[cfg(target_os = "linux")]
 const MAPPED_MIN_BYTES: usize = 8 * 1024 * 1024;
 
 /// Whether `file` lives in memory, where its pages can be filled from several threads at once.
+#[cfg(feature = "wav")]
 #[cfg(target_os = "linux")]
 fn is_tmpfs(file: &File) -> bool {
     use std::os::fd::AsRawFd;
@@ -616,6 +659,7 @@ fn is_tmpfs(file: &File) -> bool {
 ///
 /// Each thread populates its pages before touching them, so a full filesystem is an error here and
 /// not a signal. Only another process truncating the file during the write can still raise one.
+#[cfg(feature = "wav")]
 #[cfg(target_os = "linux")]
 pub(crate) fn write_samples_mapped<T, U>(file: &File, view: ArrayView2<'_, T>, file_offset: u64) -> io::Result<bool>
 where
@@ -689,6 +733,7 @@ where
     Ok(true)
 }
 
+#[cfg(feature = "wav")]
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn write_samples_mapped<T, U>(_file: &File, _view: ArrayView2<'_, T>, _file_offset: u64) -> io::Result<bool>
 where
