@@ -119,7 +119,7 @@ impl DecodedAudio {
         }
     }
 
-    /// Read samples in planar format as a flat Vec<T>.
+    /// Read samples in planar format as a flat `Vec<T>`.
     /// Channels are concatenated: [ch0_samples..., ch1_samples..., ...]
     pub fn read_samples_planar<T>(&self) -> AudioIOResult<Vec<T>>
     where

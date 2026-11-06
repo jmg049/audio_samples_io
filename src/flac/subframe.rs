@@ -699,7 +699,7 @@ pub(crate) fn encode_subframe_into(
 
 /// Encode a subframe with automatic type selection.
 ///
-/// Thin wrapper around [`encode_subframe_into`] for the parallel encoder path and
+/// Thin wrapper around `encode_subframe_into` for the parallel encoder path and
 /// external callers. For the sequential path, use `encode_subframe_into` directly.
 pub fn encode_subframe(
     samples: &[i32],

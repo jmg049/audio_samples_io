@@ -1196,7 +1196,7 @@ where
 /// Optional metadata chunks written after the audio `data` chunk.
 ///
 /// Lets callers persist tags and markers that would otherwise be lost on a read→write round-trip.
-/// Build one and pass it to [`write_wav_with_metadata`] / [`crate::write_with_metadata`].
+/// Build one and pass it to [`crate::write_with_metadata`] or [`crate::write_with_metadata_to`].
 #[derive(Debug, Default, Clone)]
 pub struct WavMetadata {
     /// LIST/INFO tags (title, artist, …).

@@ -635,11 +635,11 @@ where
 /// Create a streaming FLAC writer to a file path.
 ///
 /// FLAC is a block-based codec, so this writer buffers each block and encodes it
-/// incrementally as frames are written, using the same encoder as the bulk [`write`]
+/// incrementally as frames are written, using the same encoder as the bulk [`write`](fn@crate::write)
 /// path. The STREAMINFO header's total sample count is back-patched on
 /// [`finalize`](crate::traits::AudioStreamWriter::finalize), which is why a seekable
 /// destination is required. The output bit depth is derived from `T` (16-bit for `i16`,
-/// 24-bit otherwise), matching [`write`].
+/// 24-bit otherwise), matching [`write`](fn@crate::write).
 ///
 /// FLAC's concrete return type can't be folded into [`create_streamed`] (which is
 /// WAV-only); this mirrors the [`open_streamed`]/[`open_streamed_flac`] split.
@@ -876,7 +876,7 @@ where
 
 /// Write audio samples to a file with explicit [`WriteOptions`].
 ///
-/// Identical to [`write`] but lets you control the write-buffer size:
+/// Identical to [`write`](fn@crate::write) but lets you control the write-buffer size:
 ///
 /// ```no_run
 /// use audio_samples_io::{write_with_options, WriteOptions};
@@ -1011,7 +1011,7 @@ where
 
 /// Write a WAV file with trailing metadata chunks (LIST/INFO tags, cue points).
 ///
-/// Like [`write`], but also serialises the given [`WavMetadata`](crate::wav::WavMetadata) after
+/// Like [`write`](fn@crate::write), but also serialises the given [`WavMetadata`](crate::wav::WavMetadata) after
 /// the audio data — letting you persist tags/markers that a plain read→write round-trip would
 /// drop. WAV only.
 ///

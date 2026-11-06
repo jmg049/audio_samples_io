@@ -49,7 +49,7 @@ use crate::{
 /// # Bit depth
 ///
 /// The output bit depth is fixed at construction from the configured sample type, matching
-/// [`write_flac`]: 16-bit for `i16`, 24-bit for every other supported type. Each call to
+/// [`write_flac`](crate::flac::write_flac): 16-bit for `i16`, 24-bit for every other supported type. Each call to
 /// [`write_frames`](AudioStreamWrite::write_frames) must supply samples that map to the
 /// same bit depth.
 ///

@@ -312,11 +312,11 @@ unsafe fn lpc_restore_fast<const ORDER: usize>(buf: *mut i32, res: *const i32, n
 /// Each order is a finite difference, written as direct formulas so LLVM can
 /// auto-vectorize the loop (no loop-carried dependency, no multiplications).
 ///
-/// - Order 0: residual = sample
-/// - Order 1: residual = s[i] - s[i-1]
-/// - Order 2: residual = s[i] - 2*s[i-1] + s[i-2]   (wrapping i32)
-/// - Order 3: residual = s[i] - 3*s[i-1] + 3*s[i-2] - s[i-3]
-/// - Order 4: residual = s[i] - 4*s[i-1] + 6*s[i-2] - 4*s[i-3] + s[i-4]
+/// - Order 0: `residual = sample`
+/// - Order 1: `residual = s[i] - s[i-1]`
+/// - Order 2: `residual = s[i] - 2*s[i-1] + s[i-2]`   (wrapping i32)
+/// - Order 3: `residual = s[i] - 3*s[i-1] + 3*s[i-2] - s[i-3]`
+/// - Order 4: `residual = s[i] - 4*s[i-1] + 6*s[i-2] - 4*s[i-3] + s[i-4]`
 pub fn fixed_predictor_residual(samples: &[i32], order: usize) -> Result<Vec<i32>, FlacError> {
     if order > MAX_FIXED_ORDER {
         return Err(FlacError::InvalidFixedOrder { order: order as u8 });
@@ -927,7 +927,7 @@ fn autocorrelation_scalar(samples: &[i32], max_order: usize) -> Vec<f64> {
 /// Levinson-Durbin recursion for LPC coefficient computation.
 ///
 /// # Arguments
-/// * `r` - Autocorrelation coefficients (r[0] must be > 0)
+/// * `r` - Autocorrelation coefficients (`r[0]` must be > 0)
 /// * `order` - Desired LPC order
 ///
 /// # Returns

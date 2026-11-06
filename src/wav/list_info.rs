@@ -92,7 +92,7 @@ fn append_info_subchunk(body: &mut Vec<u8>, id: &[u8; 4], value: &str) {
 impl InfoMetadata {
     /// Serialise to a complete `LIST`/`INFO` chunk (chunk header + `INFO` tag + subchunks,
     /// word-aligned). Returns `None` when there is no metadata to write, so callers can skip
-    /// emitting an empty chunk. This is the write-side counterpart of [`InfoMetadata::parse`].
+    /// emitting an empty chunk. This is the write-side counterpart of `InfoMetadata::parse`.
     pub fn to_list_chunk(&self) -> Option<Vec<u8>> {
         let mut body = Vec::new();
         body.extend_from_slice(INFO_TYPE.as_bytes());
