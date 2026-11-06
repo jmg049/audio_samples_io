@@ -1,0 +1,64 @@
+# Formatting and clippy on every push to main and every pull request. Clippy
+# runs once per feature set, and every warning fails the job. Lint levels are
+# set in .cargo/config.toml.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.99.1"
+
+jobs:
+  fmt:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            flags: ""
+          - name: full
+            flags: "--features full"
+          - name: full+numpy
+            flags: "--features full,numpy"
+          - name: no-default
+            flags: "--no-default-features"
+          - name: all-features
+            flags: "--all-features"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.name }}
+      - name: clippy
+        env:
+          FLAGS: ${{ matrix.flags }}
+        run: |
+          read -ra flags <<< "$FLAGS"
+          cargo clippy --all-targets "${flags[@]}" -- -D warnings

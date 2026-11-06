@@ -1,0 +1,21 @@
+# Pre-commit hooks (https://pre-commit.com).
+#
+#   pre-commit install            # once per clone
+#   pre-commit run --all-files    # run everything manually
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt --check
+        entry: cargo fmt --all -- --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      # Every warning is an error, for each feature set CI checks.
+      - id: cargo-clippy
+        name: cargo clippy (every warning is an error)
+        entry: bash -c 'for f in "" "--features full" "--features full,numpy" "--no-default-features" "--all-features"; do cargo clippy --all-targets $f -- -D warnings || exit 1; done'
+        language: system
+        pass_filenames: false
+        files: ^(src/.*\.rs|tests/.*\.rs|benches/.*\.rs|examples/.*\.rs|build\.rs|Cargo\.toml|clippy\.toml|\.cargo/config\.toml)$
