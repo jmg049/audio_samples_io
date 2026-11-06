@@ -26,6 +26,8 @@ use crate::flac::subframe::{SubframeHeader, SubframeType};
 /// Largest supported partition order. Partition order 8 means 256 partitions.
 const MAX_PARTITION_ORDER: u8 = 8;
 const MAX_PARTITIONS: usize = 1 << MAX_PARTITION_ORDER;
+/// Most channels in a FLAC stream.
+const MAX_CHANNELS: usize = 8;
 const MAX_LPC_ORDER: usize = crate::flac::constants::MAX_LPC_ORDER;
 
 /// Marks a partition of zeros in [`RiceChoice::params`]: escape code with zero-width samples.
@@ -253,26 +255,46 @@ impl FrameEncoder {
         sample_rate: u32,
         frame_number: u64,
     ) -> Result<&[u8], FlacError> {
+        // One encoder body for every caller's channel container.
+        let mut slices = [&[][..]; MAX_CHANNELS];
+        if channels.len() > MAX_CHANNELS {
+            return Err(FlacError::InvalidChannelCount {
+                channels: u8::try_from(channels.len()).unwrap_or(u8::MAX),
+            });
+        }
+        for (slice, channel) in slices.iter_mut().zip(channels) {
+            *slice = channel.as_ref();
+        }
+        self.encode_slices(&slices[..channels.len()], bits_per_sample, sample_rate, frame_number)
+    }
+
+    fn encode_slices(
+        &mut self,
+        channels: &[&[i32]],
+        bits_per_sample: u8,
+        sample_rate: u32,
+        frame_number: u64,
+    ) -> Result<&[u8], FlacError> {
         #[cfg(target_arch = "x86_64")]
         if self.use_avx2 {
             // SAFETY: `new` found the features this function enables.
             unsafe { self.encode_avx2(channels, bits_per_sample, sample_rate, frame_number)? };
             return Ok(self.bits.data());
         }
-        self.encode_generic::<S, false>(channels, bits_per_sample, sample_rate, frame_number)?;
+        self.encode_generic::<&[i32], false>(channels, bits_per_sample, sample_rate, frame_number)?;
         Ok(self.bits.data())
     }
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,fma,bmi1,bmi2,lzcnt")]
-    unsafe fn encode_avx2<S: AsRef<[i32]>>(
+    unsafe fn encode_avx2(
         &mut self,
-        channels: &[S],
+        channels: &[&[i32]],
         bits_per_sample: u8,
         sample_rate: u32,
         frame_number: u64,
     ) -> Result<(), FlacError> {
-        self.encode_generic::<S, true>(channels, bits_per_sample, sample_rate, frame_number)
+        self.encode_generic::<&[i32], true>(channels, bits_per_sample, sample_rate, frame_number)
     }
 
     #[inline(always)]
