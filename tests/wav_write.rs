@@ -281,7 +281,7 @@ mod wav_write {
         }
     }
 
-    // ── regression: WAVEFORMATEXTENSIBLE f32 correctly identified as F32 ──────
+    // ── WAVEFORMATEXTENSIBLE f32 is identified as F32 ─────────────────────────
 
     #[test]
     fn extensible_f32_roundtrip_sample_type_is_f32() {

@@ -1195,9 +1195,9 @@ pub fn lpc_predictor_restore(
     samples.extend_from_slice(&warmup[..order]);
 
     // Use the scalar multi-accumulator restore for all supported orders.
-    // lpc_restore_fast is faster than the old SIMD path for the restore direction
-    // because the serial carry dependency puts hsum4 (~8 cycles) on the critical
-    // path when using AVX2. See the lpc_restore_fast doc-comment for details.
+    // lpc_restore_fast beats an AVX2 version for the restore direction because the
+    // serial carry dependency puts hsum4 (~8 cycles) on the critical path with AVX2.
+    // See the lpc_restore_fast doc-comment for details.
     let shift = qlp_shift as i32;
     let c = qlp_coeffs.as_ptr();
     samples.reserve(residuals.len());
@@ -1422,7 +1422,7 @@ struct LdAllCoeffs {
 ///
 /// More efficient than calling `levinson_durbin` separately for each order since
 /// the algorithm is naturally incremental: order-k results build on order-(k-1).
-/// Eliminates all heap allocation (previously ~12 Vecs per call).
+/// Allocates nothing on the heap.
 fn levinson_durbin_all(r: &[f64], max_order: usize) -> Result<LdAllCoeffs, FlacError> {
     if r.is_empty() || r[0] <= 0.0 {
         return Err(FlacError::LpcCoefficientOverflow);

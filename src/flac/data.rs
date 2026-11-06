@@ -88,7 +88,7 @@ impl DecodedAudio {
             AudioSamples::new_mono(data, sample_rate).map_err(Into::into)
         } else {
             // Multi-channel: one flat allocation, fill channel-by-channel.
-            // Avoids the N intermediate Vec<T> allocations from the old path.
+            // No per-channel intermediate Vec<T>.
             let mut flat = Vec::with_capacity(num_channels * samples_per_channel);
             for ch in &self.channels {
                 for &s in ch {

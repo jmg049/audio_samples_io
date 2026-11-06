@@ -512,8 +512,8 @@ mod tests {
 
     #[test]
     fn test_subformat_extensible_ieee_float_identified_correctly() {
-        // Regression: previously read bytes[18..20] (valid-bits = 32) → treated as format code
-        // 32 = Unknown(32) which fell through to I32. Fix: read bytes[24..26] (sub-format code).
+        // The sample type comes from the sub-format code at bytes[24..26], not from the
+        // valid-bits field at bytes[18..20] (32 here, which is not a format code).
         let bytes = make_extensible_fmt_bytes(0x0003, 1, 44100, 32);
         let fmt = FmtChunk::from_bytes(&bytes).expect("Failed to create extensible FmtChunk");
         let actual = fmt.actual_sample_type().expect("actual_sample_type failed");
