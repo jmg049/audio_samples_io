@@ -88,10 +88,10 @@ mod benchmark_report {
                 .chars()
                 .rev()
                 .collect();
-            if !digits.is_empty() {
-                if let Ok(sr) = digits.parse::<u32>() {
-                    sample_rate = Some(sr);
-                }
+            if !digits.is_empty()
+                && let Ok(sr) = digits.parse::<u32>()
+            {
+                sample_rate = Some(sr);
             }
         }
 
@@ -189,14 +189,14 @@ mod benchmark_report {
         let fid_lc = fid.to_lowercase();
 
         let (library, mut format) = if fid_lc.starts_with("audio-") || fid_lc.starts_with("audio_") {
-            let parts: Vec<&str> = fid.split(|c| c == '-' || c == '_').collect();
+            let parts: Vec<&str> = fid.split(['-', '_']).collect();
             let fmt = parts
                 .get(1)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
             ("audio_samples_io".to_string(), fmt)
         } else if fid_lc.starts_with("hound-") || fid_lc.starts_with("hound_") {
-            let parts: Vec<&str> = fid.split(|c| c == '-' || c == '_').collect();
+            let parts: Vec<&str> = fid.split(['-', '_']).collect();
             let fmt = parts
                 .get(1)
                 .map(|s| s.to_string())
@@ -316,7 +316,7 @@ mod benchmark_report {
             let func_path = entry.path();
             println!("Checking function path: {:?}", func_path);
             if func_path.is_dir() {
-                scan_function_benchmarks(&func_path, &library, &operation, &format, results)?;
+                scan_function_benchmarks(func_path, &library, &operation, &format, results)?;
             }
         }
 
