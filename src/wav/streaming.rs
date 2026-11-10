@@ -998,6 +998,14 @@ where
     let threads = crate::fastio::threads_for_read(&permit, file, offset, out.len() * size);
     if threads <= 1 {
         let mut reader = crate::fastio::FileAt { file, offset };
+        // Off the disk on ext4 and xfs, reads of a few megabytes keep the kernel's requests large:
+        // 2 to 8% faster than 64 KiB reads. On btrfs they were 1.5% slower.
+        if std::mem::size_of::<T>() >= size
+            && crate::fastio::file_system(file) == crate::fastio::FileSystem::Ext4OrXfs
+            && crate::fastio::range_is_cold(file, offset, out.len() * size)
+        {
+            return read_in_place(&mut reader, sample_type, out, COLD_BLOCK_BYTES / size);
+        }
         return read_converted(&mut reader, sample_type, out);
     }
     let total = out.len();
@@ -1029,19 +1037,30 @@ where
     }
 }
 
+/// Samples per block for [`read_in_place`] from the page cache, where a block stays in the cache
+/// while it is converted.
+const BLOCK_SAMPLES: usize = 16 * 1024;
+
+/// Bytes per block for [`read_in_place`] from the disk on ext4 and xfs.
+const COLD_BLOCK_BYTES: usize = 4 * 1024 * 1024;
+
 /// Fill `out` from samples that take no more room in memory than in the file: each block is read into
 /// the end of its own place and converted forward, through no buffer. Returns the samples written.
 #[inline(never)]
-fn read_in_place<R, T>(reader: &mut R, sample_type: ValidatedSampleType, out: &mut [T]) -> std::io::Result<usize>
+fn read_in_place<R, T>(
+    reader: &mut R,
+    sample_type: ValidatedSampleType,
+    out: &mut [T],
+    block_samples: usize,
+) -> std::io::Result<usize>
 where
     R: std::io::Read,
     T: StandardSample + 'static,
 {
-    const BLOCK_SAMPLES: usize = 16 * 1024;
     let size = sample_type.bytes_per_sample().get();
     let mut written = 0;
     while written < out.len() {
-        let count = BLOCK_SAMPLES.min(out.len() - written);
+        let count = block_samples.max(1).min(out.len() - written);
         let place = &mut out[written..written + count];
         let room = std::mem::size_of_val(place);
         let bytes = place.as_mut_ptr().cast::<u8>();
@@ -1114,7 +1133,7 @@ where
 
     let size = sample_type.bytes_per_sample().get();
     if std::mem::size_of::<T>() >= size {
-        return read_in_place(reader, sample_type, out);
+        return read_in_place(reader, sample_type, out, BLOCK_SAMPLES);
     }
 
     if out.len() * size > SMALL {
@@ -1441,6 +1460,22 @@ mod tests {
     use audio_samples::{nzu, sample_rate};
 
     use super::*;
+
+    /// Every block size converts the same samples, including blocks larger than the input and
+    /// a last block that is cut short.
+    #[test]
+    fn read_in_place_block_sizes_agree() {
+        let samples: Vec<i16> = (0..100_003).map(|i| ((i * 7919) % 65_536 - 32_768) as i16).collect();
+        let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let mut expected = vec![0.0f32; samples.len()];
+        read_converted(&mut bytes.as_slice(), ValidatedSampleType::I16, &mut expected).unwrap();
+        for block in [1, 3, 16 * 1024, COLD_BLOCK_BYTES / 2, 1 << 30] {
+            let mut out = vec![0.0f32; samples.len()];
+            let n = read_in_place(&mut bytes.as_slice(), ValidatedSampleType::I16, &mut out, block).unwrap();
+            assert_eq!(n, samples.len());
+            assert!(out == expected, "block {block}");
+        }
+    }
 
     #[test]
     fn test_streamed_wav_file_open() {

@@ -639,26 +639,66 @@ where
 #[cfg(target_os = "linux")]
 const MAPPED_MIN_BYTES: usize = 8 * 1024 * 1024;
 
-/// Whether `file` lives in memory, where its pages can be filled from several threads at once.
+/// The file system holding a file, where that changes how the file is best read or written.
+#[cfg(feature = "wav")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum FileSystem {
+    /// tmpfs, in memory; a write on it runs on one thread at a time.
+    Tmpfs,
+    /// ext4 or xfs.
+    Ext4OrXfs,
+    /// Anything else, btrfs included.
+    Other,
+}
+
 #[cfg(feature = "wav")]
 #[cfg(target_os = "linux")]
-fn is_tmpfs(file: &File) -> bool {
+pub(crate) fn file_system(file: &File) -> FileSystem {
     use std::os::fd::AsRawFd;
     const TMPFS_MAGIC: i64 = 0x0102_1994;
+    const EXT4_SUPER_MAGIC: i64 = 0xEF53;
+    const XFS_SUPER_MAGIC: i64 = 0x5846_5342;
     // SAFETY: an all-zero value is valid storage for fstatfs to fill.
     let mut info: libc::statfs = unsafe { mem::zeroed() };
     // SAFETY: the descriptor is open and `info` is valid storage.
-    let result = unsafe { libc::fstatfs(file.as_raw_fd(), &raw mut info) };
-    result == 0 && info.f_type as i64 == TMPFS_MAGIC
+    if unsafe { libc::fstatfs(file.as_raw_fd(), &raw mut info) } != 0 {
+        return FileSystem::Other;
+    }
+    match info.f_type as i64 {
+        TMPFS_MAGIC => FileSystem::Tmpfs,
+        EXT4_SUPER_MAGIC | XFS_SUPER_MAGIC => FileSystem::Ext4OrXfs,
+        _ => FileSystem::Other,
+    }
 }
 
-/// Fill a large file in tmpfs through a mapping, from several threads, with the samples of `view` in
-/// the file's layout at `file_offset`, which is the file's current position; a write on such a file
-/// runs on one thread at a time and takes 20 to 60% longer. True if done; on false nothing is written
-/// that counts, the position is unchanged, and the ordinary write is left to report what is wrong.
+#[cfg(feature = "wav")]
+#[cfg(not(target_os = "linux"))]
+pub(crate) const fn file_system(_file: &File) -> FileSystem {
+    FileSystem::Other
+}
+
+/// How [`write_samples_mapped`] prepares a file.
+#[cfg(feature = "wav")]
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MappedFill {
+    /// Size the file and populate each part before filling it.
+    Memory,
+    /// Allocate the file's blocks, then fill it.
+    Disk,
+}
+
+/// Fill a large new file through a mapping, from several threads, with the samples of `view` in
+/// the file's layout at `file_offset`, which is the file's current position. True if done; on false
+/// nothing is written that counts, the position is unchanged, and the ordinary write is left to
+/// report what is wrong.
 ///
-/// Each thread populates its pages before touching them, so a full filesystem is an error here and
-/// not a signal. Only another process truncating the file during the write can still raise one.
+/// On tmpfs a write runs on one thread at a time and takes 20 to 60% longer; each thread populates
+/// its pages before touching them, so a full filesystem is an error here and not a signal. On ext4
+/// and xfs the file's blocks are allocated first, so the threads only copy into the page cache: a
+/// write of 10 to 100 MiB takes 1.3 to 1.8 times as long, and reaching the disk takes about as long. The
+/// file must hold no more than its header there, since a page of old data would be read in before
+/// being overwritten. Only another process truncating the file during the write can raise a signal.
 #[cfg(feature = "wav")]
 #[cfg(target_os = "linux")]
 pub(crate) fn write_samples_mapped<T, U>(file: &File, view: ArrayView2<'_, T>, file_offset: u64) -> io::Result<bool>
@@ -671,15 +711,34 @@ where
     let total = frames * frame_bytes;
     let permit = ThreadsPermit::try_acquire();
     let threads = permit.threads(transfer_threads());
-    if total < MAPPED_MIN_BYTES || threads < 4 || !is_tmpfs(file) {
+    if total < MAPPED_MIN_BYTES || threads < 4 {
         return Ok(false);
     }
+    let fill = match file_system(file) {
+        FileSystem::Tmpfs => MappedFill::Memory,
+        FileSystem::Ext4OrXfs => MappedFill::Disk,
+        FileSystem::Other => return Ok(false),
+    };
     use std::os::fd::AsRawFd;
     let offset = file_offset as usize;
     let end = offset + total;
     let before = file.metadata()?.len();
-    if before < end as u64 {
-        file.set_len(end as u64)?;
+    match fill {
+        MappedFill::Memory => {
+            if before < end as u64 {
+                file.set_len(end as u64)?;
+            }
+        },
+        MappedFill::Disk => {
+            if before > file_offset {
+                return Ok(false);
+            }
+            // SAFETY: the descriptor is open; the call allocates blocks and extends the file.
+            if unsafe { libc::fallocate(file.as_raw_fd(), 0, 0, end as libc::off_t) } != 0 {
+                file.set_len(before)?;
+                return Ok(false);
+            }
+        },
     }
     // SAFETY: a new shared mapping of the open file, within its length, unmapped below.
     let map = unsafe {
@@ -707,8 +766,11 @@ where
         let to = (base + offset + last * frame_bytes)
             .next_multiple_of(4096)
             .min(base + end.next_multiple_of(4096));
-        // SAFETY: the range lies in the mapping, and populating pages changes no contents.
-        if unsafe { libc::madvise(from as *mut libc::c_void, to - from, libc::MADV_POPULATE_WRITE) } != 0 {
+        // SAFETY: the range lies in the mapping, and populating pages changes no contents. Disk
+        // blocks were allocated above, and populating them first makes the copy slower.
+        if fill == MappedFill::Memory
+            && unsafe { libc::madvise(from as *mut libc::c_void, to - from, libc::MADV_POPULATE_WRITE) } != 0
+        {
             return false;
         }
         let mut tails = Vec::with_capacity(channels);
@@ -716,7 +778,7 @@ where
         let mut at = first;
         while at < last {
             let count = step.min(last - at);
-            // SAFETY: these frames lie in the populated part of the mapping given to this index alone.
+            // SAFETY: these frames lie in the part of the mapping given to this index alone.
             unsafe { source.pack(at, count, (base + offset + at * frame_bytes) as *mut u8, &mut tails) };
             at += count;
         }

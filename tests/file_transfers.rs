@@ -188,3 +188,43 @@ fn tmpfs_mapped_save_matches_plain_save() {
     let _ = std::fs::remove_file(&mapped);
     let _ = std::fs::remove_file(&plain);
 }
+
+/// A header longer than one read, with chunks before the samples and an odd-sized chunk that
+/// carries a pad byte, reads the same samples.
+#[test]
+fn long_header_reads_the_samples() {
+    let frames = 700_000usize;
+    let samples: Vec<i16> = (0..frames * 2)
+        .map(|i| (i as i32 * 31 % 65_536 - 32_768) as i16)
+        .collect();
+    let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    let mut chunks = Vec::new();
+    chunks.extend_from_slice(b"fmt ");
+    chunks.extend_from_slice(&16u32.to_le_bytes());
+    chunks.extend_from_slice(&1u16.to_le_bytes());
+    chunks.extend_from_slice(&2u16.to_le_bytes());
+    chunks.extend_from_slice(&44_100u32.to_le_bytes());
+    chunks.extend_from_slice(&(44_100u32 * 4).to_le_bytes());
+    chunks.extend_from_slice(&4u16.to_le_bytes());
+    chunks.extend_from_slice(&16u16.to_le_bytes());
+    for (id, len) in [(b"LIST", 6_001u32), (b"junk", 3u32)] {
+        chunks.extend_from_slice(id);
+        chunks.extend_from_slice(&len.to_le_bytes());
+        chunks.extend(std::iter::repeat_n(0x5Au8, len as usize + (len as usize & 1)));
+    }
+    chunks.extend_from_slice(b"data");
+    chunks.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    let mut file = Vec::new();
+    file.extend_from_slice(b"RIFF");
+    file.extend_from_slice(&((4 + chunks.len() + data.len()) as u32).to_le_bytes());
+    file.extend_from_slice(b"WAVE");
+    file.extend_from_slice(&chunks);
+    file.extend_from_slice(&data);
+    let path = temp("long_header.wav");
+    std::fs::write(&path, &file).unwrap();
+
+    let audio = read::<_, i16>(&path).unwrap();
+    assert_eq!(audio.samples_per_channel().get(), frames);
+    assert!(audio.to_interleaved_vec() == samples);
+    let _ = std::fs::remove_file(&path);
+}
