@@ -634,10 +634,17 @@ where
     }
 }
 
-/// Bytes of samples from which [`write_samples_mapped`] is used.
+/// Bytes of samples from which [`write_samples_mapped`] is used on tmpfs: at 7 MiB it was level
+/// with one write.
 #[cfg(feature = "wav")]
 #[cfg(target_os = "linux")]
 const MAPPED_MIN_BYTES: usize = 8 * 1024 * 1024;
+
+/// Bytes of samples from which [`write_samples_mapped`] is used on ext4 and xfs: at 4 MiB it took
+/// 1.06 and 1.13 times as long as one write, at 7 MiB 0.79 and 0.87 times.
+#[cfg(feature = "wav")]
+#[cfg(target_os = "linux")]
+const MAPPED_DISK_MIN_BYTES: usize = 6 * 1024 * 1024;
 
 /// The file system holding a file, where that changes how the file is best read or written.
 #[cfg(feature = "wav")]
@@ -711,14 +718,17 @@ where
     let total = frames * frame_bytes;
     let permit = ThreadsPermit::try_acquire();
     let threads = permit.threads(transfer_threads());
-    if total < MAPPED_MIN_BYTES || threads < 4 {
+    if total < MAPPED_DISK_MIN_BYTES.min(MAPPED_MIN_BYTES) {
         return Ok(false);
     }
-    let fill = match file_system(file) {
-        FileSystem::Tmpfs => MappedFill::Memory,
-        FileSystem::Ext4OrXfs => MappedFill::Disk,
+    let (fill, least) = match file_system(file) {
+        FileSystem::Tmpfs => (MappedFill::Memory, MAPPED_MIN_BYTES),
+        FileSystem::Ext4OrXfs => (MappedFill::Disk, MAPPED_DISK_MIN_BYTES),
         FileSystem::Other => return Ok(false),
     };
+    if total < least || threads < 4 {
+        return Ok(false);
+    }
     use std::os::fd::AsRawFd;
     let offset = file_offset as usize;
     let end = offset + total;
