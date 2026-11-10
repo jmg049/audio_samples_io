@@ -1154,108 +1154,15 @@ where
 /// Read a PCM or float WAV file into memory without mapping it, on several threads when large.
 /// `None` when the file needs the general path: a compressed format, or anything unusual about
 /// it, which that path reports properly.
-/// Bytes read at once for a WAV header; more are read only for a longer header.
-#[cfg(any(unix, windows))]
-const HEADER_READ_BYTES: usize = 4096;
-
-/// A WAV header read with one positioned read where it fits in [`HEADER_READ_BYTES`]. Parsing it
-/// through a buffered reader instead took a read for every seek past a chunk.
-#[cfg(any(unix, windows))]
-struct HeaderReader<'a> {
-    file: &'a File,
-    prefix: [u8; HEADER_READ_BYTES],
-    filled: usize,
-    pos: u64,
-    len: u64,
-}
-
-#[cfg(any(unix, windows))]
-impl Read for HeaderReader<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.pos < self.filled as u64 {
-            let start = self.pos as usize;
-            let n = buf.len().min(self.filled - start);
-            buf[..n].copy_from_slice(&self.prefix[start..start + n]);
-            self.pos += n as u64;
-            return Ok(n);
-        }
-        let n = crate::fastio::FileAt {
-            file: self.file,
-            offset: self.pos,
-        }
-        .read(buf)?;
-        self.pos += n as u64;
-        Ok(n)
-    }
-}
-
-#[cfg(any(unix, windows))]
-impl Seek for HeaderReader<'_> {
-    fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
-        let target = match to {
-            SeekFrom::Start(n) => Some(n),
-            SeekFrom::Current(d) => self.pos.checked_add_signed(d),
-            SeekFrom::End(d) => self.len.checked_add_signed(d),
-        };
-        self.pos = target.ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-        Ok(self.pos)
-    }
-}
-
-/// Open a WAV file for a whole-file read: its header, where its samples start, and the handle to
-/// read them through.
-///
-/// When the samples are not in the page cache on ext4 or xfs, that is a second handle on the file.
-/// A read through the first continues from the header's read, and the kernel grows its readahead
-/// from that read's small window; a new handle starts the samples with a readahead of their own. On
-/// btrfs the second handle made reads 5 to 7% slower, so it is not used there.
-#[cfg(any(unix, windows))]
-pub(crate) fn open_wav_data(path: &Path) -> AudioIOResult<(BaseAudioInfo, u64, File)> {
-    let file = File::open(path)?;
-    let len = file.metadata()?.len();
-    let mut reader = HeaderReader {
-        file: &file,
-        prefix: [0u8; HEADER_READ_BYTES],
-        filled: 0,
-        pos: 0,
-        len,
-    };
-    while reader.filled < HEADER_READ_BYTES {
-        let n = crate::fastio::FileAt {
-            file: &file,
-            offset: reader.filled as u64,
-        }
-        .read(&mut reader.prefix[reader.filled..])?;
-        if n == 0 {
-            break;
-        }
-        reader.filled += n;
-    }
-    let (info, offset) = parse_wav_header_streaming(&mut reader)?;
-    if crate::fastio::file_system(&file) == crate::fastio::FileSystem::Ext4OrXfs
-        && crate::fastio::range_is_cold(&file, offset, len.saturating_sub(offset) as usize)
-        && let Ok(fresh) = File::open(path)
-    {
-        return Ok((info, offset, fresh));
-    }
-    Ok((info, offset, file))
-}
-
-/// Open a WAV file for a whole-file read: its header, where its samples start, and the handle to
-/// read them through.
-#[cfg(not(any(unix, windows)))]
-pub(crate) fn open_wav_data(path: &Path) -> AudioIOResult<(BaseAudioInfo, u64, File)> {
-    let mut reader = BufReader::with_capacity(4096, File::open(path)?);
-    let (info, offset) = parse_wav_header_streaming(&mut reader)?;
-    Ok((info, offset, reader.into_inner()))
-}
-
 #[cfg(all(any(unix, windows), target_endian = "little"))]
 pub(crate) fn read_direct<T>(path: &Path) -> Option<AudioSamples<'static, T>>
 where
     T: StandardSample + 'static,
 {
-    let (info, offset, file) = open_wav_data(path).ok()?;
+    let file = File::open(path).ok()?;
+    let mut reader = BufReader::with_capacity(4096, file);
+    let (info, offset) = parse_wav_header_streaming(&mut reader).ok()?;
+    let file = reader.into_inner();
     let channels = info.channels as usize;
     let total = info.total_samples;
     if channels == 0 || total == 0 || total % channels != 0 {

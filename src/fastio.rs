@@ -640,11 +640,18 @@ where
 #[cfg(target_os = "linux")]
 const MAPPED_MIN_BYTES: usize = 8 * 1024 * 1024;
 
-/// Bytes of samples from which [`write_samples_mapped`] is used on ext4 and xfs: at 4 MiB it took
-/// 1.06 and 1.13 times as long as one write, at 7 MiB 0.79 and 0.87 times.
+/// Bytes of samples from which [`write_samples_mapped`] is used on ext4: at 4 MiB it took 1.06 times
+/// as long as one write, at 7 MiB 0.79 times, and a 6.7 MiB save 0.80 times as long as one write did.
 #[cfg(feature = "wav")]
 #[cfg(target_os = "linux")]
-const MAPPED_DISK_MIN_BYTES: usize = 6 * 1024 * 1024;
+const MAPPED_EXT4_MIN_BYTES: usize = 6 * 1024 * 1024;
+
+/// Bytes of samples from which [`write_samples_mapped`] is used on xfs, where a 6.7 MiB save took
+/// 1.09 times and a 10 MiB save 0.95 times as long as one write did, and saves of 20 MiB and more
+/// 0.74 to 0.83 times.
+#[cfg(feature = "wav")]
+#[cfg(target_os = "linux")]
+const MAPPED_XFS_MIN_BYTES: usize = 16 * 1024 * 1024;
 
 /// The file system holding a file, where that changes how the file is best read or written.
 #[cfg(feature = "wav")]
@@ -652,10 +659,19 @@ const MAPPED_DISK_MIN_BYTES: usize = 6 * 1024 * 1024;
 pub(crate) enum FileSystem {
     /// tmpfs, in memory; a write on it runs on one thread at a time.
     Tmpfs,
-    /// ext4 or xfs.
-    Ext4OrXfs,
+    /// ext4.
+    Ext4,
+    /// xfs.
+    Xfs,
     /// Anything else, btrfs included.
     Other,
+}
+
+#[cfg(feature = "wav")]
+impl FileSystem {
+    pub(crate) const fn is_ext4_or_xfs(self) -> bool {
+        matches!(self, Self::Ext4 | Self::Xfs)
+    }
 }
 
 #[cfg(feature = "wav")]
@@ -673,7 +689,8 @@ pub(crate) fn file_system(file: &File) -> FileSystem {
     }
     match info.f_type as i64 {
         TMPFS_MAGIC => FileSystem::Tmpfs,
-        EXT4_SUPER_MAGIC | XFS_SUPER_MAGIC => FileSystem::Ext4OrXfs,
+        EXT4_SUPER_MAGIC => FileSystem::Ext4,
+        XFS_SUPER_MAGIC => FileSystem::Xfs,
         _ => FileSystem::Other,
     }
 }
@@ -718,12 +735,13 @@ where
     let total = frames * frame_bytes;
     let permit = ThreadsPermit::try_acquire();
     let threads = permit.threads(transfer_threads());
-    if total < MAPPED_DISK_MIN_BYTES.min(MAPPED_MIN_BYTES) {
+    if total < MAPPED_EXT4_MIN_BYTES.min(MAPPED_MIN_BYTES) {
         return Ok(false);
     }
     let (fill, least) = match file_system(file) {
         FileSystem::Tmpfs => (MappedFill::Memory, MAPPED_MIN_BYTES),
-        FileSystem::Ext4OrXfs => (MappedFill::Disk, MAPPED_DISK_MIN_BYTES),
+        FileSystem::Ext4 => (MappedFill::Disk, MAPPED_EXT4_MIN_BYTES),
+        FileSystem::Xfs => (MappedFill::Disk, MAPPED_XFS_MIN_BYTES),
         FileSystem::Other => return Ok(false),
     };
     if total < least || threads < 4 {
