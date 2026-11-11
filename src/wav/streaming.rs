@@ -1233,7 +1233,7 @@ unsafe fn unpack_i24_ssse3(bytes: *const u8, samples: usize, out: *mut I24) -> u
 }
 
 /// Convert little-endian samples of `sample_type` into `out`.
-fn convert_bytes_into<T>(sample_type: ValidatedSampleType, bytes: &[u8], out: &mut [T])
+pub(crate) fn convert_bytes_into<T>(sample_type: ValidatedSampleType, bytes: &[u8], out: &mut [T])
 where
     T: StandardSample + 'static,
 {

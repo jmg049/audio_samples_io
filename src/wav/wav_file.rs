@@ -1212,8 +1212,16 @@ impl Seek for HeaderReader<'_> {
 pub(crate) fn open_wav_data(path: &Path) -> AudioIOResult<(BaseAudioInfo, u64, File)> {
     let file = File::open(path)?;
     let len = file.metadata()?.len();
+    let (info, offset) = wav_header_of(&file, len)?;
+    Ok((info, offset, file))
+}
+
+/// The header of an open WAV file of `len` bytes and where its samples start, from one read of its
+/// first 4 KiB; see [`open_wav_data`].
+#[cfg(any(unix, windows))]
+pub(crate) fn wav_header_of(file: &File, len: u64) -> AudioIOResult<(BaseAudioInfo, u64)> {
     let mut reader = HeaderReader {
-        file: &file,
+        file,
         prefix: [0u8; HEADER_READ_BYTES],
         filled: 0,
         pos: 0,
@@ -1221,7 +1229,7 @@ pub(crate) fn open_wav_data(path: &Path) -> AudioIOResult<(BaseAudioInfo, u64, F
     };
     while reader.filled < HEADER_READ_BYTES {
         let n = crate::fastio::FileAt {
-            file: &file,
+            file,
             offset: reader.filled as u64,
         }
         .read(&mut reader.prefix[reader.filled..])?;
@@ -1230,8 +1238,7 @@ pub(crate) fn open_wav_data(path: &Path) -> AudioIOResult<(BaseAudioInfo, u64, F
         }
         reader.filled += n;
     }
-    let (info, offset) = parse_wav_header_streaming(&mut reader)?;
-    Ok((info, offset, file))
+    parse_wav_header_streaming(&mut reader)
 }
 
 /// Open a WAV file for a whole-file read: its header, where its samples start, and the open file.
@@ -1240,6 +1247,14 @@ pub(crate) fn open_wav_data(path: &Path) -> AudioIOResult<(BaseAudioInfo, u64, F
     let mut reader = BufReader::with_capacity(4096, File::open(path)?);
     let (info, offset) = parse_wav_header_streaming(&mut reader)?;
     Ok((info, offset, reader.into_inner()))
+}
+
+/// The header of an open WAV file and where its samples start.
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn wav_header_of(file: &File, _len: u64) -> AudioIOResult<(BaseAudioInfo, u64)> {
+    let mut reader = BufReader::with_capacity(4096, file);
+    reader.seek(SeekFrom::Start(0))?;
+    parse_wav_header_streaming(&mut reader)
 }
 
 #[cfg(all(any(unix, windows), target_endian = "little"))]

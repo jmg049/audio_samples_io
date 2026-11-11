@@ -681,7 +681,9 @@ pub(crate) enum FileSystem {
     Ext4,
     /// xfs.
     Xfs,
-    /// Anything else, btrfs included.
+    /// btrfs.
+    Btrfs,
+    /// Anything else.
     Other,
 }
 
@@ -699,6 +701,7 @@ pub(crate) fn file_system(file: &File) -> FileSystem {
     const TMPFS_MAGIC: i64 = 0x0102_1994;
     const EXT4_SUPER_MAGIC: i64 = 0xEF53;
     const XFS_SUPER_MAGIC: i64 = 0x5846_5342;
+    const BTRFS_SUPER_MAGIC: i64 = 0x9123_683E;
     // SAFETY: an all-zero value is valid storage for fstatfs to fill.
     let mut info: libc::statfs = unsafe { mem::zeroed() };
     // SAFETY: the descriptor is open and `info` is valid storage.
@@ -709,6 +712,7 @@ pub(crate) fn file_system(file: &File) -> FileSystem {
         TMPFS_MAGIC => FileSystem::Tmpfs,
         EXT4_SUPER_MAGIC => FileSystem::Ext4,
         XFS_SUPER_MAGIC => FileSystem::Xfs,
+        BTRFS_SUPER_MAGIC => FileSystem::Btrfs,
         _ => FileSystem::Other,
     }
 }
@@ -718,6 +722,44 @@ pub(crate) fn file_system(file: &File) -> FileSystem {
 pub(crate) const fn file_system(_file: &File) -> FileSystem {
     FileSystem::Other
 }
+
+/// How to read a small WAV file that is not in the page cache: whole, in one read from its first
+/// byte, and whether to ask the kernel for all of it first (`posix_fadvise(WILLNEED)`). `None` means
+/// the usual header read and then a read of the samples.
+///
+/// Measured over ten files per size, against reading the header and then the samples:
+/// - ext4 and xfs up to 1 MiB: asking first and reading whole took 0.86 to 0.94 times as long;
+/// - ext4 and xfs from 1 to 4 MiB: reading whole took 0.97 to 1.00 times as long, where asking
+///   first was slower;
+/// - btrfs at 512 KiB: asking first and reading whole took 0.92 times as long, but from 1 MiB both
+///   were level or slower, up to 1.09 times at 4 MiB.
+#[cfg(all(feature = "wav", feature = "numpy"))]
+pub(crate) fn whole_read_plan(file: &File, len: u64) -> Option<bool> {
+    const MIB: u64 = 1024 * 1024;
+    if len == 0 || len > 4 * MIB {
+        return None;
+    }
+    let fs = file_system(file);
+    let plan = match fs {
+        FileSystem::Ext4 | FileSystem::Xfs => len <= MIB,
+        FileSystem::Btrfs if len <= MIB / 2 => true,
+        _ => return None,
+    };
+    range_is_cold(file, 0, len as usize).then_some(plan)
+}
+
+/// Ask the kernel to read all of `file` into the page cache.
+#[cfg(all(feature = "wav", feature = "numpy"))]
+#[cfg(target_os = "linux")]
+pub(crate) fn will_need(file: &File) {
+    use std::os::fd::AsRawFd;
+    // SAFETY: the descriptor is open; the call only gives advice.
+    unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_WILLNEED) };
+}
+
+#[cfg(all(feature = "wav", feature = "numpy"))]
+#[cfg(not(target_os = "linux"))]
+pub(crate) const fn will_need(_file: &File) {}
 
 /// How [`write_samples_mapped`] prepares a file.
 #[cfg(feature = "wav")]
@@ -760,7 +802,7 @@ where
         FileSystem::Tmpfs => (MappedFill::Memory, MAPPED_MIN_BYTES),
         FileSystem::Ext4 => (MappedFill::Disk, MAPPED_EXT4_MIN_BYTES),
         FileSystem::Xfs => (MappedFill::Disk, MAPPED_XFS_MIN_BYTES),
-        FileSystem::Other => return Ok(false),
+        FileSystem::Btrfs | FileSystem::Other => return Ok(false),
     };
     if total < least || threads < 4 {
         return Ok(false);

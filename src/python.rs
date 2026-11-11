@@ -64,6 +64,120 @@ where
     (array, data)
 }
 
+/// A small WAV file read whole into one block: the bytes from its first, page-aligned, and the header
+/// parsed from them. See [`crate::fastio::whole_read_plan`].
+#[cfg(target_endian = "little")]
+struct WholeFile<'py> {
+    block: Bound<'py, PyArray1<u8>>,
+    start: usize,
+    len: usize,
+    info: BaseAudioInfo,
+    offset: usize,
+}
+
+/// Open a WAV file for a whole-file read: the file, its length, and the plan for reading it whole.
+#[cfg(target_endian = "little")]
+fn open_for_read(path: &Path) -> AudioIOResult<(std::fs::File, u64, Option<bool>)> {
+    let file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let plan = crate::fastio::whole_read_plan(&file, len);
+    Ok((file, len, plan))
+}
+
+#[cfg(target_endian = "little")]
+fn read_whole<'py>(py: Python<'py>, file: &std::fs::File, len: u64, will_need: bool) -> Option<WholeFile<'py>> {
+    const PAGE: usize = 4096;
+    let len = usize::try_from(len).ok()?;
+    // SAFETY: the bytes are only read after the read below fills them.
+    let block = unsafe { PyArray1::<u8>::new(py, [len + PAGE], false) };
+    let start = (block.data() as usize).next_multiple_of(PAGE);
+    let filled = py.detach(|| {
+        if will_need {
+            crate::fastio::will_need(file);
+        }
+        // SAFETY: `start` is at most PAGE - 1 bytes into the block, which holds len + PAGE bytes, and
+        // nothing else has seen the block.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(start as *mut u8, len) };
+        crate::fastio::read_exact_at(file, 0, bytes).is_ok()
+    });
+    if !filled {
+        return None;
+    }
+    // SAFETY: the read above filled these bytes.
+    let bytes = unsafe { std::slice::from_raw_parts(start as *const u8, len) };
+    let (info, offset) = parse_wav_header_streaming(&mut std::io::Cursor::new(bytes)).ok()?;
+    Some(WholeFile {
+        block,
+        start,
+        len,
+        info,
+        offset: usize::try_from(offset).ok()?,
+    })
+}
+
+/// Whether `T` is the sample type of the file, so that its samples can be used in place.
+fn is_native<T: 'static>(sample_type: audio_samples::SampleType) -> bool {
+    match sample_type {
+        audio_samples::SampleType::U8 => TypeId::of::<T>() == TypeId::of::<u8>(),
+        audio_samples::SampleType::I16 => TypeId::of::<T>() == TypeId::of::<i16>(),
+        audio_samples::SampleType::I32 => TypeId::of::<T>() == TypeId::of::<i32>(),
+        audio_samples::SampleType::F32 => TypeId::of::<T>() == TypeId::of::<f32>(),
+        audio_samples::SampleType::F64 => TypeId::of::<T>() == TypeId::of::<f64>(),
+        _ => false,
+    }
+}
+
+/// The samples of a file read whole, as an interleaved `(channels, frames)` array: in place in the
+/// block when `T` is the file's type, else converted into a new array.
+#[cfg(target_endian = "little")]
+fn whole_into_array<T>(py: Python<'_>, whole: WholeFile<'_>) -> Option<PyResult<(Py<PyArray2<T>>, BaseAudioInfo)>>
+where
+    T: StandardSample + Element + 'static,
+{
+    let info = whole.info;
+    let file_type = ValidatedSampleType::try_from(info.sample_type).ok()?;
+    let channels = info.channels as usize;
+    let total = info.total_samples;
+    if channels == 0 || total == 0 || !total.is_multiple_of(channels) {
+        return None;
+    }
+    let frames = total / channels;
+    let size = file_type.bytes_per_sample().get();
+    let byte_count = total.checked_mul(size)?;
+    if whole.offset.checked_add(byte_count)? > whole.len {
+        return None;
+    }
+    if is_native::<T>(info.sample_type) && size == std::mem::size_of::<T>() {
+        let mut data = whole.start + whole.offset;
+        let misalign = data % std::mem::align_of::<T>();
+        if misalign != 0 {
+            // SAFETY: both ranges lie in the block: the samples start past the header, more than
+            // `misalign` bytes after `start`, and `copy` allows overlap.
+            unsafe { std::ptr::copy(data as *const u8, (data - misalign) as *mut u8, byte_count) };
+            data -= misalign;
+        }
+        use ndarray::ShapeBuilder;
+        // SAFETY: the block holds `byte_count` bytes of samples of type T from `data`, which is
+        // aligned for T, and the block becomes the array's base object, so it outlives the array.
+        let array = unsafe {
+            let view = ndarray::ArrayView2::from_shape_ptr((channels, frames).f(), data as *const T);
+            PyArray2::borrow_from_array(&view, whole.block.into_any())
+        };
+        return Some(Ok((array.unbind(), info)));
+    }
+    let (array, data) = new_output_array::<T>(py, channels, frames, true, 0);
+    // SAFETY: the new array holds `total` values and nothing else has seen it; the source bytes
+    // were read into the block above.
+    let (out, source) = unsafe {
+        (
+            std::slice::from_raw_parts_mut(data as *mut T, total),
+            std::slice::from_raw_parts((whole.start + whole.offset) as *const u8, byte_count),
+        )
+    };
+    crate::wav::streaming::convert_bytes_into(file_type, source, out);
+    Some(Ok((array.unbind(), info)))
+}
+
 /// Type-erased container for a natively-typed audio array produced by [`read_pyarray_native`].
 ///
 /// Each variant holds a Fortran-layout `PyArray2<T>` matching the file's native sample type,
@@ -92,12 +206,36 @@ pub fn read_pyarray_native(py: Python<'_>, path: &Path) -> Option<PyResult<Nativ
         return None;
     }
 
-    // Step 1: open + header (GIL released — pure I/O)
-    let parse_result: AudioIOResult<(BaseAudioInfo, u64, std::fs::File)> =
-        py.detach(|| crate::wav::wav_file::open_wav_data(path));
+    // Step 1: open + header (GIL released — pure I/O). A small file off the disk is read whole.
+    let (reader, len, plan) = py.detach(|| open_for_read(path)).ok()?;
+    if let Some(will_need) = plan
+        && let Some(whole) = read_whole(py, &reader, len, will_need)
+    {
+        let read = match whole.info.sample_type {
+            audio_samples::SampleType::U8 => {
+                whole_into_array::<u8>(py, whole).map(|r| r.map(|(a, i)| NativeAudioArray::U8(a, i)))
+            },
+            audio_samples::SampleType::I16 => {
+                whole_into_array::<i16>(py, whole).map(|r| r.map(|(a, i)| NativeAudioArray::I16(a, i)))
+            },
+            audio_samples::SampleType::I32 => {
+                whole_into_array::<i32>(py, whole).map(|r| r.map(|(a, i)| NativeAudioArray::I32(a, i)))
+            },
+            audio_samples::SampleType::F32 => {
+                whole_into_array::<f32>(py, whole).map(|r| r.map(|(a, i)| NativeAudioArray::F32(a, i)))
+            },
+            audio_samples::SampleType::F64 => {
+                whole_into_array::<f64>(py, whole).map(|r| r.map(|(a, i)| NativeAudioArray::F64(a, i)))
+            },
+            _ => None,
+        };
+        if read.is_some() {
+            return read;
+        }
+    }
 
     // Return None on any parse error — the caller will try the slower fallback path.
-    let (info, offset, reader) = parse_result.ok()?;
+    let (info, offset) = py.detach(|| crate::wav::wav_file::wav_header_of(&reader, len)).ok()?;
 
     // I24 has a non-standard in-memory layout — exclude from the direct path.
     if matches!(info.sample_type, audio_samples::SampleType::I24) {
@@ -236,23 +374,18 @@ where
 
     // Step 1: Parse WAV header with GIL released (I/O). The payload read below goes straight to
     // the array, so the buffer only has to hold the header.
-    let parse_result: AudioIOResult<(BaseAudioInfo, u64, std::fs::File)> =
-        py.detach(|| crate::wav::wav_file::open_wav_data(path));
-
-    let (info, offset, file) = match parse_result {
-        Ok(v) => v,
-        Err(_) => return None,
-    };
+    let (file, len, plan) = py.detach(|| open_for_read(path)).ok()?;
+    // A small file off the disk is read whole, and its samples used in place or converted.
+    if let Some(will_need) = plan
+        && let Some(whole) = read_whole(py, &file, len, will_need)
+        && let Some(read) = whole_into_array::<T>(py, whole)
+    {
+        return Some(read);
+    }
+    let (info, offset) = py.detach(|| crate::wav::wav_file::wav_header_of(&file, len)).ok()?;
 
     // Fast path applies only when T matches the file's native sample type.
-    let native_matches = match info.sample_type {
-        audio_samples::SampleType::U8 => TypeId::of::<T>() == TypeId::of::<u8>(),
-        audio_samples::SampleType::I16 => TypeId::of::<T>() == TypeId::of::<i16>(),
-        audio_samples::SampleType::I32 => TypeId::of::<T>() == TypeId::of::<i32>(),
-        audio_samples::SampleType::F32 => TypeId::of::<T>() == TypeId::of::<f32>(),
-        audio_samples::SampleType::F64 => TypeId::of::<T>() == TypeId::of::<f64>(),
-        _ => false,
-    };
+    let native_matches = is_native::<T>(info.sample_type);
     let file_type = match ValidatedSampleType::try_from(info.sample_type) {
         Ok(t) => t,
         Err(_) => return None,
