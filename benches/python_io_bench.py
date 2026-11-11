@@ -41,6 +41,7 @@ import gc
 import json
 import os
 import platform
+import random
 import subprocess
 import sys
 import tempfile
@@ -255,8 +256,11 @@ def signal(sample_type, channels, seconds):
     return x.astype(DTYPE[sample_type])
 
 
-def input_file(directory, fmt, sample_type, channels, seconds):
-    path = os.path.join(directory, f"in_{sample_type}_{channels}_{seconds}.{fmt}")
+def input_file(directory, fmt, sample_type, channels, seconds, instance=0):
+    """The input file for a row; instances past the first are separate copies, written separately so
+    that each has its own place on the disk."""
+    suffix = f"_{instance}" if instance else ""
+    path = os.path.join(directory, f"in_{sample_type}_{channels}_{seconds}{suffix}.{fmt}")
     if not os.path.exists(path):
         x = signal(sample_type, channels, seconds)
         if sample_type == "i24":
@@ -408,10 +412,14 @@ def run_row(args, row, funcs):
     fmt = row["fmt"]
     pid = os.getpid()
     path_of = {name: os.path.join(args.dir, f"out_{pid}_{i}.{fmt}") for i, name in enumerate(funcs)}
-    source = None
+    sources = []
     if reading:
-        source = input_file(args.dir, fmt, row["type"], row["ch"], row["dur"])
-        row["bytes"] = os.path.getsize(source)
+        # Every library reads the same files; with several instances, each round takes the next one,
+        # so that one file's place on the disk does not decide the row.
+        sources = [input_file(args.dir, fmt, row["type"], row["ch"], row["dur"], k) for k in range(args.instances)]
+        row["bytes"] = os.path.getsize(sources[0])
+        row["instances"] = len(sources)
+    source = sources[0] if sources else None
 
     def call(name):
         if reading:
@@ -454,8 +462,13 @@ def run_row(args, row, funcs):
         buffer = mmap.mmap(-1, (row["bytes"] // 4096) * 4096)
     was_enabled = gc.isenabled()
     gc.disable()
+    order = random.Random(0)
     for i in range(rounds):
-        for name in names[i % len(names) :] + names[: i % len(names)]:
+        if sources:
+            source = sources[i % len(sources)]
+        turn = names[:]
+        order.shuffle(turn)
+        for name in turn:
             a, b, c = call(name)
             wall[name].append(a)
             cpu[name].append(b)
@@ -531,6 +544,7 @@ def main():
     ap.add_argument("--budget", type=float, default=0.3, help="seconds per row per library, roughly")
     ap.add_argument("--min-rounds", type=int, default=11)
     ap.add_argument("--max-rounds", type=int, default=400)
+    ap.add_argument("--instances", type=int, default=1, help="copies of each input file, read in turn by every library")
     ap.add_argument("--stream-blocks", default=str(BLOCK_FRAMES), help="frames per block for streamed reads, comma-separated")
     ap.add_argument("--quick", action="store_true", help="a small subset, to check that everything works")
     args = ap.parse_args()
