@@ -745,7 +745,7 @@ pub(crate) const fn file_system(_file: &File) -> FileSystem {
 ///   whole;
 /// - btrfs at 512 KiB: asking first and reading whole took 0.92 times as long, but from 1 MiB both
 ///   were level or slower, up to 1.09 times at 4 MiB.
-#[cfg(feature = "wav")]
+#[cfg(all(feature = "wav", feature = "numpy"))]
 pub(crate) fn whole_read_plan(file: &File, len: u64) -> Option<bool> {
     whole_read_plan_on(file, len, file_system(file))
 }
