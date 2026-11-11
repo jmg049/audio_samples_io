@@ -73,6 +73,8 @@ struct FirstRead<'py> {
     start: usize,
     /// Bytes read so far, from the file's first.
     filled: usize,
+    /// Whether the file was off the disk when it was opened.
+    cold: bool,
     info: BaseAudioInfo,
     /// Where the samples start in the file.
     offset: usize,
@@ -86,10 +88,10 @@ fn read_first<'py>(py: Python<'py>, path: &Path) -> Option<PyResult<(std::fs::Fi
     let opened = py.detach(|| -> AudioIOResult<_> {
         let file = std::fs::File::open(path)?;
         let len = file.metadata()?.len();
-        let (first, will_need) = crate::fastio::whole_read_plan(&file, len);
-        Ok((file, len, first, will_need))
+        let (first, will_need, cold) = crate::fastio::whole_read_plan(&file, len);
+        Ok((file, len, first, will_need, cold))
     });
-    let (file, len, first, will_need) = opened.ok()?;
+    let (file, len, first, will_need, cold) = opened.ok()?;
     let len_bytes = usize::try_from(len).ok()?;
     // SAFETY: the bytes are only read after the reads below fill them.
     let block = unsafe { PyArray1::<u8>::new(py, [len_bytes + PAGE], false) };
@@ -115,6 +117,7 @@ fn read_first<'py>(py: Python<'py>, path: &Path) -> Option<PyResult<(std::fs::Fi
             block,
             start,
             filled: first,
+            cold,
             info,
             offset: usize::try_from(offset).ok()?,
         },
@@ -171,10 +174,11 @@ where
                 let rest = data_end - first.filled;
                 let at = first.start + first.filled;
                 let filled = first.filled as u64;
+                let cold = first.cold;
                 // SAFETY: the block holds the whole file from `start`, and nothing else has seen it.
                 let read = py.detach(|| {
                     let bytes = unsafe { std::slice::from_raw_parts_mut(at as *mut u8, rest) };
-                    crate::fastio::read_exact_at_parallel(file, filled, bytes)
+                    crate::fastio::read_exact_at_parallel_known(file, filled, bytes, Some(cold))
                 });
                 if let Err(e) = read {
                     return Some(Err(io_err(e.into())));

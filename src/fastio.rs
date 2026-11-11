@@ -474,8 +474,27 @@ pub(crate) fn threads_for_read(permit: &ThreadsPermit, file: &File, offset: u64,
 /// [`read_exact_at`], on several threads for a large `buf`.
 #[cfg(feature = "wav")]
 pub(crate) fn read_exact_at_parallel(file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+    read_exact_at_parallel_known(file, offset, buf, None)
+}
+
+/// [`read_exact_at_parallel`] for a range already known to be off the disk or not (`cold`), which
+/// saves asking the kernel again.
+#[cfg(feature = "wav")]
+pub(crate) fn read_exact_at_parallel_known(
+    file: &File,
+    offset: u64,
+    buf: &mut [u8],
+    cold: Option<bool>,
+) -> io::Result<()> {
     let permit = ThreadsPermit::try_acquire();
-    let threads = threads_for_read(&permit, file, offset, buf.len());
+    let threads = match cold {
+        Some(true) => 1,
+        Some(false) => {
+            let threads = permit.threads(transfer_threads().min(buf.len() / TRANSFER_BYTES_PER_THREAD));
+            if buf.len() < TRANSFER_MIN_BYTES { 1 } else { threads }
+        },
+        None => threads_for_read(&permit, file, offset, buf.len()),
+    };
     if threads <= 1 || cfg!(not(any(unix, windows))) {
         return read_exact_at(file, offset, buf);
     }
@@ -880,8 +899,9 @@ pub(crate) const fn file_system(_file: &File) -> FileSystem {
 /// threads where it is in the page cache.
 ///
 /// A file in the page cache costs no trip to the disk, and its first read is only the header's 4 KiB,
-/// so that the threads take the rest. A file off the disk is read without a separate small read:
-/// whole up to 2 MiB, else in a first piece of [`COLD_FIRST_BYTES`] and the rest.
+/// so that the threads take the rest. A small file off the disk is read whole; a larger one also
+/// starts with 4 KiB, since a first read of 1 MiB made cold reads of 3.5 to 10 MB files on btrfs 0.6
+/// to 3% slower. The third value says whether the file is off the disk.
 ///
 /// Measured over ten files per size, against a header read followed by a read of the samples:
 /// - ext4 and xfs up to 1 MiB: asking first and reading whole took 0.86 to 0.94 times as long;
@@ -890,21 +910,17 @@ pub(crate) const fn file_system(_file: &File) -> FileSystem {
 /// - btrfs at 512 KiB: asking first and reading whole took 0.92 times as long, but from 1 MiB both
 ///   were level or slower, up to 1.09 times at 4 MiB; files up to 768 KiB are asked for whole.
 #[cfg(all(feature = "wav", feature = "numpy"))]
-pub(crate) fn whole_read_plan(file: &File, len: u64) -> (usize, bool) {
+pub(crate) fn whole_read_plan(file: &File, len: u64) -> (usize, bool, bool) {
     const HEADER: u64 = 4096;
     let cold = len > 0 && range_is_cold(file, 0, len as usize);
     if !cold {
-        return (len.min(HEADER) as usize, false);
+        return (len.min(HEADER) as usize, false, false);
     }
     match whole_read_plan_on(file, len, file_system(file)) {
-        Some(will_need) => (len as usize, will_need),
-        None => (len.min(COLD_FIRST_BYTES) as usize, false),
+        Some(will_need) => (len as usize, will_need, true),
+        None => (len.min(HEADER) as usize, false, true),
     }
 }
-
-/// Bytes of a cold file's first read when it is not read whole.
-#[cfg(all(feature = "wav", feature = "numpy"))]
-const COLD_FIRST_BYTES: u64 = 1024 * 1024;
 
 /// Whether a cold file of `len` bytes on `fs` is read whole, and asked for whole first.
 #[cfg(feature = "wav")]
