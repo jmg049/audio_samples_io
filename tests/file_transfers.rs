@@ -228,3 +228,58 @@ fn long_header_reads_the_samples() {
     assert!(audio.to_interleaved_vec() == samples);
     let _ = std::fs::remove_file(&path);
 }
+
+/// A streamed reader built over a buffer that already holds the file's first bytes reads the same
+/// samples as a whole-file read, and seeking back still works.
+#[test]
+fn streamed_reader_from_a_filled_buffer() {
+    use std::io::BufRead;
+
+    use audio_samples_io::wav::StreamedWavFile;
+
+    let frames = 50_000usize;
+    let audio = AudioSamples::new_multi_channel(noise(2, frames), sample_rate!(44100)).unwrap();
+    let path = temp("filled_buffer.wav");
+    write(&path, &audio).unwrap();
+    let expected = read::<_, i16>(&path).unwrap().to_interleaved_vec();
+
+    let file = std::fs::File::open(&path).unwrap();
+    let len = file.metadata().unwrap().len();
+    let mut reader = std::io::BufReader::with_capacity(1 << 20, file);
+    assert!(!reader.fill_buf().unwrap().is_empty());
+    let mut streamed = StreamedWavFile::new_with_len(reader, path.clone(), len).unwrap();
+    let got: Vec<i16> = streamed.samples::<i16>().map(Result::unwrap).collect();
+    assert!(got == expected);
+    streamed.seek_to_frame(10).unwrap();
+    let again: Vec<i16> = streamed.samples::<i16>().take(4).map(Result::unwrap).collect();
+    assert_eq!(again, expected[20..24]);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The planned stream reader returns the source's bytes in order whether requests go through its
+/// buffer or straight past it, and seeks relative to what the caller has read.
+#[test]
+fn stream_reader_reads_and_seeks_like_its_source() {
+    use std::io::{Cursor, Read, Seek, SeekFrom};
+
+    use audio_samples_io::StreamReader;
+
+    let data: Vec<u8> = (0..200_000u32).map(|i| (i * 7 % 251) as u8).collect();
+    let mut reader = StreamReader::with_buffer(Cursor::new(data.clone()), 4096, 1024);
+    let mut got = Vec::new();
+    let mut piece = vec![0u8; 3000];
+    for size in [10usize, 2000, 3000, 1, 1023, 1024, 3000] {
+        let n = reader.read(&mut piece[..size]).unwrap();
+        got.extend_from_slice(&piece[..n]);
+    }
+    assert!(got == data[..got.len()]);
+    let at = got.len() as u64;
+    assert_eq!(reader.seek(SeekFrom::Current(-5)).unwrap(), at - 5);
+    let mut five = [0u8; 5];
+    reader.read_exact(&mut five).unwrap();
+    assert_eq!(five, data[(at - 5) as usize..at as usize]);
+    reader.seek(SeekFrom::Start(150_000)).unwrap();
+    let mut rest = Vec::new();
+    reader.read_to_end(&mut rest).unwrap();
+    assert!(rest == data[150_000..]);
+}

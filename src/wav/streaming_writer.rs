@@ -448,12 +448,12 @@ where
 {
     let view = channel_frame_view(samples);
     match target {
-        ValidatedSampleType::U8 => write_interleaved_le::<T, u8, W>(writer, view, file_offset),
-        ValidatedSampleType::I16 => write_interleaved_le::<T, i16, W>(writer, view, file_offset),
-        ValidatedSampleType::I24 => write_interleaved_le::<T, I24, W>(writer, view, file_offset),
-        ValidatedSampleType::I32 => write_interleaved_le::<T, i32, W>(writer, view, file_offset),
-        ValidatedSampleType::F32 => write_interleaved_le::<T, f32, W>(writer, view, file_offset),
-        ValidatedSampleType::F64 => write_interleaved_le::<T, f64, W>(writer, view, file_offset),
+        ValidatedSampleType::U8 => write_interleaved_le::<T, u8, W>(writer, &[], view, file_offset),
+        ValidatedSampleType::I16 => write_interleaved_le::<T, i16, W>(writer, &[], view, file_offset),
+        ValidatedSampleType::I24 => write_interleaved_le::<T, I24, W>(writer, &[], view, file_offset),
+        ValidatedSampleType::I32 => write_interleaved_le::<T, i32, W>(writer, &[], view, file_offset),
+        ValidatedSampleType::F32 => write_interleaved_le::<T, f32, W>(writer, &[], view, file_offset),
+        ValidatedSampleType::F64 => write_interleaved_le::<T, f64, W>(writer, &[], view, file_offset),
     }
 }
 

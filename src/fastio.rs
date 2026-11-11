@@ -58,32 +58,148 @@ const THREAD_STACK_BYTES: usize = 256 * 1024;
 /// The limit set by [`set_thread_limit`]; zero when there is none.
 static THREAD_LIMIT: AtomicUsize = AtomicUsize::new(0);
 
-/// Prepare `file` to be streamed from start to end, and return the bytes a buffered reader should
-/// hold for it.
-///
-/// A small file that is not in the page cache is asked for whole first (`posix_fadvise(WILLNEED)`),
-/// as for whole-file reads (see the measurements there): otherwise the first small read, such as one
-/// that detects the format, and the reads after it are separate round trips to the disk, and a 1 s
-/// mono stream took 1.8 times as long as wave's.
-///
-/// The buffer is 1 MiB for a file on ext4 or xfs that is not in the page cache: reading off the disk in
-/// pieces of 1 MiB kept the kernel's requests large, and streamed reads took 0.93 to 0.98 times as
-/// long as in pieces of 8 to 256 KiB. Elsewhere, and for a file in the cache, it is the standard
-/// 8 KiB, which keeps reads of whole blocks out of the buffer; on btrfs 1 MiB was 1 to 3% slower.
+/// How to stream a file from start to end: see [`stream_plan`].
 #[cfg(feature = "wav")]
-pub fn prepare_for_streaming(file: &File) -> usize {
-    const CACHED: usize = 8 * 1024;
-    const COLD: usize = 1024 * 1024;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StreamPlan {
+    /// Bytes read at a time into the buffer.
+    pub buffer: usize,
+    /// Requests of at least this many bytes are read straight into the caller's memory, past the
+    /// buffer, once the buffer is empty.
+    pub direct_min: usize,
+    /// The file's length.
+    pub len: u64,
+}
+
+/// Choose how to stream `file` from start to end, from its size, whether it is in the page cache
+/// and its file system, and prepare it: a small file off the disk is asked for whole first
+/// (`posix_fadvise(WILLNEED)`), so that the first read, which tells the format and holds the header,
+/// and the reads after it are not separate round trips to the disk.
+///
+/// | file | buffer | read straight into the caller's memory | asked for whole |
+/// |---|---|---|---|
+/// | in the page cache | 256 KiB | requests of 16 KiB and more | no |
+/// | off the disk, ext4 or xfs | 1 MiB | never | up to 1 MiB |
+/// | off the disk, btrfs | 64 KiB | requests of 16 KiB and more | up to 768 KiB |
+/// | off the disk, elsewhere | 64 KiB | requests of 16 KiB and more | no |
+///
+/// Measured in C over caller blocks of 1 KiB to 1 MiB and files of 0.5 to 106 MiB, against the
+/// faster of an 8 KiB buffer (wave) and reads of the caller's block (soundfile):
+/// - cached: a 256 KiB buffer took 0.83 to 0.92 times as long for blocks of 1 and 4 KiB, where
+///   for blocks of 16 KiB and more the copy through any buffer cost 1.2 to 1.8 times, so those go
+///   straight to the caller;
+/// - off the disk on ext4 and xfs, reads of 1 MiB took 0.93 to 0.98 times as long as reads of 8 to
+///   256 KiB, at every block size;
+/// - off the disk on btrfs, files of 512 KiB asked for whole took 0.86 to 0.90 times as long; from
+///   2 MiB a 64 KiB buffer was the fastest plan (0.987 to 0.995), and reads of 1 MiB or more 2 to 5%
+///   slower. In Python against soundfile, a 256 KiB first read lost 4 to 5% on a cold 1.76 MB file.
+#[cfg(feature = "wav")]
+pub fn stream_plan(file: &File) -> StreamPlan {
+    const KIB: usize = 1024;
     let len = file.metadata().map_or(0, |m| m.len());
+    let cached = StreamPlan {
+        buffer: 256 * KIB,
+        direct_min: 16 * KIB,
+        len,
+    };
+    if len == 0 || !range_is_cold(file, 0, len as usize) {
+        return cached;
+    }
     let fs = file_system(file);
     if whole_read_plan_on(file, len, fs) == Some(true) {
         will_need(file);
     }
-    let len = len as usize;
-    if len > CACHED && fs.is_ext4_or_xfs() && range_is_cold(file, 0, len) {
-        COLD
+    if fs.is_ext4_or_xfs() {
+        StreamPlan {
+            buffer: 1024 * KIB,
+            direct_min: usize::MAX,
+            len,
+        }
     } else {
-        CACHED
+        StreamPlan {
+            buffer: 64 * KIB,
+            ..cached
+        }
+    }
+}
+
+/// A buffered reader that follows a [`StreamPlan`]: refills of `buffer` bytes, and requests of
+/// `direct_min` bytes or more read straight into the caller's memory once the buffer is empty.
+#[cfg(feature = "wav")]
+pub struct StreamReader<R> {
+    inner: R,
+    buf: Box<[u8]>,
+    pos: usize,
+    filled: usize,
+    direct_min: usize,
+}
+
+#[cfg(feature = "wav")]
+impl<R: io::Read> StreamReader<R> {
+    /// A reader over `inner`, positioned where `inner` is.
+    pub fn new(inner: R, plan: StreamPlan) -> Self {
+        Self::with_buffer(inner, plan.buffer, plan.direct_min)
+    }
+
+    /// A reader with a buffer of `buffer` bytes that reads requests of `direct_min` bytes or more
+    /// straight into the caller's memory.
+    pub fn with_buffer(inner: R, buffer: usize, direct_min: usize) -> Self {
+        Self {
+            inner,
+            buf: vec![0u8; buffer.max(1)].into_boxed_slice(),
+            pos: 0,
+            filled: 0,
+            direct_min,
+        }
+    }
+
+    /// The source.
+    pub const fn get_ref(&self) -> &R {
+        &self.inner
+    }
+}
+
+#[cfg(feature = "wav")]
+impl<R: io::Read> io::Read for StreamReader<R> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if self.pos == self.filled && out.len() >= self.direct_min {
+            return self.inner.read(out);
+        }
+        let available = io::BufRead::fill_buf(self)?;
+        let n = available.len().min(out.len());
+        out[..n].copy_from_slice(&available[..n]);
+        io::BufRead::consume(self, n);
+        Ok(n)
+    }
+}
+
+#[cfg(feature = "wav")]
+impl<R: io::Read> io::BufRead for StreamReader<R> {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        if self.pos == self.filled {
+            self.filled = self.inner.read(&mut self.buf)?;
+            self.pos = 0;
+        }
+        Ok(&self.buf[self.pos..self.filled])
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.pos = (self.pos + amount).min(self.filled);
+    }
+}
+
+#[cfg(feature = "wav")]
+impl<R: io::Read + io::Seek> io::Seek for StreamReader<R> {
+    fn seek(&mut self, to: io::SeekFrom) -> io::Result<u64> {
+        let buffered = (self.filled - self.pos) as i64;
+        let result = match to {
+            // Relative to the position seen by the caller, which is behind the source's.
+            io::SeekFrom::Current(d) => self.inner.seek(io::SeekFrom::Current(d - buffered))?,
+            other => self.inner.seek(other)?,
+        };
+        self.pos = 0;
+        self.filled = 0;
+        Ok(result)
     }
 }
 
@@ -493,13 +609,15 @@ where
 /// Write the samples of `view`, shape `(channels, frames)`, interleaved and little-endian as `U`.
 ///
 /// Samples whose memory is already the file's layout go straight to `writer`. Anything else
-/// passes through a buffer of [`TILE_BYTES`], so no copy of the signal is made. Returns the
-/// number of bytes written. `file_offset` is where the samples start in the destination: each tile
+/// passes through a buffer of [`TILE_BYTES`], so no copy of the signal is made. `prefix`, such as a
+/// header, is written in the same call as the first samples. Returns the number of sample bytes
+/// written. `file_offset` is where the samples start in the destination: each tile
 /// is placed a little above that offset within a page, which makes the kernel's copy into the
 /// page cache about 15% faster than when the source's page offset is the lower of the two.
 #[cfg(any(feature = "wav", feature = "flac"))]
 pub(crate) fn write_interleaved_le<T, U, W>(
     writer: &mut W,
+    prefix: &[u8],
     view: ArrayView2<'_, T>,
     file_offset: u64,
 ) -> AudioIOResult<usize>
@@ -512,6 +630,7 @@ where
     let size = U::BYTES as usize;
     let total = channels * frames * size;
     if total == 0 {
+        writer.write_all(prefix)?;
         return Ok(0);
     }
 
@@ -530,7 +649,7 @@ where
         // SAFETY: T is a plain numeric type, for which any initialised memory is valid bytes,
         // and its in-memory layout on a little-endian machine is the file's.
         let bytes = unsafe { std::slice::from_raw_parts(slice.as_ptr().cast::<u8>(), total) };
-        writer.write_all(bytes)?;
+        write_both(writer, prefix, bytes)?;
         return Ok(total);
     }
 
@@ -553,6 +672,7 @@ where
     let source = FrameSource::<T, U>::new(view);
     let mut tails: Vec<&[T]> = Vec::with_capacity(channels);
     let mut start = 0usize;
+    let mut prefix = prefix;
     while start < frames {
         let count = tile_frames.min(frames - start);
         let bytes = count * frame_bytes;
@@ -562,10 +682,30 @@ where
         // SAFETY: the tile holds `count` frames, and they lie within the view.
         unsafe { source.pack(start, count, tile, &mut tails) };
         // SAFETY: every one of these bytes was written above.
-        writer.write_all(unsafe { std::slice::from_raw_parts(tile, bytes) })?;
+        write_both(writer, prefix, unsafe { std::slice::from_raw_parts(tile, bytes) })?;
+        prefix = &[];
         start += count;
     }
     Ok(total)
+}
+
+/// Write `first` and then `second`, in one call where the writer takes both.
+#[cfg(any(feature = "wav", feature = "flac"))]
+fn write_both<W: Write>(writer: &mut W, first: &[u8], second: &[u8]) -> io::Result<()> {
+    let (mut first, mut second) = (first, second);
+    while !first.is_empty() {
+        let n = writer.write_vectored(&[io::IoSlice::new(first), io::IoSlice::new(second)])?;
+        if n == 0 {
+            return Err(io::ErrorKind::WriteZero.into());
+        }
+        if n < first.len() {
+            first = &first[n..];
+        } else {
+            second = &second[n - first.len()..];
+            first = &[];
+        }
+    }
+    writer.write_all(second)
 }
 
 /// Frames of a view, for packing into the file's layout in any order.
@@ -734,34 +874,50 @@ pub(crate) const fn file_system(_file: &File) -> FileSystem {
     FileSystem::Other
 }
 
-/// How to read a small WAV file that is not in the page cache: whole, in one read from its first
-/// byte, and whether to ask the kernel for all of it first (`posix_fadvise(WILLNEED)`). `None` means
-/// the usual header read and then a read of the samples.
+/// How a whole-file read takes a WAV file: how many bytes the first read, from byte 0, takes (the
+/// header comes from it, with the first samples), and whether to ask the kernel for the whole file
+/// first (`posix_fadvise(WILLNEED)`). The rest of the file follows in one more read, on several
+/// threads where it is in the page cache.
 ///
-/// Measured over ten files per size, against reading the header and then the samples:
+/// A file in the page cache costs no trip to the disk, and its first read is only the header's 4 KiB,
+/// so that the threads take the rest. A file off the disk is read without a separate small read:
+/// whole up to 2 MiB, else in a first piece of [`COLD_FIRST_BYTES`] and the rest.
+///
+/// Measured over ten files per size, against a header read followed by a read of the samples:
 /// - ext4 and xfs up to 1 MiB: asking first and reading whole took 0.86 to 0.94 times as long;
 /// - ext4 and xfs from 1 to 2 MiB: reading whole took 0.97 to 0.98 times as long, where asking
-///   first was slower; at 3.5 MiB it took 1.01 to 1.03 times as long, so larger files are not read
-///   whole;
+///   first was slower; at 3.5 MiB one read of the whole file took 1.01 to 1.03 times as long;
 /// - btrfs at 512 KiB: asking first and reading whole took 0.92 times as long, but from 1 MiB both
-///   were level or slower, up to 1.09 times at 4 MiB.
+///   were level or slower, up to 1.09 times at 4 MiB; files up to 768 KiB are asked for whole.
 #[cfg(all(feature = "wav", feature = "numpy"))]
-pub(crate) fn whole_read_plan(file: &File, len: u64) -> Option<bool> {
-    whole_read_plan_on(file, len, file_system(file))
+pub(crate) fn whole_read_plan(file: &File, len: u64) -> (usize, bool) {
+    const HEADER: u64 = 4096;
+    let cold = len > 0 && range_is_cold(file, 0, len as usize);
+    if !cold {
+        return (len.min(HEADER) as usize, false);
+    }
+    match whole_read_plan_on(file, len, file_system(file)) {
+        Some(will_need) => (len as usize, will_need),
+        None => (len.min(COLD_FIRST_BYTES) as usize, false),
+    }
 }
 
+/// Bytes of a cold file's first read when it is not read whole.
+#[cfg(all(feature = "wav", feature = "numpy"))]
+const COLD_FIRST_BYTES: u64 = 1024 * 1024;
+
+/// Whether a cold file of `len` bytes on `fs` is read whole, and asked for whole first.
 #[cfg(feature = "wav")]
-fn whole_read_plan_on(file: &File, len: u64, fs: FileSystem) -> Option<bool> {
+fn whole_read_plan_on(_file: &File, len: u64, fs: FileSystem) -> Option<bool> {
     const MIB: u64 = 1024 * 1024;
     if len == 0 || len > 2 * MIB {
         return None;
     }
-    let plan = match fs {
-        FileSystem::Ext4 | FileSystem::Xfs => len <= MIB,
-        FileSystem::Btrfs if len <= MIB / 2 => true,
-        _ => return None,
-    };
-    range_is_cold(file, 0, len as usize).then_some(plan)
+    match fs {
+        FileSystem::Ext4 | FileSystem::Xfs => Some(len <= MIB),
+        FileSystem::Btrfs if len <= 3 * MIB / 4 => Some(true),
+        _ => None,
+    }
 }
 
 /// Ask the kernel to read all of `file` into the page cache.
@@ -789,7 +945,7 @@ enum MappedFill {
 }
 
 /// Fill a large new file through a mapping, from several threads, with the samples of `view` in
-/// the file's layout at `file_offset`, which is the file's current position. True if done; on false
+/// the file's layout at `file_offset`, preceded by `header`, which is that long. True if done; on false
 /// nothing is written that counts, the position is unchanged, and the ordinary write is left to
 /// report what is wrong.
 ///
@@ -801,7 +957,12 @@ enum MappedFill {
 /// being overwritten. Only another process truncating the file during the write can raise a signal.
 #[cfg(feature = "wav")]
 #[cfg(target_os = "linux")]
-pub(crate) fn write_samples_mapped<T, U>(file: &File, view: ArrayView2<'_, T>, file_offset: u64) -> io::Result<bool>
+pub(crate) fn write_samples_mapped<T, U>(
+    file: &mut File,
+    header: &[u8],
+    view: ArrayView2<'_, T>,
+    file_offset: u64,
+) -> io::Result<bool>
 where
     T: StandardSample + ConvertTo<U> + Sync + 'static,
     U: StandardSample + 'static,
@@ -825,6 +986,9 @@ where
     }
     use std::os::fd::AsRawFd;
     let offset = file_offset as usize;
+    if header.len() != offset {
+        return Ok(false);
+    }
     let end = offset + total;
     let before = file.metadata()?.len();
     match fill {
@@ -860,6 +1024,16 @@ where
         return Ok(false);
     }
     let base = map as usize;
+    // The header goes into the mapping too, so that the file takes no write call at all.
+    // SAFETY: the first page lies in the mapping; populating it changes no contents.
+    if fill == MappedFill::Memory && unsafe { libc::madvise(map, 4096.min(end), libc::MADV_POPULATE_WRITE) } != 0 {
+        // SAFETY: the mapping was made above.
+        unsafe { libc::munmap(map, end) };
+        file.set_len(before)?;
+        return Ok(false);
+    }
+    // SAFETY: the header is `offset` bytes, checked above, and the mapping holds `end` > `offset`.
+    unsafe { std::ptr::copy_nonoverlapping(header.as_ptr(), base as *mut u8, header.len()) };
     let source = FrameSource::<T, U>::new(view);
     let chunk = frames.div_ceil(threads).max(1);
     let source = &source;
@@ -894,14 +1068,18 @@ where
         file.set_len(before)?;
         return Ok(false);
     }
-    let mut position = file;
-    position.seek(io::SeekFrom::Start(end as u64))?;
+    file.seek(io::SeekFrom::Start(end as u64))?;
     Ok(true)
 }
 
 #[cfg(feature = "wav")]
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn write_samples_mapped<T, U>(_file: &File, _view: ArrayView2<'_, T>, _file_offset: u64) -> io::Result<bool>
+pub(crate) fn write_samples_mapped<T, U>(
+    _file: &mut File,
+    _header: &[u8],
+    _view: ArrayView2<'_, T>,
+    _file_offset: u64,
+) -> io::Result<bool>
 where
     T: StandardSample + ConvertTo<U> + Sync + 'static,
     U: StandardSample + 'static,

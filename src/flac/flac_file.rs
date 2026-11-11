@@ -752,7 +752,7 @@ where
     // These types are stored unchanged, so their bytes go straight through.
     let id = std::any::TypeId::of::<U>();
     if id == std::any::TypeId::of::<i16>() || id == std::any::TypeId::of::<I24>() {
-        if crate::fastio::write_interleaved_le::<T, U, _>(&mut md5, view, 0).is_ok() {
+        if crate::fastio::write_interleaved_le::<T, U, _>(&mut md5, &[], view, 0).is_ok() {
             return md5.finish();
         }
         md5 = Md5::new();

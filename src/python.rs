@@ -64,55 +64,61 @@ where
     (array, data)
 }
 
-/// A small WAV file read whole into one block: the bytes from its first, page-aligned, and the header
-/// parsed from them. See [`crate::fastio::whole_read_plan`].
+/// A WAV file whose first bytes have been read into a block with room for the whole file: the header
+/// is parsed from them, and they hold the first samples. See [`crate::fastio::whole_read_plan`].
 #[cfg(target_endian = "little")]
-struct WholeFile<'py> {
+struct FirstRead<'py> {
     block: Bound<'py, PyArray1<u8>>,
+    /// Page-aligned address of the file's first byte in the block.
     start: usize,
-    len: usize,
+    /// Bytes read so far, from the file's first.
+    filled: usize,
     info: BaseAudioInfo,
+    /// Where the samples start in the file.
     offset: usize,
 }
 
-/// Open a WAV file for a whole-file read: the file, its length, and the plan for reading it whole.
+/// Open a WAV file and read its first bytes, from which the header comes: one read for a small file
+/// off the disk, which is read whole. `None` if the header cannot be parsed from them.
 #[cfg(target_endian = "little")]
-fn open_for_read(path: &Path) -> AudioIOResult<(std::fs::File, u64, Option<bool>)> {
-    let file = std::fs::File::open(path)?;
-    let len = file.metadata()?.len();
-    let plan = crate::fastio::whole_read_plan(&file, len);
-    Ok((file, len, plan))
-}
-
-#[cfg(target_endian = "little")]
-fn read_whole<'py>(py: Python<'py>, file: &std::fs::File, len: u64, will_need: bool) -> Option<WholeFile<'py>> {
+fn read_first<'py>(py: Python<'py>, path: &Path) -> Option<PyResult<(std::fs::File, FirstRead<'py>)>> {
     const PAGE: usize = 4096;
-    let len = usize::try_from(len).ok()?;
-    // SAFETY: the bytes are only read after the read below fills them.
-    let block = unsafe { PyArray1::<u8>::new(py, [len + PAGE], false) };
+    let opened = py.detach(|| -> AudioIOResult<_> {
+        let file = std::fs::File::open(path)?;
+        let len = file.metadata()?.len();
+        let (first, will_need) = crate::fastio::whole_read_plan(&file, len);
+        Ok((file, len, first, will_need))
+    });
+    let (file, len, first, will_need) = opened.ok()?;
+    let len_bytes = usize::try_from(len).ok()?;
+    // SAFETY: the bytes are only read after the reads below fill them.
+    let block = unsafe { PyArray1::<u8>::new(py, [len_bytes + PAGE], false) };
     let start = (block.data() as usize).next_multiple_of(PAGE);
-    let filled = py.detach(|| {
+    let read = py.detach(|| {
         if will_need {
-            crate::fastio::will_need(file);
+            crate::fastio::will_need(&file);
         }
         // SAFETY: `start` is at most PAGE - 1 bytes into the block, which holds len + PAGE bytes, and
         // nothing else has seen the block.
-        let bytes = unsafe { std::slice::from_raw_parts_mut(start as *mut u8, len) };
-        crate::fastio::read_exact_at(file, 0, bytes).is_ok()
+        let bytes = unsafe { std::slice::from_raw_parts_mut(start as *mut u8, first) };
+        crate::fastio::read_exact_at(&file, 0, bytes)
     });
-    if !filled {
-        return None;
+    if let Err(e) = read {
+        return Some(Err(PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string())));
     }
     // SAFETY: the read above filled these bytes.
-    let bytes = unsafe { std::slice::from_raw_parts(start as *const u8, len) };
-    let (info, offset) = parse_wav_header_streaming(&mut std::io::Cursor::new(bytes)).ok()?;
-    Some(WholeFile {
-        block,
-        start,
-        len,
-        info,
-        offset: usize::try_from(offset).ok()?,
-    })
+    let prefix = unsafe { std::slice::from_raw_parts(start as *const u8, first) };
+    let (info, offset) = crate::wav::wav_file::wav_header_from(prefix, &file, len).ok()?;
+    Some(Ok((
+        file,
+        FirstRead {
+            block,
+            start,
+            filled: first,
+            info,
+            offset: usize::try_from(offset).ok()?,
+        },
+    )))
 }
 
 /// Whether `T` is the sample type of the file, so that its samples can be used in place.
@@ -127,14 +133,25 @@ fn is_native<T: 'static>(sample_type: audio_samples::SampleType) -> bool {
     }
 }
 
-/// The samples of a file read whole, as an interleaved `(channels, frames)` array: in place in the
-/// block when `T` is the file's type, else converted into a new array.
+fn io_err(e: AudioIOError) -> PyErr {
+    PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string())
+}
+
+/// The samples of a file as an interleaved `(channels, frames)` array, starting from its first read.
+///
+/// When `T` is the file's type, the samples are read on into the block behind the first ones and
+/// used in place (or, where the sample type's alignment does not allow that, into an array of their
+/// own). Otherwise those read so far are converted, and the rest converted as they are read.
 #[cfg(target_endian = "little")]
-fn whole_into_array<T>(py: Python<'_>, whole: WholeFile<'_>) -> Option<PyResult<(Py<PyArray2<T>>, BaseAudioInfo)>>
+fn first_into_array<T>(
+    py: Python<'_>,
+    file: &std::fs::File,
+    first: FirstRead<'_>,
+) -> Option<PyResult<(Py<PyArray2<T>>, BaseAudioInfo)>>
 where
     T: StandardSample + Element + 'static,
 {
-    let info = whole.info;
+    let info = first.info;
     let file_type = ValidatedSampleType::try_from(info.sample_type).ok()?;
     let channels = info.channels as usize;
     let total = info.total_samples;
@@ -144,38 +161,77 @@ where
     let frames = total / channels;
     let size = file_type.bytes_per_sample().get();
     let byte_count = total.checked_mul(size)?;
-    if whole.offset.checked_add(byte_count)? > whole.len {
-        return None;
-    }
+    let data_end = first.offset.checked_add(byte_count)?;
+    let have = first.filled.saturating_sub(first.offset).min(byte_count);
+    let data = first.start + first.offset;
+
     if is_native::<T>(info.sample_type) && size == std::mem::size_of::<T>() {
-        let mut data = whole.start + whole.offset;
-        let misalign = data % std::mem::align_of::<T>();
-        if misalign != 0 {
-            // SAFETY: both ranges lie in the block: the samples start past the header, more than
-            // `misalign` bytes after `start`, and `copy` allows overlap.
-            unsafe { std::ptr::copy(data as *const u8, (data - misalign) as *mut u8, byte_count) };
-            data -= misalign;
+        if data.is_multiple_of(std::mem::align_of::<T>()) {
+            if first.filled < data_end {
+                let rest = data_end - first.filled;
+                let at = first.start + first.filled;
+                let filled = first.filled as u64;
+                // SAFETY: the block holds the whole file from `start`, and nothing else has seen it.
+                let read = py.detach(|| {
+                    let bytes = unsafe { std::slice::from_raw_parts_mut(at as *mut u8, rest) };
+                    crate::fastio::read_exact_at_parallel(file, filled, bytes)
+                });
+                if let Err(e) = read {
+                    return Some(Err(io_err(e.into())));
+                }
+            }
+            use ndarray::ShapeBuilder;
+            // SAFETY: the block holds `byte_count` bytes of samples of type T from `data`, which is
+            // aligned for T, and the block becomes the array's base object, so it outlives the array.
+            let array = unsafe {
+                let view = ndarray::ArrayView2::from_shape_ptr((channels, frames).f(), data as *const T);
+                PyArray2::borrow_from_array(&view, first.block.into_any())
+            };
+            return Some(Ok((array.unbind(), info)));
         }
-        use ndarray::ShapeBuilder;
-        // SAFETY: the block holds `byte_count` bytes of samples of type T from `data`, which is
-        // aligned for T, and the block becomes the array's base object, so it outlives the array.
-        let array = unsafe {
-            let view = ndarray::ArrayView2::from_shape_ptr((channels, frames).f(), data as *const T);
-            PyArray2::borrow_from_array(&view, whole.block.into_any())
-        };
-        return Some(Ok((array.unbind(), info)));
+        let (array, out) = new_output_array::<T>(py, channels, frames, true, first.offset as u64);
+        let read = py.detach(|| {
+            // SAFETY: the array holds `byte_count` bytes and nothing else has seen it; the first `have`
+            // bytes of samples were read into the block.
+            let bytes = unsafe { std::slice::from_raw_parts_mut(out as *mut u8, byte_count) };
+            bytes[..have].copy_from_slice(unsafe { std::slice::from_raw_parts(data as *const u8, have) });
+            crate::fastio::read_exact_at_parallel(file, (first.offset + have) as u64, &mut bytes[have..])
+        });
+        return Some(read.map(|()| (array.unbind(), info)).map_err(|e| io_err(e.into())));
     }
-    let (array, data) = new_output_array::<T>(py, channels, frames, true, 0);
-    // SAFETY: the new array holds `total` values and nothing else has seen it; the source bytes
-    // were read into the block above.
-    let (out, source) = unsafe {
-        (
-            std::slice::from_raw_parts_mut(data as *mut T, total),
-            std::slice::from_raw_parts((whole.start + whole.offset) as *const u8, byte_count),
-        )
-    };
-    crate::wav::streaming::convert_bytes_into(file_type, source, out);
-    Some(Ok((array.unbind(), info)))
+
+    // Converted: whole frames from the first read, then the rest from the file.
+    let frame_bytes = channels * size;
+    let done = have / frame_bytes * channels;
+    let (array, out) = new_output_array::<T>(py, channels, frames, true, 0);
+    let offset = first.offset;
+    let read = py.detach(|| {
+        // SAFETY: the array holds `total` values and nothing else has seen it; the source bytes were
+        // read into the block.
+        let out = unsafe { std::slice::from_raw_parts_mut(out as *mut T, total) };
+        let source = unsafe { std::slice::from_raw_parts(data as *const u8, done * size) };
+        crate::wav::streaming::convert_bytes_into(file_type, source, &mut out[..done]);
+        if done == total {
+            return Ok(());
+        }
+        let read = crate::wav::streaming::read_converted_parallel(
+            file,
+            (offset + done * size) as u64,
+            file_type,
+            &mut out[done..],
+            channels,
+        )?;
+        if done + read == total {
+            Ok(())
+        } else {
+            Err(AudioIOError::corrupted_data_simple(
+                "Truncated WAV data",
+                format!("expected {total} samples, found {}", done + read),
+            ))
+        }
+    });
+    drop(first.block);
+    Some(read.map(|()| (array.unbind(), info)).map_err(io_err))
 }
 
 /// Type-erased container for a natively-typed audio array produced by [`read_pyarray_native`].
@@ -206,103 +262,31 @@ pub fn read_pyarray_native(py: Python<'_>, path: &Path) -> Option<PyResult<Nativ
         return None;
     }
 
-    // Step 1: open + header (GIL released — pure I/O). A small file off the disk is read whole.
-    let (reader, len, plan) = py.detach(|| open_for_read(path)).ok()?;
-    if let Some(will_need) = plan
-        && let Some(whole) = read_whole(py, &reader, len, will_need)
-    {
-        let read = match whole.info.sample_type {
-            audio_samples::SampleType::U8 => {
-                whole_into_array::<u8>(py, whole).map(|r| r.map(|(a, i)| NativeAudioArray::U8(a, i)))
-            },
-            audio_samples::SampleType::I16 => {
-                whole_into_array::<i16>(py, whole).map(|r| r.map(|(a, i)| NativeAudioArray::I16(a, i)))
-            },
-            audio_samples::SampleType::I32 => {
-                whole_into_array::<i32>(py, whole).map(|r| r.map(|(a, i)| NativeAudioArray::I32(a, i)))
-            },
-            audio_samples::SampleType::F32 => {
-                whole_into_array::<f32>(py, whole).map(|r| r.map(|(a, i)| NativeAudioArray::F32(a, i)))
-            },
-            audio_samples::SampleType::F64 => {
-                whole_into_array::<f64>(py, whole).map(|r| r.map(|(a, i)| NativeAudioArray::F64(a, i)))
-            },
-            _ => None,
-        };
-        if read.is_some() {
-            return read;
-        }
-    }
-
-    // Return None on any parse error — the caller will try the slower fallback path.
-    let (info, offset) = py.detach(|| crate::wav::wav_file::wav_header_of(&reader, len)).ok()?;
-
-    // I24 has a non-standard in-memory layout — exclude from the direct path.
-    if matches!(info.sample_type, audio_samples::SampleType::I24) {
-        return None;
-    }
-
-    let channels = info.channels as usize;
-    let total_samples = info.total_samples;
-    if channels == 0 || total_samples == 0 || total_samples % channels != 0 {
-        return None;
-    }
-
-    // Step 2 + 3: allocate PyArray (GIL held) then fill it (GIL released), dispatched per type.
-    let result = match info.sample_type {
+    // The header comes from the file's first read, which also holds the first samples.
+    let (file, first) = match read_first(py, path)? {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let read = match first.info.sample_type {
         audio_samples::SampleType::U8 => {
-            alloc_and_fill::<u8>(py, reader, offset, info).map(|(a, i)| NativeAudioArray::U8(a, i))
+            first_into_array::<u8>(py, &file, first)?.map(|(a, i)| NativeAudioArray::U8(a, i))
         },
         audio_samples::SampleType::I16 => {
-            alloc_and_fill::<i16>(py, reader, offset, info).map(|(a, i)| NativeAudioArray::I16(a, i))
+            first_into_array::<i16>(py, &file, first)?.map(|(a, i)| NativeAudioArray::I16(a, i))
         },
         audio_samples::SampleType::I32 => {
-            alloc_and_fill::<i32>(py, reader, offset, info).map(|(a, i)| NativeAudioArray::I32(a, i))
+            first_into_array::<i32>(py, &file, first)?.map(|(a, i)| NativeAudioArray::I32(a, i))
         },
         audio_samples::SampleType::F32 => {
-            alloc_and_fill::<f32>(py, reader, offset, info).map(|(a, i)| NativeAudioArray::F32(a, i))
+            first_into_array::<f32>(py, &file, first)?.map(|(a, i)| NativeAudioArray::F32(a, i))
         },
         audio_samples::SampleType::F64 => {
-            alloc_and_fill::<f64>(py, reader, offset, info).map(|(a, i)| NativeAudioArray::F64(a, i))
+            first_into_array::<f64>(py, &file, first)?.map(|(a, i)| NativeAudioArray::F64(a, i))
         },
+        // I24 has a layout of its own in memory; the caller's general path reads it.
         _ => return None,
     };
-
-    Some(result)
-}
-
-/// Allocate a Fortran-layout `PyArray2<T>` and fill it from `file` at `offset`.
-///
-/// GIL is held for the allocation, released for the read.
-#[cfg(target_endian = "little")]
-fn alloc_and_fill<T>(
-    py: Python<'_>,
-    file: std::fs::File,
-    offset: u64,
-    info: BaseAudioInfo,
-) -> PyResult<(Py<PyArray2<T>>, BaseAudioInfo)>
-where
-    T: Element + 'static,
-{
-    use std::mem::size_of;
-
-    let channels = info.channels as usize;
-    let total_samples = info.total_samples;
-    let frames = total_samples / channels;
-    let byte_count = total_samples * size_of::<T>();
-
-    // Fortran (column-major) layout: element [c, f] → c + f*channels, matching WAV interleaved.
-    let (array, data_ptr_usize) = new_output_array::<T>(py, channels, frames, true, offset);
-
-    let read_result: AudioIOResult<()> = py.detach(|| {
-        // Safety: pointer valid (just allocated, not yet shared), CPython is non-moving.
-        let bytes = unsafe { std::slice::from_raw_parts_mut(data_ptr_usize as *mut u8, byte_count) };
-        crate::fastio::read_exact_at_parallel(&file, offset, bytes).map_err(AudioIOError::from)
-    });
-
-    read_result.map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-
-    Ok((array.unbind(), info))
+    Some(read)
 }
 
 /// Read audio file directly into NumPy array.
@@ -370,66 +354,11 @@ fn read_pyarray_direct<T>(py: Python<'_>, path: &Path) -> Option<PyResult<(Py<Py
 where
     T: StandardSample + Element + 'static,
 {
-    use std::mem::size_of;
-
-    // Step 1: Parse WAV header with GIL released (I/O). The payload read below goes straight to
-    // the array, so the buffer only has to hold the header.
-    let (file, len, plan) = py.detach(|| open_for_read(path)).ok()?;
-    // A small file off the disk is read whole, and its samples used in place or converted.
-    if let Some(will_need) = plan
-        && let Some(whole) = read_whole(py, &file, len, will_need)
-        && let Some(read) = whole_into_array::<T>(py, whole)
-    {
-        return Some(read);
-    }
-    let (info, offset) = py.detach(|| crate::wav::wav_file::wav_header_of(&file, len)).ok()?;
-
-    // Fast path applies only when T matches the file's native sample type.
-    let native_matches = is_native::<T>(info.sample_type);
-    let file_type = match ValidatedSampleType::try_from(info.sample_type) {
-        Ok(t) => t,
-        Err(_) => return None,
+    let (file, first) = match read_first(py, path)? {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
     };
-
-    let channels = info.channels as usize;
-    let total_samples = info.total_samples;
-    if channels == 0 || total_samples == 0 || total_samples % channels != 0 {
-        return None;
-    }
-    let frames = total_samples / channels;
-    let byte_count = total_samples * size_of::<T>();
-
-    // Step 2: Allocate an array with Fortran (column-major) layout (GIL held, fast).
-    // Fortran layout for shape (channels, frames) maps element [c, f] to index c + f*channels,
-    // which is exactly WAV's interleaved on-disk format — no deinterleave needed.
-    let (array, data_ptr_usize) = new_output_array::<T>(py, channels, frames, true, offset);
-
-    // Step 3: Read audio payload directly into the array's buffer (GIL released).
-    let read_result: AudioIOResult<()> = py.detach(|| {
-        if !native_matches {
-            // Another sample type: convert block by block, through no copy of the whole file.
-            // Safety: as below.
-            let out = unsafe { std::slice::from_raw_parts_mut(data_ptr_usize as *mut T, total_samples) };
-            let read = crate::wav::streaming::read_converted_parallel(&file, offset, file_type, out, channels)?;
-            if read != total_samples {
-                return Err(AudioIOError::corrupted_data_simple(
-                    "Truncated WAV data",
-                    format!("expected {total_samples} samples, found {read}"),
-                ));
-            }
-            return Ok(());
-        }
-        // Safety: pointer was valid when captured (step 2), array is held alive by `array`,
-        // CPython does not move objects, no other thread has seen this array.
-        let bytes = unsafe { std::slice::from_raw_parts_mut(data_ptr_usize as *mut u8, byte_count) };
-        crate::fastio::read_exact_at_parallel(&file, offset, bytes).map_err(AudioIOError::from)
-    });
-
-    if let Err(e) = read_result {
-        return Some(Err(PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string())));
-    }
-
-    Some(Ok((array.unbind(), info)))
+    first_into_array::<T>(py, &file, first)
 }
 
 /// FLAC: decode into a C-order `(channels, frames)` NumPy array in one pass, with the GIL

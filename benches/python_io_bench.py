@@ -509,11 +509,14 @@ def describe(row):
         parts.append(f"direct {row['direct_p50']:.3f}")
     return (
         f"{row['fmt']} {row['op']:<8} {row['cache'] or row['target']:<5} {row['type']} {row['ch']}ch {row['dur']:>4}s "
+        + (f"block {row['block']} " if "block" in row else "")
+        + ""
         f"x{row['rounds']:<4} " + "  ".join(parts)
     )
 
 
 def main():
+    global BLOCK_FRAMES
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--dir", default=None, help="directory on the disk to test (default: a new temporary one)")
     ap.add_argument("--out", default=None, help="results file (default: python_io_results_<host>_<fs>.jsonl here)")
@@ -528,6 +531,7 @@ def main():
     ap.add_argument("--budget", type=float, default=0.3, help="seconds per row per library, roughly")
     ap.add_argument("--min-rounds", type=int, default=11)
     ap.add_argument("--max-rounds", type=int, default=400)
+    ap.add_argument("--stream-blocks", default=str(BLOCK_FRAMES), help="frames per block for streamed reads, comma-separated")
     ap.add_argument("--quick", action="store_true", help="a small subset, to check that everything works")
     args = ap.parse_args()
     if args.quick:
@@ -553,7 +557,7 @@ def main():
                 except ValueError:
                     continue
                 if "op" in r:
-                    done.add((r["fmt"], r["op"], r["cache"], r["target"], r["type"], r["ch"], r["dur"], r.get("threads", "default")))
+                    done.add((r["fmt"], r["op"], r["cache"], r["target"], r["type"], r["ch"], r["dur"], r.get("threads", "default"), r.get("block", BLOCK_FRAMES)))
     threads = os.environ.get("AUDIO_SAMPLES_IO_THREADS", "default")
     with open(args.out, "a") as out:
         if not done:
@@ -572,22 +576,27 @@ def main():
                         for cache, target in modes:
                             lengths = args.cold_dur if cache == "cold" else args.dur
                             for seconds in map(int, lengths.split(",")):
-                                key = (fmt, op, cache, target, sample_type, channels, seconds, threads)
-                                if key in done:
-                                    continue
-                                if op == "read":
-                                    funcs = readers(fmt, sample_type)
-                                elif op == "read-f32":
-                                    funcs = float_readers(fmt, sample_type)
-                                elif op == "stream":
-                                    funcs = stream_readers(fmt, sample_type)
-                                else:
-                                    funcs = writers(args.dir, fmt, sample_type, channels, seconds)
-                                row = dict(fmt=fmt, op=op, cache=cache, target=target, type=sample_type, ch=channels, dur=seconds, threads=threads)
-                                run_row(args, row, funcs)
-                                out.write(json.dumps(row) + "\n")
-                                out.flush()
-                                print(describe(row), flush=True)
+                                blocks = map(int, args.stream_blocks.split(",")) if op == "stream" else [BLOCK_FRAMES]
+                                for block in blocks:
+                                    key = (fmt, op, cache, target, sample_type, channels, seconds, threads, block)
+                                    if key in done:
+                                        continue
+                                    BLOCK_FRAMES = block
+                                    if op == "read":
+                                        funcs = readers(fmt, sample_type)
+                                    elif op == "read-f32":
+                                        funcs = float_readers(fmt, sample_type)
+                                    elif op == "stream":
+                                        funcs = stream_readers(fmt, sample_type)
+                                    else:
+                                        funcs = writers(args.dir, fmt, sample_type, channels, seconds)
+                                    row = dict(fmt=fmt, op=op, cache=cache, target=target, type=sample_type, ch=channels, dur=seconds, threads=threads)
+                                    if block != 4096:
+                                        row["block"] = block
+                                    run_row(args, row, funcs)
+                                    out.write(json.dumps(row) + "\n")
+                                    out.flush()
+                                    print(describe(row), flush=True)
     print(f"\nResults: {os.path.abspath(args.out)}")
 
 

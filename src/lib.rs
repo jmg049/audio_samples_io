@@ -29,7 +29,7 @@ pub use crate::streaming::StreamedAudioWriter;
 
 mod fastio;
 #[cfg(feature = "wav")]
-pub use crate::fastio::prepare_for_streaming;
+pub use crate::fastio::{StreamPlan, StreamReader, stream_plan};
 pub use crate::fastio::{set_thread_limit, thread_limit};
 #[cfg(feature = "numpy")]
 pub mod python;
@@ -317,8 +317,15 @@ where
     match FileType::detect(path) {
         FileType::WAV => {
             let file = File::open(path)?;
-            let reader = BufReader::with_capacity(prepare_for_streaming(&file), file);
-            StreamedWavFile::new_with_path(reader, path.to_path_buf())
+            let plan = stream_plan(&file);
+            // A standard buffered reader passes requests of its capacity and more straight through;
+            // the plan's large buffer applies where it never does that (off the disk on ext4 and xfs).
+            let capacity = if plan.direct_min == usize::MAX {
+                plan.buffer
+            } else {
+                8 * 1024
+            };
+            StreamedWavFile::new_with_len(BufReader::with_capacity(capacity, file), path.to_path_buf(), plan.len)
         },
         other => Err(crate::error::AudioIOError::unsupported_format(format!(
             "Unsupported file format for streaming: {other:?}"

@@ -2,7 +2,7 @@ use core::fmt::{Display, Formatter, Result as FmtResult};
 use std::{
     any::TypeId,
     fs::File,
-    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    io::{BufReader, Read, Seek, SeekFrom, Write},
     mem,
     num::NonZeroU32,
     ops::Range,
@@ -1163,8 +1163,7 @@ const HEADER_READ_BYTES: usize = 4096;
 #[cfg(any(unix, windows))]
 struct HeaderReader<'a> {
     file: &'a File,
-    prefix: [u8; HEADER_READ_BYTES],
-    filled: usize,
+    prefix: &'a [u8],
     pos: u64,
     len: u64,
 }
@@ -1172,9 +1171,9 @@ struct HeaderReader<'a> {
 #[cfg(any(unix, windows))]
 impl Read for HeaderReader<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.pos < self.filled as u64 {
+        if self.pos < self.prefix.len() as u64 {
             let start = self.pos as usize;
-            let n = buf.len().min(self.filled - start);
+            let n = buf.len().min(self.prefix.len() - start);
             buf[..n].copy_from_slice(&self.prefix[start..start + n]);
             self.pos += n as u64;
             return Ok(n);
@@ -1220,24 +1219,32 @@ pub(crate) fn open_wav_data(path: &Path) -> AudioIOResult<(BaseAudioInfo, u64, F
 /// first 4 KiB; see [`open_wav_data`].
 #[cfg(any(unix, windows))]
 pub(crate) fn wav_header_of(file: &File, len: u64) -> AudioIOResult<(BaseAudioInfo, u64)> {
-    let mut reader = HeaderReader {
-        file,
-        prefix: [0u8; HEADER_READ_BYTES],
-        filled: 0,
-        pos: 0,
-        len,
-    };
-    while reader.filled < HEADER_READ_BYTES {
+    let mut prefix = [0u8; HEADER_READ_BYTES];
+    let mut filled = 0;
+    while filled < HEADER_READ_BYTES {
         let n = crate::fastio::FileAt {
             file,
-            offset: reader.filled as u64,
+            offset: filled as u64,
         }
-        .read(&mut reader.prefix[reader.filled..])?;
+        .read(&mut prefix[filled..])?;
         if n == 0 {
             break;
         }
-        reader.filled += n;
+        filled += n;
     }
+    wav_header_from(&prefix[..filled], file, len)
+}
+
+/// The header of a WAV file of `len` bytes from `prefix`, its first bytes, and where its samples
+/// start. A header longer than the prefix is read on from `file`.
+#[cfg(any(unix, windows))]
+pub(crate) fn wav_header_from(prefix: &[u8], file: &File, len: u64) -> AudioIOResult<(BaseAudioInfo, u64)> {
+    let mut reader = HeaderReader {
+        file,
+        prefix,
+        pos: 0,
+        len,
+    };
     parse_wav_header_streaming(&mut reader)
 }
 
@@ -1247,6 +1254,12 @@ pub(crate) fn open_wav_data(path: &Path) -> AudioIOResult<(BaseAudioInfo, u64, F
     let mut reader = BufReader::with_capacity(4096, File::open(path)?);
     let (info, offset) = parse_wav_header_streaming(&mut reader)?;
     Ok((info, offset, reader.into_inner()))
+}
+
+/// The header of a WAV file from its first bytes and where its samples start.
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn wav_header_from(_prefix: &[u8], file: &File, len: u64) -> AudioIOResult<(BaseAudioInfo, u64)> {
+    wav_header_of(file, len)
 }
 
 /// The header of an open WAV file and where its samples start.
@@ -1346,8 +1359,8 @@ where
     T: StandardSample + 'static,
     W: Write,
 {
-    write_wav_parts::<T, T, W, _>(writer, audio, opts, metadata, |writer, view, offset| {
-        crate::fastio::write_interleaved_le::<T, T, _>(writer, view, offset).map(|_| ())
+    write_wav_parts::<T, T, W, _>(writer, audio, opts, metadata, |writer, header, view, offset| {
+        crate::fastio::write_interleaved_le::<T, T, _>(writer, header, view, offset).map(|_| ())
     })
 }
 
@@ -1376,12 +1389,11 @@ where
     T: StandardSample + ConvertTo<U> + Sync + 'static,
     U: StandardSample + 'static,
 {
-    write_wav_parts::<T, U, _, _>(file, audio, opts, metadata, |writer, view, offset| {
-        writer.flush()?;
-        if crate::fastio::write_samples_mapped::<T, U>(writer.get_ref(), view, offset)? {
+    write_wav_parts::<T, U, _, _>(file, audio, opts, metadata, |writer, header, view, offset| {
+        if crate::fastio::write_samples_mapped::<T, U>(writer, header, view, offset)? {
             return Ok(());
         }
-        crate::fastio::write_interleaved_le::<T, U, _>(writer, view, offset).map(|_| ())
+        crate::fastio::write_interleaved_le::<T, U, _>(writer, header, view, offset).map(|_| ())
     })
 }
 
@@ -1396,7 +1408,7 @@ where
     T: StandardSample + 'static,
     U: StandardSample + 'static,
     W: Write,
-    F: FnOnce(&mut BufWriter<W>, ndarray::ArrayView2<'_, T>, u64) -> AudioIOResult<()>,
+    F: FnOnce(&mut W, &[u8], ndarray::ArrayView2<'_, T>, u64) -> AudioIOResult<()>,
 {
     let sample_rate = audio.sample_rate().get();
     let channels = audio.num_channels().get() as u16;
@@ -1441,37 +1453,37 @@ where
         )));
     }
 
-    let mut writer = BufWriter::with_capacity(opts.write_buf_capacity, writer);
-
-    // Write RIFF header
-    writer.write_all(b"RIFF")?;
-    writer.write_all(&(file_size as u32).to_le_bytes())?;
-    writer.write_all(b"WAVE")?;
-
-    // Write FMT chunk
+    // The header is written with the first samples, in one call where the writer allows.
+    let _ = opts;
+    let mut writer = writer;
+    let mut header: Vec<u8> = Vec::with_capacity(12 + fmt_total_size + 8);
+    header.extend_from_slice(b"RIFF");
+    header.extend_from_slice(&(file_size as u32).to_le_bytes());
+    header.extend_from_slice(b"WAVE");
     if needs_extensible_format::<U>(channels) {
-        write_extensible_fmt::<U, _>(&mut writer, channels, sample_rate)?;
+        write_extensible_fmt::<U, _>(&mut header, channels, sample_rate)?;
     } else {
-        write_base_fmt::<U, _>(&mut writer, channels, sample_rate)?;
+        write_base_fmt::<U, _>(&mut header, channels, sample_rate)?;
     }
+    header.extend_from_slice(b"data");
+    header.extend_from_slice(&(data_size as u32).to_le_bytes());
 
-    // Write DATA chunk header
-    writer.write_all(b"data")?;
-    writer.write_all(&(data_size as u32).to_le_bytes())?;
+    write_samples(
+        &mut writer,
+        &header,
+        channel_frame_view(audio),
+        (12 + fmt_total_size + 8) as u64,
+    )?;
 
-    // Write audio data (interleaved for multi-channel)
-    write_samples(&mut writer, channel_frame_view(audio), (12 + fmt_total_size + 8) as u64)?;
-
-    // Add padding byte if needed
+    // The padding byte, if needed, and metadata chunks (LIST/INFO, cue) after the data, in one write.
+    let mut tail = Vec::new();
     if data_size % 2 == 1 {
-        writer.write_all(&[0])?;
+        tail.push(0);
     }
-
-    // Append metadata chunks (LIST/INFO, cue) after the data chunk.
-    if !metadata_bytes.is_empty() {
-        writer.write_all(&metadata_bytes)?;
+    tail.extend_from_slice(&metadata_bytes);
+    if !tail.is_empty() {
+        writer.write_all(&tail)?;
     }
-
     writer.flush()?;
     Ok(())
 }

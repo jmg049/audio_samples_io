@@ -130,10 +130,7 @@ struct WavHeaderParse {
     /// Audio-payload bytes already buffered past the `data` chunk's 8-byte
     /// header while scanning for it — the header-scan loop below reads in
     /// 4096-byte increments and doesn't stop exactly at the chunk boundary.
-    /// [`new_with_path`](StreamedWavFile::new_with_path) discards these (it
-    /// seeks back to the exact data start instead);
-    /// [`new_forward_only_with_path`](StreamedWavFile::new_forward_only_with_path)
-    /// can't seek, so it keeps them as `leftover`.
+    /// Both construction paths keep them as `leftover`, so they are not read again.
     overshoot: Vec<u8>,
 }
 
@@ -412,12 +409,25 @@ where
     /// The path is used for error messages and metadata; the reader
     /// is the actual data source.
     pub fn new_with_path(mut reader: R, file_path: PathBuf) -> AudioIOResult<Self> {
+        // The length comes first, while nothing is buffered, so that no read is repeated.
+        let start = reader.stream_position()?;
+        let stream_len = reader.seek(SeekFrom::End(0))?;
+        reader.seek(SeekFrom::Start(start))?;
+        Self::new_with_len(reader, file_path, stream_len)
+    }
+
+    /// Create a streaming WAV reader over a source whose length is known, positioned at the start
+    /// of the WAV data, so that the reader is never moved: the header comes from the first read, and
+    /// the samples read past it with it are kept rather than read again.
+    ///
+    /// `stream_len` is the length of the source from its start; a buffered reader may already hold
+    /// its first bytes.
+    pub fn new_with_len(mut reader: R, file_path: PathBuf, stream_len: u64) -> AudioIOResult<Self> {
         let parsed = parse_wav_header(&mut reader)?;
 
         // A streaming/unfinalised WAV stores 0xFFFFFFFF as the data-chunk size
         // placeholder; the real size is whatever bytes remain in the stream.
         // Also clamp a declared size that overruns the available stream.
-        let stream_len = reader.seek(SeekFrom::End(0))?;
         let avail = stream_len.saturating_sub(parsed.data_offset);
         let data_size = if parsed.declared_data_size == u32::MAX as u64 || parsed.declared_data_size > avail {
             avail
@@ -426,10 +436,6 @@ where
         };
         let total_samples = data_size as usize / parsed.sample_type.bytes_per_sample();
         let total_frames = total_samples / parsed.channels as usize;
-
-        // Seek to start of audio data — the header scan above may have
-        // buffered (and discarded, via `parsed.overshoot`) bytes past it.
-        reader.seek(SeekFrom::Start(parsed.data_offset))?;
 
         Ok(StreamedWavFile {
             reader,
@@ -448,7 +454,8 @@ where
             data_offset: parsed.data_offset,
             current_frame: 0,
             byte_buffer: Vec::new(),
-            leftover: Vec::new(),
+            // The header scan read past the start of the samples; those bytes are used first.
+            leftover: parsed.overshoot,
         })
     }
 
@@ -471,6 +478,7 @@ where
 
         let byte_offset = frame as u64 * self.block_align as u64;
         self.reader.seek(SeekFrom::Start(self.data_offset + byte_offset))?;
+        self.leftover.clear();
         self.current_frame = frame;
         Ok(())
     }
@@ -776,14 +784,18 @@ impl<R: std::io::Read> StreamedWavFile<R> {
                 ValidatedSampleType::F64 => TypeId::of::<T>() == TypeId::of::<f64>(),
             };
 
+        // Bytes kept from the header's read come first.
+        let mut source = std::io::Read::chain(&self.leftover[..], &mut self.reader);
         let bytes_read = if native {
             // SAFETY: `T` is a plain numeric type here, and the file's little-endian bytes are
             // its representation on this platform.
             let bytes = unsafe { std::slice::from_raw_parts_mut(target.as_mut_ptr().cast::<u8>(), bytes_to_read) };
-            read_full(&mut self.reader, bytes)?
+            read_full(&mut source, bytes)?
         } else {
-            read_converted(&mut self.reader, self.sample_type, target)? * self.bytes_per_frame() / channels
+            read_converted(&mut source, self.sample_type, target)? * self.bytes_per_frame() / channels
         };
+        let used = bytes_read.min(self.leftover.len());
+        self.leftover.drain(..used);
 
         let frames_read = bytes_read / bytes_per_frame;
         self.current_frame += frames_read;
@@ -1422,8 +1434,8 @@ where
         let frames_to_read = (self.byte_buf.len() / bpf).min(self.source.remaining_frames());
         let bytes_to_read = frames_to_read * bpf;
 
-        let bytes_read = match self.source.reader.read(&mut self.byte_buf[..bytes_to_read]) {
-            Err(e) => return Some(Err(AudioIOError::from(e))),
+        let bytes_read = match self.source.read_bytes(&mut self.byte_buf[..bytes_to_read]) {
+            Err(e) => return Some(Err(e)),
             Ok(0) => return None,
             Ok(n) => n,
         };
