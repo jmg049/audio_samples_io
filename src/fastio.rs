@@ -58,18 +58,29 @@ const THREAD_STACK_BYTES: usize = 256 * 1024;
 /// The limit set by [`set_thread_limit`]; zero when there is none.
 static THREAD_LIMIT: AtomicUsize = AtomicUsize::new(0);
 
-/// Bytes a buffered reader should hold to stream `file` from start to end.
+/// Prepare `file` to be streamed from start to end, and return the bytes a buffered reader should
+/// hold for it.
 ///
-/// For a file on ext4 or xfs that is not in the page cache this is 1 MiB: reading off the disk in
+/// A small file that is not in the page cache is asked for whole first (`posix_fadvise(WILLNEED)`),
+/// as for whole-file reads (see the measurements there): otherwise the first small read, such as one
+/// that detects the format, and the reads after it are separate round trips to the disk, and a 1 s
+/// mono stream took 1.8 times as long as wave's.
+///
+/// The buffer is 1 MiB for a file on ext4 or xfs that is not in the page cache: reading off the disk in
 /// pieces of 1 MiB kept the kernel's requests large, and streamed reads took 0.93 to 0.98 times as
 /// long as in pieces of 8 to 256 KiB. Elsewhere, and for a file in the cache, it is the standard
 /// 8 KiB, which keeps reads of whole blocks out of the buffer; on btrfs 1 MiB was 1 to 3% slower.
 #[cfg(feature = "wav")]
-pub fn stream_buffer_capacity(file: &File) -> usize {
+pub fn prepare_for_streaming(file: &File) -> usize {
     const CACHED: usize = 8 * 1024;
     const COLD: usize = 1024 * 1024;
-    let len = file.metadata().map_or(0, |m| m.len()) as usize;
-    if len > CACHED && file_system(file).is_ext4_or_xfs() && range_is_cold(file, 0, len) {
+    let len = file.metadata().map_or(0, |m| m.len());
+    let fs = file_system(file);
+    if whole_read_plan_on(file, len, fs) == Some(true) {
+        will_need(file);
+    }
+    let len = len as usize;
+    if len > CACHED && fs.is_ext4_or_xfs() && range_is_cold(file, 0, len) {
         COLD
     } else {
         CACHED
@@ -729,17 +740,22 @@ pub(crate) const fn file_system(_file: &File) -> FileSystem {
 ///
 /// Measured over ten files per size, against reading the header and then the samples:
 /// - ext4 and xfs up to 1 MiB: asking first and reading whole took 0.86 to 0.94 times as long;
-/// - ext4 and xfs from 1 to 4 MiB: reading whole took 0.97 to 1.00 times as long, where asking
-///   first was slower;
+/// - ext4 and xfs from 1 to 2 MiB: reading whole took 0.97 to 0.98 times as long, where asking
+///   first was slower; at 3.5 MiB it took 1.01 to 1.03 times as long, so larger files are not read
+///   whole;
 /// - btrfs at 512 KiB: asking first and reading whole took 0.92 times as long, but from 1 MiB both
 ///   were level or slower, up to 1.09 times at 4 MiB.
-#[cfg(all(feature = "wav", feature = "numpy"))]
+#[cfg(feature = "wav")]
 pub(crate) fn whole_read_plan(file: &File, len: u64) -> Option<bool> {
+    whole_read_plan_on(file, len, file_system(file))
+}
+
+#[cfg(feature = "wav")]
+fn whole_read_plan_on(file: &File, len: u64, fs: FileSystem) -> Option<bool> {
     const MIB: u64 = 1024 * 1024;
-    if len == 0 || len > 4 * MIB {
+    if len == 0 || len > 2 * MIB {
         return None;
     }
-    let fs = file_system(file);
     let plan = match fs {
         FileSystem::Ext4 | FileSystem::Xfs => len <= MIB,
         FileSystem::Btrfs if len <= MIB / 2 => true,
@@ -749,7 +765,7 @@ pub(crate) fn whole_read_plan(file: &File, len: u64) -> Option<bool> {
 }
 
 /// Ask the kernel to read all of `file` into the page cache.
-#[cfg(all(feature = "wav", feature = "numpy"))]
+#[cfg(feature = "wav")]
 #[cfg(target_os = "linux")]
 pub(crate) fn will_need(file: &File) {
     use std::os::fd::AsRawFd;
@@ -757,7 +773,7 @@ pub(crate) fn will_need(file: &File) {
     unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_WILLNEED) };
 }
 
-#[cfg(all(feature = "wav", feature = "numpy"))]
+#[cfg(feature = "wav")]
 #[cfg(not(target_os = "linux"))]
 pub(crate) const fn will_need(_file: &File) {}
 
