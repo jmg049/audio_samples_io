@@ -58,6 +58,24 @@ const THREAD_STACK_BYTES: usize = 256 * 1024;
 /// The limit set by [`set_thread_limit`]; zero when there is none.
 static THREAD_LIMIT: AtomicUsize = AtomicUsize::new(0);
 
+/// Bytes a buffered reader should hold to stream `file` from start to end.
+///
+/// For a file on ext4 or xfs that is not in the page cache this is 1 MiB: reading off the disk in
+/// pieces of 1 MiB kept the kernel's requests large, and streamed reads took 0.93 to 0.98 times as
+/// long as in pieces of 8 to 256 KiB. Elsewhere, and for a file in the cache, it is the standard
+/// 8 KiB, which keeps reads of whole blocks out of the buffer; on btrfs 1 MiB was 1 to 3% slower.
+#[cfg(feature = "wav")]
+pub fn stream_buffer_capacity(file: &File) -> usize {
+    const CACHED: usize = 8 * 1024;
+    const COLD: usize = 1024 * 1024;
+    let len = file.metadata().map_or(0, |m| m.len()) as usize;
+    if len > CACHED && file_system(file).is_ext4_or_xfs() && range_is_cold(file, 0, len) {
+        COLD
+    } else {
+        CACHED
+    }
+}
+
 /// Set how many threads a file transfer or decode may use, in place of the default cap and of
 /// `AUDIO_SAMPLES_IO_THREADS`. `Some(1)` keeps everything on the calling thread. `None` returns to
 /// the default. Transfers already running keep the threads they have.

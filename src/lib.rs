@@ -28,6 +28,8 @@ pub mod streaming;
 pub use crate::streaming::StreamedAudioWriter;
 
 mod fastio;
+#[cfg(feature = "wav")]
+pub use crate::fastio::stream_buffer_capacity;
 pub use crate::fastio::{set_thread_limit, thread_limit};
 #[cfg(feature = "numpy")]
 pub mod python;
@@ -315,7 +317,7 @@ where
     match FileType::detect(path) {
         FileType::WAV => {
             let file = File::open(path)?;
-            let reader = BufReader::new(file);
+            let reader = BufReader::with_capacity(stream_buffer_capacity(&file), file);
             StreamedWavFile::new_with_path(reader, path.to_path_buf())
         },
         other => Err(crate::error::AudioIOError::unsupported_format(format!(

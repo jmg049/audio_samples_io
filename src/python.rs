@@ -93,12 +93,8 @@ pub fn read_pyarray_native(py: Python<'_>, path: &Path) -> Option<PyResult<Nativ
     }
 
     // Step 1: open + header (GIL released — pure I/O)
-    let parse_result: AudioIOResult<(BaseAudioInfo, u64, std::fs::File)> = py.detach(|| {
-        let file = std::fs::File::open(path).map_err(AudioIOError::from)?;
-        let mut reader = BufReader::with_capacity(4096, file);
-        let (info, offset) = parse_wav_header_streaming(&mut reader)?;
-        Ok((info, offset, reader.into_inner()))
-    });
+    let parse_result: AudioIOResult<(BaseAudioInfo, u64, std::fs::File)> =
+        py.detach(|| crate::wav::wav_file::open_wav_data(path));
 
     // Return None on any parse error — the caller will try the slower fallback path.
     let (info, offset, reader) = parse_result.ok()?;
@@ -240,12 +236,8 @@ where
 
     // Step 1: Parse WAV header with GIL released (I/O). The payload read below goes straight to
     // the array, so the buffer only has to hold the header.
-    let parse_result: AudioIOResult<(BaseAudioInfo, u64, std::fs::File)> = py.detach(|| {
-        let file = std::fs::File::open(path).map_err(AudioIOError::from)?;
-        let mut reader = BufReader::with_capacity(4096, file);
-        let (info, offset) = parse_wav_header_streaming(&mut reader)?;
-        Ok((info, offset, reader.into_inner()))
-    });
+    let parse_result: AudioIOResult<(BaseAudioInfo, u64, std::fs::File)> =
+        py.detach(|| crate::wav::wav_file::open_wav_data(path));
 
     let (info, offset, file) = match parse_result {
         Ok(v) => v,
