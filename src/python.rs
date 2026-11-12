@@ -89,17 +89,18 @@ fn read_first<'py>(py: Python<'py>, path: &Path) -> Option<PyResult<(std::fs::Fi
         let file = std::fs::File::open(path)?;
         let len = file.metadata()?.len();
         let (first, will_need, cold) = crate::fastio::whole_read_plan(&file, len);
-        Ok((file, len, first, will_need, cold))
+        // Asked for before the block is allocated, so that the disk starts on it sooner.
+        if will_need {
+            crate::fastio::will_need(&file);
+        }
+        Ok((file, len, first, cold))
     });
-    let (file, len, first, will_need, cold) = opened.ok()?;
+    let (file, len, first, cold) = opened.ok()?;
     let len_bytes = usize::try_from(len).ok()?;
     // SAFETY: the bytes are only read after the reads below fill them.
     let block = unsafe { PyArray1::<u8>::new(py, [len_bytes + PAGE], false) };
     let start = (block.data() as usize).next_multiple_of(PAGE);
     let read = py.detach(|| {
-        if will_need {
-            crate::fastio::will_need(&file);
-        }
         // SAFETY: `start` is at most PAGE - 1 bytes into the block, which holds len + PAGE bytes, and
         // nothing else has seen the block.
         let bytes = unsafe { std::slice::from_raw_parts_mut(start as *mut u8, first) };

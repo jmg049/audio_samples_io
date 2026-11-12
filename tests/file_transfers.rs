@@ -314,6 +314,30 @@ fn stream_reader_with_a_short_first_read() {
     assert!(rest == data[123_457..]);
 }
 
+/// A first read longer than the buffer takes all of it at once, as a plan for a small file asks; the
+/// refills after it are of the buffer.
+#[test]
+fn stream_reader_with_a_first_read_longer_than_the_buffer() {
+    use std::io::{BufRead, Cursor, Read};
+
+    use audio_samples_io::{StreamPlan, StreamReader};
+
+    let data: Vec<u8> = (0..300_000u32).map(|i| (i * 7 % 253) as u8).collect();
+    let plan = StreamPlan {
+        first: 200_000,
+        buffer: 65536,
+        direct_min: usize::MAX,
+        len: data.len() as u64,
+    };
+    let mut reader = StreamReader::new(Cursor::new(data.clone()), plan);
+    assert_eq!(reader.fill_buf().unwrap().len(), 200_000);
+    reader.consume(200_000);
+    assert_eq!(reader.fill_buf().unwrap().len(), 65536);
+    let mut rest = Vec::new();
+    reader.read_to_end(&mut rest).unwrap();
+    assert!(rest == data[200_000..]);
+}
+
 /// Large planar signals are packed on other threads while being written: the file holds the same
 /// samples as one written frame by frame, with and without a change of sample type. The files go to
 /// the build's scratch directory, which is on a disk rather than tmpfs, where a mapping takes over.

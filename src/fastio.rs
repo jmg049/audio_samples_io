@@ -81,7 +81,7 @@ pub struct StreamPlan {
 /// | file | first read | buffer | read straight into the caller's memory | asked for whole |
 /// |---|---|---|---|---|
 /// | in the page cache | 4 KiB | 256 KiB | requests of 16 KiB and more | no |
-/// | off the disk, ext4 or xfs | 1 MiB | 1 MiB | never | up to 1.2 MiB |
+/// | off the disk, ext4 or xfs | the whole file up to 2 MiB, else 1 MiB | 1 MiB | never | up to 1.2 MiB |
 /// | off the disk, btrfs | 64 KiB | 64 KiB | requests of 16 KiB and more | up to 768 KiB |
 /// | off the disk, elsewhere | 64 KiB | 64 KiB | requests of 16 KiB and more | no |
 ///
@@ -94,7 +94,9 @@ pub struct StreamPlan {
 ///   for blocks of 16 KiB and more the copy through any buffer cost 1.2 to 1.8 times, so those go
 ///   straight to the caller;
 /// - off the disk on ext4 and xfs, reads of 1 MiB took 0.93 to 0.98 times as long as reads of 8 to
-///   256 KiB, at every block size;
+///   256 KiB, at every block size; for a 2 MiB file one read of the whole file took 0.90 to 0.96
+///   times as long as reads of the caller's block on xfs, where a 1 MiB buffer took 1.02 to 1.08
+///   times, and level with the 1 MiB buffer on ext4;
 /// - off the disk on btrfs, files of 512 KiB asked for whole took 0.86 to 0.90 times as long; from
 ///   2 MiB a 64 KiB buffer was the fastest plan (0.987 to 0.995), and reads of 1 MiB or more 2 to 5%
 ///   slower. In Python against soundfile, a 256 KiB first read lost 4 to 5% on a cold 1.76 MB file.
@@ -112,12 +114,14 @@ pub fn stream_plan(file: &File) -> StreamPlan {
         return cached;
     }
     let fs = file_system(file);
-    if whole_read_plan_on(file, len, fs) == Some(true) {
+    let whole = whole_read_plan_on(file, len, fs);
+    if whole == Some(true) {
         will_need(file);
     }
     if fs.is_ext4_or_xfs() {
         StreamPlan {
-            first: 1024 * KIB,
+            // A file that a whole read takes in one read is taken the same way here.
+            first: if whole.is_some() { len as usize } else { 1024 * KIB },
             buffer: 1024 * KIB,
             direct_min: usize::MAX,
             len,
@@ -151,7 +155,7 @@ impl<R: io::Read> StreamReader<R> {
     /// A reader over `inner`, positioned where `inner` is.
     pub fn new(inner: R, plan: StreamPlan) -> Self {
         Self {
-            next: plan.first.clamp(1, plan.buffer.max(1)),
+            next: plan.first.max(1),
             ..Self::with_buffer(inner, plan.buffer, plan.direct_min)
         }
     }
