@@ -371,6 +371,10 @@ def writers(directory, fmt, sample_type, channels, seconds):
         # The usual pipeline: audio that was read with this library and is saved again.
         loaded = aus.io.read(input_file(directory, "wav", sample_type, channels, seconds))
         w["ours, array from read"] = lambda p: aus.io.save(p, loaded)
+        if channels > 1 and sample_type != "i24":
+            # A signal in the library's own planar layout, which is packed into frames on the way.
+            planar = aus.AudioSamples.new_multi(np.ascontiguousarray(x.T), sample_rate=SAMPLE_RATE)
+            w["ours, planar source"] = lambda p: aus.io.save(p, planar)
     if sf:
         w["soundfile"] = lambda p: sf.write(p, sf_x, SAMPLE_RATE, subtype=SUBTYPE[sample_type], format=fmt.upper())
     if fmt == "wav":
