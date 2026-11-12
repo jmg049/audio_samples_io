@@ -457,6 +457,8 @@ def run_row(args, row, funcs):
     wall = {n: [] for n in names}
     cpu = {n: [] for n in names}
     sync = {n: [] for n in names}
+    # Whether each call was the first of its round, where no other library had just read the file.
+    led = {n: [] for n in names}
     direct = []
     buffer = None
     if cache == "cold":
@@ -472,8 +474,9 @@ def run_row(args, row, funcs):
             source = sources[i % len(sources)]
         turn = names[:]
         order.shuffle(turn)
-        for name in turn:
+        for position, name in enumerate(turn):
             a, b, c = call(name)
+            led[name].append(position == 0)
             wall[name].append(a)
             cpu[name].append(b)
             if c is not None:
@@ -502,6 +505,12 @@ def run_row(args, row, funcs):
         entry["cpu_p50"] = float(np.median(cpu[name]))
         if sync[name]:
             entry["fsync_p50"] = float(np.median(sync[name]))
+        if cache == "cold" and len(names) > 1:
+            times = np.asarray(wall[name])
+            first_of_round = np.asarray(led[name])
+            if first_of_round.any() and not first_of_round.all():
+                entry["p50_first"] = float(np.median(times[first_of_round]))
+                entry["p50_later"] = float(np.median(times[~first_of_round]))
         if ours is not None and name != "ours":
             ratio = ours / np.asarray(wall[name])
             boot = np.median(rng.choice(ratio, size=(2000, len(ratio))), axis=1)
