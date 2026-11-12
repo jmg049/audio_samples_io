@@ -62,7 +62,9 @@ static THREAD_LIMIT: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "wav")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StreamPlan {
-    /// Bytes read at a time into the buffer.
+    /// Bytes of the first read into the buffer, which holds the header.
+    pub first: usize,
+    /// Bytes read at a time into the buffer after the first read.
     pub buffer: usize,
     /// Requests of at least this many bytes are read straight into the caller's memory, past the
     /// buffer, once the buffer is empty.
@@ -76,12 +78,15 @@ pub struct StreamPlan {
 /// (`posix_fadvise(WILLNEED)`), so that the first read, which tells the format and holds the header,
 /// and the reads after it are not separate round trips to the disk.
 ///
-/// | file | buffer | read straight into the caller's memory | asked for whole |
-/// |---|---|---|---|
-/// | in the page cache | 256 KiB | requests of 16 KiB and more | no |
-/// | off the disk, ext4 or xfs | 1 MiB | never | up to 1 MiB |
-/// | off the disk, btrfs | 64 KiB | requests of 16 KiB and more | up to 768 KiB |
-/// | off the disk, elsewhere | 64 KiB | requests of 16 KiB and more | no |
+/// | file | first read | buffer | read straight into the caller's memory | asked for whole |
+/// |---|---|---|---|---|
+/// | in the page cache | 4 KiB | 256 KiB | requests of 16 KiB and more | no |
+/// | off the disk, ext4 or xfs | 1 MiB | 1 MiB | never | up to 1 MiB |
+/// | off the disk, btrfs | 64 KiB | 64 KiB | requests of 16 KiB and more | up to 768 KiB |
+/// | off the disk, elsewhere | 64 KiB | 64 KiB | requests of 16 KiB and more | no |
+///
+/// The first read of a file in the page cache holds only the header: a caller that seeks or reads
+/// large blocks never touches the large buffer, which is allocated on its first refill.
 ///
 /// Measured in C over caller blocks of 1 KiB to 1 MiB and files of 0.5 to 106 MiB, against the
 /// faster of an 8 KiB buffer (wave) and reads of the caller's block (soundfile):
@@ -98,6 +103,7 @@ pub fn stream_plan(file: &File) -> StreamPlan {
     const KIB: usize = 1024;
     let len = file.metadata().map_or(0, |m| m.len());
     let cached = StreamPlan {
+        first: 4 * KIB,
         buffer: 256 * KIB,
         direct_min: 16 * KIB,
         len,
@@ -111,12 +117,14 @@ pub fn stream_plan(file: &File) -> StreamPlan {
     }
     if fs.is_ext4_or_xfs() {
         StreamPlan {
+            first: 1024 * KIB,
             buffer: 1024 * KIB,
             direct_min: usize::MAX,
             len,
         }
     } else {
         StreamPlan {
+            first: 64 * KIB,
             buffer: 64 * KIB,
             ..cached
         }
@@ -128,9 +136,13 @@ pub fn stream_plan(file: &File) -> StreamPlan {
 #[cfg(feature = "wav")]
 pub struct StreamReader<R> {
     inner: R,
-    buf: Box<[u8]>,
+    /// Grows to the size of the read that needs it.
+    buf: Vec<u8>,
     pos: usize,
     filled: usize,
+    /// Bytes of the next refill: the plan's first read, then the buffer.
+    next: usize,
+    buffer: usize,
     direct_min: usize,
 }
 
@@ -138,7 +150,10 @@ pub struct StreamReader<R> {
 impl<R: io::Read> StreamReader<R> {
     /// A reader over `inner`, positioned where `inner` is.
     pub fn new(inner: R, plan: StreamPlan) -> Self {
-        Self::with_buffer(inner, plan.buffer, plan.direct_min)
+        Self {
+            next: plan.first.clamp(1, plan.buffer.max(1)),
+            ..Self::with_buffer(inner, plan.buffer, plan.direct_min)
+        }
     }
 
     /// A reader with a buffer of `buffer` bytes that reads requests of `direct_min` bytes or more
@@ -146,9 +161,11 @@ impl<R: io::Read> StreamReader<R> {
     pub fn with_buffer(inner: R, buffer: usize, direct_min: usize) -> Self {
         Self {
             inner,
-            buf: vec![0u8; buffer.max(1)].into_boxed_slice(),
+            buf: Vec::new(),
             pos: 0,
             filled: 0,
+            next: buffer.max(1),
+            buffer: buffer.max(1),
             direct_min,
         }
     }
@@ -177,8 +194,15 @@ impl<R: io::Read> io::Read for StreamReader<R> {
 impl<R: io::Read> io::BufRead for StreamReader<R> {
     fn fill_buf(&mut self) -> io::Result<&[u8]> {
         if self.pos == self.filled {
-            self.filled = self.inner.read(&mut self.buf)?;
+            let want = self.next;
+            if self.buf.len() < want {
+                // A fresh zeroed allocation, not a resize: the bytes held are spent, and a large one
+                // comes as zero pages without being written.
+                self.buf = vec![0u8; want];
+            }
+            self.filled = self.inner.read(&mut self.buf[..want])?;
             self.pos = 0;
+            self.next = self.buffer;
         }
         Ok(&self.buf[self.pos..self.filled])
     }

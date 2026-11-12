@@ -283,3 +283,33 @@ fn stream_reader_reads_and_seeks_like_its_source() {
     reader.read_to_end(&mut rest).unwrap();
     assert!(rest == data[150_000..]);
 }
+
+/// A plan with a short first read gives the header's bytes from that read and the rest through refills
+/// of the whole buffer, in order, as the source holds them.
+#[test]
+fn stream_reader_with_a_short_first_read() {
+    use std::io::{BufRead, Cursor, Read, Seek, SeekFrom};
+
+    use audio_samples_io::{StreamPlan, StreamReader};
+
+    let data: Vec<u8> = (0..300_000u32).map(|i| (i * 13 % 251) as u8).collect();
+    let plan = StreamPlan {
+        first: 4096,
+        buffer: 65536,
+        direct_min: 16384,
+        len: data.len() as u64,
+    };
+    let mut reader = StreamReader::new(Cursor::new(data.clone()), plan);
+    assert_eq!(reader.fill_buf().unwrap().len(), 4096);
+    let mut got = Vec::new();
+    let mut piece = vec![0u8; 40_000];
+    for size in [100usize, 4000, 7000, 1, 20_000, 40_000, 512] {
+        let n = reader.read(&mut piece[..size]).unwrap();
+        got.extend_from_slice(&piece[..n]);
+    }
+    assert!(got == data[..got.len()]);
+    reader.seek(SeekFrom::Start(123_457)).unwrap();
+    let mut rest = Vec::new();
+    reader.read_to_end(&mut rest).unwrap();
+    assert!(rest == data[123_457..]);
+}
