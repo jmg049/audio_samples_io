@@ -13,7 +13,8 @@ its own output file. Finished rows are skipped when the same command runs again.
 Sections, each measured for every library that can do it:
 
     read      warm   read a whole file already in the page cache
-    read      cold   the same, after dropping that file from the cache before each read
+    read      cold   the same, after dropping that file from the cache before each read; each
+                     library reads its own copy of the file in a round, and the copies rotate
     read-f32  warm/cold   read into float32, which is what librosa.load does by default
     stream    warm/cold   read a file in blocks of 4096 frames
     write     new    write to a path that does not exist, with fsync time as a separate figure
@@ -41,7 +42,6 @@ import gc
 import json
 import os
 import platform
-import random
 import subprocess
 import sys
 import tempfile
@@ -409,6 +409,21 @@ def percentiles(values):
     return {"p25": float(p25), "p50": float(p50), "p75": float(p75), "min": float(a.min())}
 
 
+def round_orders(count):
+    """Call orders for the rounds, repeating every `count` rounds: a balanced Latin square, in which
+    each library takes each place in a round equally often, and, for an even count, follows each other
+    library as often as it precedes it."""
+    first = []
+    low, high = 0, count - 1
+    while low <= high:
+        first.append(low)
+        low += 1
+        if low <= high:
+            first.append(high)
+            high -= 1
+    return [[(place + shift) % count for place in first] for shift in range(count)]
+
+
 def run_row(args, row, funcs):
     """Every library in turn for as many rounds as the budget allows."""
     op, cache, target = row["op"], row["cache"], row["target"]
@@ -416,16 +431,20 @@ def run_row(args, row, funcs):
     fmt = row["fmt"]
     pid = os.getpid()
     path_of = {name: os.path.join(args.dir, f"out_{pid}_{i}.{fmt}") for i, name in enumerate(funcs)}
+    names = list(funcs)
+    cold = reading and cache == "cold"
     sources = []
     if reading:
-        # Every library reads the same files; with several instances, each round takes the next one,
-        # so that one file's place on the disk does not decide the row.
-        sources = [input_file(args.dir, fmt, row["type"], row["ch"], row["dur"], k) for k in range(args.instances)]
+        # A read straight after another of the same file, dropped from the cache in between, is
+        # faster, so cold rows give each library, and the unbuffered read, a copy of its own in each
+        # round; the copies rotate between rounds, so that no copy's place on the disk decides the
+        # row. Warm rows share a file per round, taking the next one each round.
+        copies = max(args.instances, len(names) + 1) if cold else args.instances
+        sources = [input_file(args.dir, fmt, row["type"], row["ch"], row["dur"], k) for k in range(copies)]
         row["bytes"] = os.path.getsize(sources[0])
         row["instances"] = len(sources)
-    source = sources[0] if sources else None
 
-    def call(name):
+    def call(name, source=None):
         if reading:
             if cache == "cold":
                 drop_cache(source)
@@ -450,14 +469,16 @@ def run_row(args, row, funcs):
         fsync_path(path)
         return (ended - started) / 1e6, (ended_cpu - started_cpu) / 1e6, (time.perf_counter_ns() - ended) / 1e6
 
-    names = list(funcs)
-    first = {n: call(n)[0] for n in names}
+    first = {n: call(n, sources[k % len(sources)] if sources else None)[0] for k, n in enumerate(names)}
     slowest = max(first.values()) / 1e3
     rounds = int(max(args.min_rounds, min(args.max_rounds, args.budget / max(slowest, 1e-6))))
+    # Whole cycles of the call orders, so that every library is first in a round equally often.
+    orders = round_orders(len(names))
+    rounds = -(-rounds // len(orders)) * len(orders)
     wall = {n: [] for n in names}
     cpu = {n: [] for n in names}
     sync = {n: [] for n in names}
-    # Whether each call was the first of its round, where no other library had just read the file.
+    # Whether each call was the first of its round.
     led = {n: [] for n in names}
     direct = []
     buffer = None
@@ -468,20 +489,20 @@ def run_row(args, row, funcs):
         buffer = mmap.mmap(-1, (row["bytes"] // 4096) * 4096)
     was_enabled = gc.isenabled()
     gc.disable()
-    order = random.Random(0)
     for i in range(rounds):
-        if sources:
-            source = sources[i % len(sources)]
-        turn = names[:]
-        order.shuffle(turn)
-        for position, name in enumerate(turn):
-            a, b, c = call(name)
+        for position, index in enumerate(orders[i % len(orders)]):
+            name = names[index]
+            source = None
+            if sources:
+                source = sources[(i + index) % len(sources)] if cold else sources[i % len(sources)]
+            a, b, c = call(name, source)
             led[name].append(position == 0)
             wall[name].append(a)
             cpu[name].append(b)
             if c is not None:
                 sync[name].append(c)
         if buffer is not None:
+            source = sources[(i + len(names)) % len(sources)]
             drop_cache(source)
             started = time.perf_counter_ns()
             direct_read(source, buffer)
@@ -557,7 +578,7 @@ def main():
     ap.add_argument("--budget", type=float, default=0.3, help="seconds per row per library, roughly")
     ap.add_argument("--min-rounds", type=int, default=11)
     ap.add_argument("--max-rounds", type=int, default=400)
-    ap.add_argument("--instances", type=int, default=1, help="copies of each input file, read in turn by every library")
+    ap.add_argument("--instances", type=int, default=1, help="copies of each input file, taken in turn by the rounds; cold rows use at least one more than there are libraries")
     ap.add_argument("--stream-blocks", default=str(BLOCK_FRAMES), help="frames per block for streamed reads, comma-separated")
     ap.add_argument("--quick", action="store_true", help="a small subset, to check that everything works")
     args = ap.parse_args()
