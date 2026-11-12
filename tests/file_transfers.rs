@@ -313,3 +313,29 @@ fn stream_reader_with_a_short_first_read() {
     reader.read_to_end(&mut rest).unwrap();
     assert!(rest == data[123_457..]);
 }
+
+/// Large planar signals are packed on other threads while being written: the file holds the same
+/// samples as one written frame by frame, with and without a change of sample type. The files go to
+/// the build's scratch directory, which is on a disk rather than tmpfs, where a mapping takes over.
+#[test]
+fn large_planar_writes_pack_on_threads() {
+    use audio_samples_io::{WriteOptions, write_as};
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("planar_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let planar = AudioSamples::new_multi_channel(noise(6, 800_003), sample_rate!(48000)).unwrap();
+    let expected = planar.to_interleaved_vec();
+
+    let same = dir.join("same.wav");
+    write(&same, &planar).unwrap();
+    // Six channels take the extensible format header, 68 bytes.
+    assert_eq!(std::fs::metadata(&same).unwrap().len(), 68 + 6 * 800_003 * 2);
+    assert_eq!(read::<_, i16>(&same).unwrap().to_interleaved_vec(), expected);
+
+    let wide = dir.join("wide.wav");
+    write_as::<i32, _, _>(&wide, &planar, WriteOptions::default()).unwrap();
+    let back = read::<_, i32>(&wide).unwrap().to_interleaved_vec();
+    let widened: Vec<i32> = expected.iter().map(|&s| i32::from(s) << 16).collect();
+    assert_eq!(back, widened);
+    let _ = std::fs::remove_dir_all(&dir);
+}

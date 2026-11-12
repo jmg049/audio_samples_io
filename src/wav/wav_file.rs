@@ -1393,6 +1393,9 @@ where
         if crate::fastio::write_samples_mapped::<T, U>(writer, header, view, offset)? {
             return Ok(());
         }
+        if crate::fastio::write_packed_on_threads::<T, U>(writer, header, view, offset)? {
+            return Ok(());
+        }
         crate::fastio::write_interleaved_le::<T, U, _>(writer, header, view, offset).map(|_| ())
     })
 }

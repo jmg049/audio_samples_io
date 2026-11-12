@@ -751,6 +751,258 @@ fn write_both<W: Write>(writer: &mut W, first: &[u8], second: &[u8]) -> io::Resu
     writer.write_all(second)
 }
 
+/// Memory for a transfer, of its own: on Linux a private anonymous mapping starting on a 2 MiB
+/// boundary, so that it can be backed by huge pages (a fault per 2 MiB rather than per 4 KiB) and the
+/// allocator's thresholds for later allocations stay as they were; a vector elsewhere.
+#[cfg(feature = "wav")]
+struct Scratch {
+    #[cfg(target_os = "linux")]
+    map: *mut libc::c_void,
+    #[cfg(not(target_os = "linux"))]
+    vec: Vec<mem::MaybeUninit<u8>>,
+    len: usize,
+}
+
+#[cfg(feature = "wav")]
+impl Scratch {
+    fn new(len: usize) -> Option<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            const HUGE: usize = 2 * 1024 * 1024;
+            let len = len + HUGE;
+            // SAFETY: a new private anonymous mapping, unmapped on drop.
+            let map = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    len,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            (map != libc::MAP_FAILED).then_some(Self { map, len })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Some(Self {
+                vec: Vec::with_capacity(len),
+                len,
+            })
+        }
+    }
+
+    /// The address of the first of at least the requested number of writable bytes.
+    fn base(&self) -> usize {
+        #[cfg(target_os = "linux")]
+        {
+            (self.map as usize).next_multiple_of(2 * 1024 * 1024)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.vec.as_ptr() as usize
+        }
+    }
+}
+
+#[cfg(feature = "wav")]
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        // SAFETY: the mapping was made in `new` with this length and is not used after this.
+        unsafe {
+            libc::munmap(self.map, self.len);
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = self.len;
+    }
+}
+
+/// Bytes of samples from which [`write_packed_on_threads`] is used.
+#[cfg(feature = "wav")]
+const PACKED_THREADS_MIN_BYTES: usize = 8 * 1024 * 1024;
+
+/// Bytes packed and written at a time by [`write_packed_on_threads`]. On btrfs one write of 2 MiB
+/// cost 0.96 times as much per byte as a single write of the whole file, and of 64 KiB 1.26 times.
+#[cfg(feature = "wav")]
+const PACKED_CHUNK_BYTES: usize = 2 * 1024 * 1024;
+
+/// Chunks held at once by [`write_packed_on_threads`]: the one being written and those packed ahead.
+#[cfg(feature = "wav")]
+const PACKED_SLOTS: usize = 4;
+
+/// Write the samples of `view`, which need packing (another layout or sample type than the file's),
+/// with the packing on other threads: they fill a ring of chunks ahead while this thread writes
+/// them in order, one write call per chunk. `header` goes in the same call as the first chunk.
+///
+/// Returns `Ok(false)`, having written nothing, where it does not apply: samples already in the
+/// file's layout (one write is best), fewer than [`PACKED_THREADS_MIN_BYTES`], or fewer than three
+/// threads to use.
+#[cfg(feature = "wav")]
+#[inline(never)]
+pub(crate) fn write_packed_on_threads<'a, T, U>(
+    file: &mut File,
+    header: &[u8],
+    view: ArrayView2<'a, T>,
+    file_offset: u64,
+) -> io::Result<bool>
+where
+    T: StandardSample + ConvertTo<U> + 'static,
+    U: StandardSample + 'static,
+{
+    use std::sync::Mutex;
+
+    const PAGE: usize = 4096;
+    const ABOVE: usize = 64;
+    let (channels, frames) = view.dim();
+    let frame_bytes = channels * U::BYTES as usize;
+    let total = frames * frame_bytes;
+    if total < PACKED_THREADS_MIN_BYTES || frame_bytes == 0 || frame_bytes > PACKED_CHUNK_BYTES {
+        return Ok(false);
+    }
+    let source = FrameSource::<T, U>::new(view);
+    if source.same_layout {
+        return Ok(false);
+    }
+    let permit = ThreadsPermit::try_acquire();
+    let threads = permit.threads(transfer_threads().min(PACKED_SLOTS));
+    if threads < 3 {
+        return Ok(false);
+    }
+    let workers = threads - 1;
+    let chunk_frames = PACKED_CHUNK_BYTES / frame_bytes;
+    let chunks = frames.div_ceil(chunk_frames);
+    let slot_bytes = chunk_frames * frame_bytes + PAGE + ABOVE;
+    let Some(ring) = Scratch::new(slot_bytes * PACKED_SLOTS) else {
+        return Ok(false);
+    };
+    let ring_base = ring.base();
+
+    // Chunk `c` lives in slot `c % PACKED_SLOTS`, at the same offset within a page as its place in
+    // the file plus a little, as `write_interleaved_le` places its tiles.
+    let place = |c: usize| -> (usize, usize, usize) {
+        let start = c * chunk_frames;
+        let count = chunk_frames.min(frames - start);
+        let position = file_offset as usize + start * frame_bytes;
+        (
+            start,
+            count,
+            ring_base + (c % PACKED_SLOTS) * slot_bytes + position % PAGE + ABOVE,
+        )
+    };
+    // `ready[s]` is one more than the chunk packed in slot `s`; `written` counts chunks written;
+    // `next` is the next chunk to claim for packing.
+    let ready: [AtomicUsize; PACKED_SLOTS] = std::array::from_fn(|_| AtomicUsize::new(0));
+    let written = AtomicUsize::new(0);
+    let next = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let failure: Mutex<Option<io::Error>> = Mutex::new(None);
+    let file = Mutex::new(file);
+
+    // Scratch for each thread's packing, made here: the packing threads allocate nothing, so they
+    // leave no allocator arenas behind.
+    let scratch: Vec<Mutex<Vec<&'a [T]>>> = (0..threads).map(|_| Mutex::new(Vec::with_capacity(channels))).collect();
+    let pack = |c: usize, tails: &mut Vec<&'a [T]>| {
+        let (start, count, at) = place(c);
+        // SAFETY: the slot holds a chunk plus the page offset and margin, nothing else uses it until
+        // the chunk is written, and the frames lie within the view.
+        unsafe { source.pack(start, count, at as *mut u8, tails) };
+        ready[c % PACKED_SLOTS].store(c + 1, Ordering::Release);
+    };
+    // Claim chunk `c` for packing if it is the next and its slot has been written out.
+    let claim = |c: usize| {
+        c < chunks
+            && c < written.load(Ordering::Acquire) + PACKED_SLOTS
+            && next
+                .compare_exchange(c, c + 1, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+    };
+    // Sets `stop` if a packing thread ends early, so that the writer does not wait for it.
+    struct StopOnUnwind<'a>(&'a AtomicBool);
+    impl Drop for StopOnUnwind<'_> {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+    }
+
+    let ok = run_on_threads(threads, |index| {
+        let Some(Ok(mut tails)) = scratch.get(index).map(Mutex::lock) else {
+            stop.store(true, Ordering::Release);
+            return false;
+        };
+        if index < workers {
+            let _guard = StopOnUnwind(&stop);
+            let mut idle = 0u32;
+            while !stop.load(Ordering::Acquire) {
+                let c = next.load(Ordering::Acquire);
+                if c >= chunks {
+                    break;
+                }
+                if claim(c) {
+                    pack(c, &mut tails);
+                    idle = 0;
+                } else {
+                    // Ahead of the writer by the whole ring: a short sleep, which keeps a waiting
+                    // core idle, where spinning would draw power from the cores doing the work.
+                    idle = idle.saturating_add(1);
+                    if idle < 64 {
+                        std::hint::spin_loop()
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_micros(20))
+                    }
+                }
+            }
+            return true;
+        }
+        // The writer, on the calling thread. It packs a chunk itself when no other thread has
+        // claimed it, so the write ends even if no packing thread started.
+        let Ok(mut file) = file.lock() else { return false };
+        let mut prefix = header;
+        for c in 0..chunks {
+            let mut idle = 0u32;
+            while ready[c % PACKED_SLOTS].load(Ordering::Acquire) != c + 1 {
+                if stop.load(Ordering::Acquire) {
+                    return false;
+                }
+                if claim(c) {
+                    pack(c, &mut tails);
+                } else {
+                    idle = idle.saturating_add(1);
+                    if idle < 64 {
+                        std::hint::spin_loop()
+                    } else {
+                        std::thread::yield_now()
+                    }
+                }
+            }
+            let (_, count, at) = place(c);
+            // SAFETY: the slot's chunk was packed, as `ready` says, and stays until `written` moves.
+            let bytes = unsafe { std::slice::from_raw_parts(at as *const u8, count * frame_bytes) };
+            if let Err(e) = write_both(&mut **file, prefix, bytes) {
+                if let Ok(mut f) = failure.lock() {
+                    *f = Some(e);
+                }
+                stop.store(true, Ordering::Release);
+                return false;
+            }
+            prefix = &[];
+            written.store(c + 1, Ordering::Release);
+        }
+        true
+    });
+    drop(ring);
+    if let Some(e) = failure.into_inner().ok().flatten() {
+        return Err(e);
+    }
+    if ok {
+        Ok(true)
+    } else {
+        Err(io::Error::other("a thread packing samples for the file ended early"))
+    }
+}
+
 /// Frames of a view, for packing into the file's layout in any order.
 #[cfg(any(feature = "wav", feature = "flac"))]
 struct FrameSource<'a, T, U> {
