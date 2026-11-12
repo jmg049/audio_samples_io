@@ -81,7 +81,7 @@ pub struct StreamPlan {
 /// | file | first read | buffer | read straight into the caller's memory | asked for whole |
 /// |---|---|---|---|---|
 /// | in the page cache | 4 KiB | 256 KiB | requests of 16 KiB and more | no |
-/// | off the disk, ext4 or xfs | 1 MiB | 1 MiB | never | up to 1 MiB |
+/// | off the disk, ext4 or xfs | 1 MiB | 1 MiB | never | up to 1.2 MiB |
 /// | off the disk, btrfs | 64 KiB | 64 KiB | requests of 16 KiB and more | up to 768 KiB |
 /// | off the disk, elsewhere | 64 KiB | 64 KiB | requests of 16 KiB and more | no |
 ///
@@ -841,12 +841,18 @@ impl Drop for Scratch {
 
 /// Bytes of samples from which [`write_packed_on_threads`] is used.
 #[cfg(feature = "wav")]
-const PACKED_THREADS_MIN_BYTES: usize = 8 * 1024 * 1024;
+const PACKED_THREADS_MIN_BYTES: usize = 2 * 1024 * 1024;
 
-/// Bytes packed and written at a time by [`write_packed_on_threads`]. On btrfs one write of 2 MiB
-/// cost 0.96 times as much per byte as a single write of the whole file, and of 64 KiB 1.26 times.
+/// Most bytes packed and written at a time by [`write_packed_on_threads`]. On btrfs one write of
+/// 2 MiB cost 0.96 times as much per byte as a single write of the whole file, and of 64 KiB 1.26
+/// times. Smaller saves use an eighth of their size, from [`PACKED_CHUNK_MIN_BYTES`], so that the
+/// ring stays small next to the file.
 #[cfg(feature = "wav")]
 const PACKED_CHUNK_BYTES: usize = 2 * 1024 * 1024;
+
+/// Fewest bytes packed and written at a time by [`write_packed_on_threads`].
+#[cfg(feature = "wav")]
+const PACKED_CHUNK_MIN_BYTES: usize = 256 * 1024;
 
 /// Chunks held at once by [`write_packed_on_threads`]: the one being written and those packed ahead.
 #[cfg(feature = "wav")]
@@ -878,7 +884,8 @@ where
     let (channels, frames) = view.dim();
     let frame_bytes = channels * U::BYTES as usize;
     let total = frames * frame_bytes;
-    if total < PACKED_THREADS_MIN_BYTES || frame_bytes == 0 || frame_bytes > PACKED_CHUNK_BYTES {
+    let chunk_bytes = (total / 8).clamp(PACKED_CHUNK_MIN_BYTES, PACKED_CHUNK_BYTES);
+    if total < PACKED_THREADS_MIN_BYTES || frame_bytes == 0 || frame_bytes > chunk_bytes {
         return Ok(false);
     }
     let source = FrameSource::<T, U>::new(view);
@@ -891,7 +898,7 @@ where
         return Ok(false);
     }
     let workers = threads - 1;
-    let chunk_frames = PACKED_CHUNK_BYTES / frame_bytes;
+    let chunk_frames = chunk_bytes / frame_bytes;
     let chunks = frames.div_ceil(chunk_frames);
     let slot_bytes = chunk_frames * frame_bytes + PAGE + ABOVE;
     let Some(ring) = Scratch::new(slot_bytes * PACKED_SLOTS) else {
@@ -1201,7 +1208,9 @@ pub(crate) const fn file_system(_file: &File) -> FileSystem {
 /// to 3% slower. The third value says whether the file is off the disk.
 ///
 /// Measured over ten files per size, against a header read followed by a read of the samples:
-/// - ext4 and xfs up to 1 MiB: asking first and reading whole took 0.86 to 0.94 times as long;
+/// - ext4 and xfs up to 1 MiB: asking first and reading whole took 0.86 to 0.94 times as long; at 1
+///   and 1.1 MiB of samples, 0.965 to 0.98 times as long as one whole read, and level from 1.25 MiB,
+///   so files up to 1.2 MiB are asked for whole;
 /// - ext4 and xfs from 1 to 2 MiB: reading whole took 0.97 to 0.98 times as long, where asking
 ///   first was slower; at 3.5 MiB one read of the whole file took 1.01 to 1.03 times as long;
 /// - btrfs at 512 KiB: asking first and reading whole took 0.92 times as long, but from 1 MiB both
@@ -1227,7 +1236,7 @@ fn whole_read_plan_on(_file: &File, len: u64, fs: FileSystem) -> Option<bool> {
         return None;
     }
     match fs {
-        FileSystem::Ext4 | FileSystem::Xfs => Some(len <= MIB),
+        FileSystem::Ext4 | FileSystem::Xfs => Some(len <= 6 * MIB / 5),
         FileSystem::Btrfs if len <= 3 * MIB / 4 => Some(true),
         _ => None,
     }
