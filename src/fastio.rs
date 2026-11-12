@@ -633,6 +633,27 @@ where
     U: StandardSample,
 {
     let size = U::BYTES as usize;
+    // Two channels, whose values are their bytes in the file: a frame at a time, which the compiler
+    // turns into vector interleaving, for tiles and for conversions. A 2 MiB chunk of the file's own
+    // type packed on another thread made the save 4% slower this way than a channel at a time;
+    // converting, twice as fast.
+    #[cfg(target_endian = "little")]
+    if let [left, right] = runs
+        && size == mem::size_of::<U>()
+        && (count * 2 * size <= TILE_BYTES || TypeId::of::<T>() != TypeId::of::<U>())
+        && TypeId::of::<U>() != TypeId::of::<I24>()
+    {
+        let out = out.cast::<U>();
+        for (i, (&l, &r)) in left[..count].iter().zip(&right[..count]).enumerate() {
+            // SAFETY: frame `i` takes values `2i` and `2i + 1`, within the caller's bound of
+            // `count * 2` values; unaligned writes, since the tile need not be aligned for U.
+            unsafe {
+                out.add(2 * i).write_unaligned(l.convert_to());
+                out.add(2 * i + 1).write_unaligned(r.convert_to());
+            }
+        }
+        return;
+    }
     let stride = runs.len() * size;
     // One channel at a time: each is read in order, and the tile stays in the cache.
     for (c, run) in runs.iter().enumerate() {
