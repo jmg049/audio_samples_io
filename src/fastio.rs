@@ -81,7 +81,8 @@ pub struct StreamPlan {
 /// | file | first read | buffer | read straight into the caller's memory | asked for whole |
 /// |---|---|---|---|---|
 /// | in the page cache | 4 KiB | 256 KiB | requests of 16 KiB and more | no |
-/// | off the disk, ext4 or xfs | the whole file up to 2 MiB, else 1 MiB | 1 MiB | never | up to 1.2 MiB |
+/// | off the disk, ext4 | the whole file up to 2 MiB, else 4 MiB | 4 MiB | never | up to 1.2 MiB |
+/// | off the disk, xfs | the whole file up to 2 MiB, else 1 MiB | 1 MiB | never | up to 1.2 MiB |
 /// | off the disk, btrfs | 64 KiB | 64 KiB | requests of 16 KiB and more | up to 768 KiB |
 /// | off the disk, elsewhere | 64 KiB | 64 KiB | requests of 16 KiB and more | no |
 ///
@@ -97,6 +98,9 @@ pub struct StreamPlan {
 ///   256 KiB, at every block size; for a 2 MiB file one read of the whole file took 0.90 to 0.96
 ///   times as long as reads of the caller's block on xfs, where a 1 MiB buffer took 1.02 to 1.08
 ///   times, and level with the 1 MiB buffer on ext4;
+/// - off the disk, files of 10 to 106 MiB: on ext4 reads of 4 MiB took 0.97 to 0.98 times as long
+///   as reads of 1 MiB at every block size, in three runs; on xfs reads of 1 MiB were 0.5 to 1.5%
+///   faster at 60 MiB, and at 10 MiB in two runs of three;
 /// - off the disk on btrfs, files of 512 KiB asked for whole took 0.86 to 0.90 times as long; from
 ///   2 MiB a 64 KiB buffer was the fastest plan (0.987 to 0.995), and reads of 1 MiB or more 2 to 5%
 ///   slower. In Python against soundfile, a 256 KiB first read lost 4 to 5% on a cold 1.76 MB file.
@@ -119,10 +123,11 @@ pub fn stream_plan(file: &File) -> StreamPlan {
         will_need(file);
     }
     if fs.is_ext4_or_xfs() {
+        // A file that a whole read takes in one read is taken the same way here.
+        let buffer = if whole.is_none() && fs == FileSystem::Ext4 { 4096 * KIB } else { 1024 * KIB };
         StreamPlan {
-            // A file that a whole read takes in one read is taken the same way here.
-            first: if whole.is_some() { len as usize } else { 1024 * KIB },
-            buffer: 1024 * KIB,
+            first: if whole.is_some() { len as usize } else { buffer },
+            buffer,
             direct_min: usize::MAX,
             len,
         }
@@ -843,9 +848,18 @@ impl Drop for Scratch {
     }
 }
 
-/// Bytes of samples from which [`write_packed_on_threads`] is used.
+/// Bytes of samples from which [`write_packed_on_threads`] is used, for more than two channels, and
+/// for one or two on btrfs and other file systems. Against packing on the caller, on btrfs threads
+/// took 0.64 to 0.95 times as long from 2.6 MiB for every layout and conversion measured; on tmpfs,
+/// 0.47 times for six channels converted to float32 and 1.00 to 1.02 for six channels unconverted.
 #[cfg(feature = "wav")]
 const PACKED_THREADS_MIN_BYTES: usize = 2 * 1024 * 1024;
+
+/// Bytes of samples from which [`write_packed_on_threads`] is used for one or two channels on ext4
+/// and xfs, whose writes cost little more than a copy. There, a stereo save of 3.5 MB took 1.31 to
+/// 1.37 times as long on threads, where one of 7 MB on xfs took 0.95 times.
+#[cfg(feature = "wav")]
+const PACKED_THREADS_STEREO_DISK_MIN_BYTES: usize = 6 * 1024 * 1024;
 
 /// Most bytes packed and written at a time by [`write_packed_on_threads`]. On btrfs one write of
 /// 2 MiB cost 0.96 times as much per byte as a single write of the whole file, and of 64 KiB 1.26
@@ -867,8 +881,8 @@ const PACKED_SLOTS: usize = 4;
 /// them in order, one write call per chunk. `header` goes in the same call as the first chunk.
 ///
 /// Returns `Ok(false)`, having written nothing, where it does not apply: samples already in the
-/// file's layout (one write is best), fewer than [`PACKED_THREADS_MIN_BYTES`], or fewer than three
-/// threads to use.
+/// file's layout (one write is best), fewer than [`PACKED_THREADS_MIN_BYTES`] (for one or two
+/// channels, more on ext4, xfs and tmpfs), or fewer than three threads to use.
 #[cfg(feature = "wav")]
 #[inline(never)]
 pub(crate) fn write_packed_on_threads<'a, T, U>(
@@ -895,6 +909,19 @@ where
     let source = FrameSource::<T, U>::new(view);
     if source.same_layout {
         return Ok(false);
+    }
+    if channels <= 2 {
+        // A stereo pack is cheap next to the write except on btrfs: on tmpfs threads took 1.14 to
+        // 1.55 times as long below the mapping's size, whatever the type.
+        let least = match file_system(file) {
+            FileSystem::Ext4 | FileSystem::Xfs => PACKED_THREADS_STEREO_DISK_MIN_BYTES,
+            // Larger saves there go through a mapping.
+            FileSystem::Tmpfs => 8 * 1024 * 1024,
+            FileSystem::Btrfs | FileSystem::Other => PACKED_THREADS_MIN_BYTES,
+        };
+        if total < least {
+            return Ok(false);
+        }
     }
     let permit = ThreadsPermit::try_acquire();
     let threads = permit.threads(transfer_threads().min(PACKED_SLOTS));
@@ -1207,27 +1234,35 @@ pub(crate) const fn file_system(_file: &File) -> FileSystem {
 /// threads where it is in the page cache.
 ///
 /// A file in the page cache costs no trip to the disk, and its first read is only the header's 4 KiB,
-/// so that the threads take the rest. A small file off the disk is read whole; a larger one also
-/// starts with 4 KiB, since a first read of 1 MiB made cold reads of 3.5 to 10 MB files on btrfs 0.6
-/// to 3% slower. The third value says whether the file is off the disk.
+/// so that the threads take the rest. A small file off the disk is read whole. A larger one on ext4
+/// or xfs starts with 2 MiB: the kernel sizes its first readahead request from the first read, so a
+/// 4 KiB read starts it at 16 KiB and it grows (64 KiB, 240 KiB) before reaching the device's
+/// largest request, one round trip each, where a read of 2 MiB or more starts at the largest
+/// request, as a whole read does; 2 MiB bounds what is copied when the samples are not aligned for
+/// their type. Elsewhere a larger file starts with 4 KiB, since a first read of 1 MiB made cold reads
+/// of 3.5 to 10 MB files on btrfs 0.6 to 3% slower. The third value says whether the file is off
+/// the disk.
 ///
-/// Measured over ten files per size, against a header read followed by a read of the samples:
+/// Measured over six to ten files per size, against a header read followed by a read of the samples:
 /// - ext4 and xfs up to 1 MiB: asking first and reading whole took 0.86 to 0.94 times as long; at 1
 ///   and 1.1 MiB of samples, 0.965 to 0.98 times as long as one whole read, and level from 1.25 MiB,
 ///   so files up to 1.2 MiB are asked for whole;
-/// - ext4 and xfs from 1 to 2 MiB: reading whole took 0.97 to 0.98 times as long, where asking
-///   first was slower; at 3.5 MiB one read of the whole file took 1.01 to 1.03 times as long;
+/// - ext4 and xfs from 1.5 to 5 MiB: one read of the whole file took 0.95 to 0.998 times as long as
+///   4 KiB followed by the rest, and 0.96 to 0.998 times as long as the reads soundfile makes;
 /// - btrfs at 512 KiB: asking first and reading whole took 0.92 times as long, but from 1 MiB both
 ///   were level or slower, up to 1.09 times at 4 MiB; files up to 768 KiB are asked for whole.
 #[cfg(all(feature = "wav", feature = "numpy"))]
 pub(crate) fn whole_read_plan(file: &File, len: u64) -> (usize, bool, bool) {
     const HEADER: u64 = 4096;
+    const COLD_FIRST: u64 = 2 * 1024 * 1024;
     let cold = len > 0 && range_is_cold(file, 0, len as usize);
     if !cold {
         return (len.min(HEADER) as usize, false, false);
     }
-    match whole_read_plan_on(file, len, file_system(file)) {
+    let fs = file_system(file);
+    match whole_read_plan_on(file, len, fs) {
         Some(will_need) => (len as usize, will_need, true),
+        None if fs.is_ext4_or_xfs() => (len.min(COLD_FIRST) as usize, false, true),
         None => (len.min(HEADER) as usize, false, true),
     }
 }
