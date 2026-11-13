@@ -14,7 +14,8 @@ Sections, each measured for every library that can do it:
 
     read      warm   read a whole file already in the page cache
     read      cold   the same, after dropping that file from the cache before each read; each
-                     library reads its own copy of the file in a round, and the copies rotate
+                     read in a round takes its own copy of the file, the copy written just before
+                     the previous read's, and the libraries' places rotate between rounds
     read-f32  warm/cold   read into float32, which is what librosa.load does by default
     stream    warm/cold   read a file in blocks of 4096 frames
     write     new    write to a path that does not exist, with fsync time as a separate figure
@@ -410,9 +411,13 @@ def percentiles(values):
 
 
 def round_orders(count):
-    """Call orders for the rounds, repeating every `count` rounds: a balanced Latin square, in which
-    each library takes each place in a round equally often, and, for an even count, follows each other
-    library as often as it precedes it."""
+    """Call orders for the rounds, repeating every `count` rounds for an even count and every
+    `2 * count` for an odd one: a balanced Latin square (Williams design), in which each library takes
+    each place in a round equally often and follows each other library equally often. A read straight
+    after another can be slower or faster by what that read left the device doing (on an SSD, a run of
+    small reads before it cost the next read 0.07 to 0.16 ms), so no library may always follow the
+    same one. For an odd count one square cannot balance who follows whom, so its rows are followed
+    by the same rows reversed."""
     first = []
     low, high = 0, count - 1
     while low <= high:
@@ -421,7 +426,10 @@ def round_orders(count):
         if low <= high:
             first.append(high)
             high -= 1
-    return [[(place + shift) % count for place in first] for shift in range(count)]
+    orders = [[(place + shift) % count for place in first] for shift in range(count)]
+    if count % 2:
+        orders += [order[::-1] for order in orders]
+    return orders
 
 
 def run_row(args, row, funcs):
@@ -436,10 +444,15 @@ def run_row(args, row, funcs):
     sources = []
     if reading:
         # A read straight after another of the same file, dropped from the cache in between, is
-        # faster, so cold rows give each library, and the unbuffered read, a copy of its own in each
-        # round; the copies rotate between rounds, so that no copy's place on the disk decides the
-        # row. Warm rows share a file per round, taking the next one each round.
-        copies = max(args.instances, len(names) + 1) if cold else args.instances
+        # faster, so cold rows give each read in a round, the unbuffered read included, a copy of its
+        # own. Copies are written one after another, so each lies just past the one before it on the
+        # disk, and a read that continues where the previous read ended can find its data already
+        # read ahead by the device (on an SSD, 0.34 against 0.69 ms for 172 KiB). So each read takes
+        # the copy written before the previous read's, the same for every place in the round and
+        # across rounds, and with two more copies than libraries the starting copy moves on each
+        # round, so that no copy's place on the disk decides the row. Warm rows share a file per
+        # round, taking the next one each round.
+        copies = max(args.instances, len(names) + 2) if cold else args.instances
         sources = [input_file(args.dir, fmt, row["type"], row["ch"], row["dur"], k) for k in range(copies)]
         row["bytes"] = os.path.getsize(sources[0])
         row["instances"] = len(sources)
@@ -496,7 +509,9 @@ def run_row(args, row, funcs):
             name = names[index]
             source = None
             if sources:
-                source = sources[(i + index) % len(sources)] if cold else sources[i % len(sources)]
+                # Reads count down through the copies, one copy per read, the unbuffered read too.
+                at = -(i * (len(names) + 1) + position)
+                source = sources[at % len(sources)] if cold else sources[i % len(sources)]
             a, b, c = call(name, source)
             if args.raw:
                 raw[name].append([i, position, sources.index(source) if source else -1, round(a, 5), round(b, 5)])
@@ -506,7 +521,7 @@ def run_row(args, row, funcs):
             if c is not None:
                 sync[name].append(c)
         if buffer is not None:
-            source = sources[(i + len(names)) % len(sources)]
+            source = sources[-(i * (len(names) + 1) + len(names)) % len(sources)]
             drop_cache(source)
             started = time.perf_counter_ns()
             direct_read(source, buffer)
@@ -586,7 +601,7 @@ def main():
     ap.add_argument("--budget", type=float, default=0.3, help="seconds per row per library, roughly")
     ap.add_argument("--min-rounds", type=int, default=11)
     ap.add_argument("--max-rounds", type=int, default=400)
-    ap.add_argument("--instances", type=int, default=1, help="copies of each input file, taken in turn by the rounds; cold rows use at least one more than there are libraries")
+    ap.add_argument("--instances", type=int, default=1, help="copies of each input file, taken in turn by the rounds; cold rows use at least two more than there are libraries")
     ap.add_argument("--stream-blocks", default=str(BLOCK_FRAMES), help="frames per block for streamed reads, comma-separated")
     ap.add_argument("--raw", action="store_true", help="also record every call: round, place in the round, copy read, wall and CPU ms")
     ap.add_argument("--quick", action="store_true", help="a small subset, to check that everything works")
