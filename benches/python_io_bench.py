@@ -480,6 +480,8 @@ def run_row(args, row, funcs):
     sync = {n: [] for n in names}
     # Whether each call was the first of its round.
     led = {n: [] for n in names}
+    # Per call, with --raw: round, place in the round, copy read, wall ms, CPU ms.
+    raw = {n: [] for n in names}
     direct = []
     buffer = None
     if cache == "cold":
@@ -496,6 +498,8 @@ def run_row(args, row, funcs):
             if sources:
                 source = sources[(i + index) % len(sources)] if cold else sources[i % len(sources)]
             a, b, c = call(name, source)
+            if args.raw:
+                raw[name].append([i, position, sources.index(source) if source else -1, round(a, 5), round(b, 5)])
             led[name].append(position == 0)
             wall[name].append(a)
             cpu[name].append(b)
@@ -507,6 +511,8 @@ def run_row(args, row, funcs):
             started = time.perf_counter_ns()
             direct_read(source, buffer)
             direct.append((time.perf_counter_ns() - started) / 1e6)
+            if args.raw:
+                raw.setdefault("direct", []).append([i, len(names), sources.index(source), round(direct[-1], 5), 0.0])
     if was_enabled:
         gc.enable()
     if buffer is not None:
@@ -540,6 +546,8 @@ def run_row(args, row, funcs):
         row["lib"][name] = entry
     if direct:
         row["direct_p50"] = float(np.median(direct))
+    if args.raw:
+        row["raw"] = raw
     return row
 
 
@@ -580,6 +588,7 @@ def main():
     ap.add_argument("--max-rounds", type=int, default=400)
     ap.add_argument("--instances", type=int, default=1, help="copies of each input file, taken in turn by the rounds; cold rows use at least one more than there are libraries")
     ap.add_argument("--stream-blocks", default=str(BLOCK_FRAMES), help="frames per block for streamed reads, comma-separated")
+    ap.add_argument("--raw", action="store_true", help="also record every call: round, place in the round, copy read, wall and CPU ms")
     ap.add_argument("--quick", action="store_true", help="a small subset, to check that everything works")
     args = ap.parse_args()
     if args.quick:
