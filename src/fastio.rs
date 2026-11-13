@@ -103,7 +103,9 @@ pub struct StreamPlan {
 ///   faster at 60 MiB, and at 10 MiB in two runs of three;
 /// - off the disk on btrfs, files of 512 KiB asked for whole took 0.86 to 0.90 times as long; from
 ///   2 MiB a 64 KiB buffer was the fastest plan (0.987 to 0.995), and reads of 1 MiB or more 2 to 5%
-///   slower. In Python against soundfile, a 256 KiB first read lost 4 to 5% on a cold 1.76 MB file.
+///   slower. In Python against soundfile, a 256 KiB first read lost 4 to 5% on a cold 1.76 MB file;
+/// - off the disk on ext4 and xfs, files of 86 KiB to 2 MiB streamed from Python in blocks of 4096
+///   frames: the plans measured for whole reads (see `whole_read_plan`) ranked the same way.
 #[cfg(feature = "wav")]
 pub fn stream_plan(file: &File) -> StreamPlan {
     const KIB: usize = 1024;
@@ -1250,7 +1252,12 @@ pub(crate) const fn file_system(_file: &File) -> FileSystem {
 /// - ext4 and xfs from 1.5 to 5 MiB: one read of the whole file took 0.95 to 0.998 times as long as
 ///   4 KiB followed by the rest, and 0.96 to 0.998 times as long as the reads soundfile makes;
 /// - btrfs at 512 KiB: asking first and reading whole took 0.92 times as long, but from 1 MiB both
-///   were level or slower, up to 1.09 times at 4 MiB; files up to 768 KiB are asked for whole.
+///   were level or slower, up to 1.09 times at 4 MiB; files up to 768 KiB are asked for whole;
+/// - ext4 and xfs from 86 KiB to 2 MiB, from Python, each plan taking turns with the other libraries
+///   and reading its own copy: a first read of 16 KiB took 1.004 to 1.55 times as long, one of
+///   128 KiB 1.015 to 1.23 times from 345 KiB and level below it, a whole read without asking first
+///   1.02 to 1.06 times up to 172 KiB and level above it, and asking first from 1.2 MiB 1.015 to
+///   1.02 times; none was faster beyond the up to 4% by which two entries of the same plan differed.
 #[cfg(all(feature = "wav", feature = "numpy"))]
 pub(crate) fn whole_read_plan(file: &File, len: u64) -> (usize, bool, bool) {
     const HEADER: u64 = 4096;
