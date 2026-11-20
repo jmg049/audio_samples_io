@@ -2,6 +2,8 @@
 //! file in every reader, keeps its layout, and a buffer whose channel count or sample rate
 //! differs from the file's is an error that leaves the buffer and the stream unchanged.
 
+#![cfg(any(feature = "wav", feature = "flac", feature = "aiff"))]
+
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;

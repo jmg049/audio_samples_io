@@ -404,6 +404,7 @@ pub trait AudioStreamWrite: AudioStreamWriter {
 /// The buffer passed to [`AudioFileRead::read_into`] or
 /// [`AudioStreamRead::read_frames_into`] must have the file's channel count and sample
 /// rate; anything else is a parameter error and the buffer is left unchanged.
+#[cfg(any(feature = "wav", feature = "flac", feature = "aiff"))]
 pub(crate) fn check_read_buffer<T>(buffer: &AudioSamples<'_, T>, channels: usize, sample_rate: u32) -> AudioIOResult<()>
 where
     T: StandardSample,
@@ -434,6 +435,7 @@ where
 /// The buffer keeps its layout: a mono buffer stays mono, and a multi-channel buffer stays
 /// multi-channel, including one with a single channel (from `zeros_multi` with one channel).
 /// The caller has checked the channel count with [`check_read_buffer`].
+#[cfg(any(feature = "wav", feature = "flac", feature = "aiff"))]
 pub(crate) fn fill_planar<T>(buffer: &mut AudioSamples<'_, T>, planar: Vec<T>, channels: usize) -> AudioIOResult<()>
 where
     T: StandardSample,
@@ -451,6 +453,7 @@ where
 
 /// [`fill_planar`] for interleaved samples (frame by frame), which are deinterleaved first
 /// when there is more than one channel.
+#[cfg(feature = "wav")]
 pub(crate) fn fill_interleaved<T>(
     buffer: &mut AudioSamples<'_, T>,
     interleaved: non_empty_slice::NonEmptyVec<T>,
