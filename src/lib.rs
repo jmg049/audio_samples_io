@@ -285,11 +285,13 @@ pub(crate) const MAX_MMAP_SIZE: u64 = 512 * 1024 * 1024; // 512MB for memory map
 #[cfg(any(feature = "wav", feature = "flac"))]
 const STREAMED_WRITE_BUFFER_BYTES: usize = 16 * 1024;
 
-/// Convenience trait for types that implement both Read and Seek
+/// A source that implements both [`Read`] and [`Seek`], implemented for every such type.
 pub trait ReadSeek: Read + Seek {}
 
 impl<RS> ReadSeek for RS where RS: Read + Seek {}
 
+/// A destination that implements both [`Write`] and [`Seek`], implemented for every such
+/// type. Streamed writers need it to fill in the header sizes when they finish.
 pub trait WriteSeek: Write + Seek {}
 
 impl<WS> WriteSeek for WS where WS: Write + Seek {}
@@ -357,10 +359,15 @@ pub fn peek_native_type<P: AsRef<Path>>(fp: P) -> AudioIOResult<ValidatedSampleT
     }
 }
 
-/// Get basic audio information from a file
+/// Reads the format information of an audio file (sample rate, channels, sample type,
+/// length) without decoding the samples.
 ///
-/// Automatically detects the file format and extracts metadata.
-/// Currently supports WAV and FLAC formats (with appropriate features enabled).
+/// The format is found from the file's first bytes, falling back to the extension.
+/// WAV, FLAC and AIFF are supported, each with its feature enabled.
+///
+/// # Errors
+///
+/// An I/O error, a file that does not parse, or a format whose feature is not enabled.
 pub fn info<P: AsRef<Path>>(fp: P) -> AudioIOResult<BaseAudioInfo> {
     let path = fp.as_ref();
 
@@ -413,11 +420,25 @@ pub fn info<P: AsRef<Path>>(fp: P) -> AudioIOResult<BaseAudioInfo> {
     }
 }
 
-/// Read audio samples from a file
+/// Reads a whole audio file as samples of type `T`.
 ///
-/// Returns owned AudioSamples containing all audio data from the file.
-/// Automatically detects file format and handles sample type conversion.
-/// Currently supports WAV and FLAC formats (with appropriate features enabled).
+/// The format is found from the file's first bytes, falling back to the extension.
+/// WAV, FLAC and AIFF are supported, each with its feature enabled. Samples stored in
+/// another format are converted with the scaling rules of
+/// [`audio_samples::conversions`], so full scale stays full scale.
+///
+/// ```no_run
+/// use audio_samples::AudioSamples;
+///
+/// let audio: AudioSamples<'static, f32> = audio_samples_io::read("input.wav")?;
+/// println!("{} Hz, {} channels", audio.sample_rate(), audio.num_channels());
+/// # Ok::<(), audio_samples_io::AudioIOError>(())
+/// ```
+///
+/// # Errors
+///
+/// An I/O error, a file that does not parse, an encoding that is not supported, or a
+/// format whose feature is not enabled.
 pub fn read<P, T>(fp: P) -> AudioIOResult<AudioSamples<'static, T>>
 where
     P: AsRef<Path>,
@@ -477,6 +498,14 @@ where
     }
 }
 
+/// Reads a whole audio file as samples of type `T` and resamples it to `target_sr`.
+///
+/// The same as [`read()`] followed by [`resample`]. `quality` defaults to
+/// [`ResamplingQuality::Fast`].
+///
+/// # Errors
+///
+/// The errors of [`read()`], and resampling errors as [`AudioIOError::AudioSamples`].
 #[cfg(feature = "resampling")]
 pub fn read_and_resample<P, T>(
     fp: P,
@@ -1053,11 +1082,16 @@ where
     wav::WavSink::new(writer, channels, sample_rate, sample_type, total_frames)
 }
 
-/// Open an audio file for reading/writing operations
+/// Opens an audio file as a [`AudioFile`] trait object, for format-independent access
+/// to the file types.
 ///
-/// Returns a trait object that can be used for low-level file operations.
-/// For simple use cases, prefer the `read()` and `info()` convenience functions.
-/// Currently supports WAV and FLAC formats (with appropriate features enabled).
+/// [`read()`] and [`info()`] cover most uses. The format is found from the file's first
+/// bytes, falling back to the extension; WAV, FLAC and AIFF are supported, each with its
+/// feature enabled.
+///
+/// # Errors
+///
+/// An I/O error, a file that does not parse, or a format whose feature is not enabled.
 pub fn open<P>(fp: P) -> AudioIOResult<Box<dyn AudioFile>>
 where
     P: AsRef<Path>,
@@ -1109,6 +1143,27 @@ where
     }
 }
 
+/// Writes audio to a file, in the format named by the file's extension (`.wav`,
+/// `.flac`, `.aif`/`.aiff`).
+///
+/// WAV and AIFF store the samples in the audio's own sample type; FLAC stores 16-bit
+/// samples for `i16` audio and 24-bit samples otherwise. To store another sample type,
+/// use [`write_as`]. An existing file is replaced.
+///
+/// ```no_run
+/// use std::time::Duration;
+///
+/// use audio_samples::{sample_rate, sine_wave};
+///
+/// let tone = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(44100), 0.5);
+/// audio_samples_io::write("tone.flac", &tone)?;
+/// # Ok::<(), audio_samples_io::AudioIOError>(())
+/// ```
+///
+/// # Errors
+///
+/// An I/O error, an extension that names no supported format, or a format whose
+/// feature is not enabled.
 pub fn write<P, T>(fp: P, audio: &AudioSamples<T>) -> AudioIOResult<()>
 where
     P: AsRef<Path>,
