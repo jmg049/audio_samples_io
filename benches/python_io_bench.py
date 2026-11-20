@@ -41,6 +41,7 @@ means the drop did not work on that system.
 import argparse
 import gc
 import json
+import math
 import os
 import platform
 import subprocess
@@ -432,6 +433,29 @@ def round_orders(count):
     return orders
 
 
+def cold_copies(count, least):
+    """How many copies of the input a cold row with `count` libraries reads: the fewest, from `least`,
+    with which every library and the unbuffered read take every copy equally often over the rounds.
+    Reads count down through the copies, so with two libraries and four copies one library would read
+    only the even copies and the other only the odd ones, and the copies' places on the disk would
+    decide the row (for 172 KiB on xfs the unbuffered read took 0.49 to 0.80 ms by copy)."""
+    orders = round_orders(count)
+    reads = count + 1
+    copies = least
+    while True:
+        cycle = len(orders) * copies // math.gcd(len(orders), copies)
+        counts = []
+        for entry in range(reads):
+            taken = [0] * copies
+            for i in range(cycle):
+                place = orders[i % len(orders)].index(entry) if entry < count else count
+                taken[-(i * reads + place) % copies] += 1
+            counts.append(len(set(taken)))
+        if max(counts) == 1:
+            return copies
+        copies += 1
+
+
 def run_row(args, row, funcs):
     """Every library in turn for as many rounds as the budget allows."""
     op, cache, target = row["op"], row["cache"], row["target"]
@@ -449,10 +473,10 @@ def run_row(args, row, funcs):
         # disk, and a read that continues where the previous read ended can find its data already
         # read ahead by the device (on an SSD, 0.34 against 0.69 ms for 172 KiB). So each read takes
         # the copy written before the previous read's, the same for every place in the round and
-        # across rounds, and with two more copies than libraries the starting copy moves on each
-        # round, so that no copy's place on the disk decides the row. Warm rows share a file per
-        # round, taking the next one each round.
-        copies = max(args.instances, len(names) + 2) if cold else args.instances
+        # across rounds, and with at least two more copies than libraries the starting copy moves on
+        # each round and every read takes every copy equally often, so that no copy's place on the
+        # disk decides the row. Warm rows share a file per round, taking the next one each round.
+        copies = cold_copies(len(names), max(args.instances, len(names) + 2)) if cold else args.instances
         sources = [input_file(args.dir, fmt, row["type"], row["ch"], row["dur"], k) for k in range(copies)]
         row["bytes"] = os.path.getsize(sources[0])
         row["instances"] = len(sources)
