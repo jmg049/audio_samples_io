@@ -435,7 +435,14 @@ where
 /// multiple formats through a unified interface.
 ///
 /// For format-specific access with full functionality (including generic
-/// `read_frames_into<T>()`), use [`open_streamed()`] or [`open_streamed_reader()`]
+#[cfg_attr(
+    feature = "wav",
+    doc = r#" `read_frames_into<T>()`), use [`open_streamed()`] or [`open_streamed_reader()`]"#
+)]
+#[cfg_attr(
+    not(feature = "wav"),
+    doc = r#" `read_frames_into<T>()`), use `open_streamed()` or `open_streamed_reader()` (requires the `wav` feature)"#
+)]
 /// which return concrete types.
 ///
 /// # Example
@@ -499,7 +506,18 @@ where
 /// Create a streaming writer to a file path, choosing WAV or FLAC from the extension.
 ///
 /// Returns a format-agnostic [`StreamedAudioWriter`]; for the concrete per-format writer
-/// use [`create_streamed_writer`] (WAV) or [`create_streamed_flac`] (FLAC).
+/// use
+#[cfg_attr(feature = "wav", doc = r#" [`create_streamed_writer`] (WAV)"#)]
+#[cfg_attr(
+    not(feature = "wav"),
+    doc = r#" `create_streamed_writer` (WAV, requires the `wav` feature)"#
+)]
+/// or
+#[cfg_attr(feature = "flac", doc = r#" [`create_streamed_flac`] (FLAC)."#)]
+#[cfg_attr(
+    not(feature = "flac"),
+    doc = r#" `create_streamed_flac` (FLAC, requires the `flac` feature)."#
+)]
 ///
 /// The sample type is inferred from the generic parameter `T`. Use the turbofish
 /// syntax when the type cannot be inferred: `create_streamed::<f32>(...)`.

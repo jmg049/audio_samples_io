@@ -1,7 +1,14 @@
 //! Streaming AIFF/AIFF-C file reader for memory-efficient audio processing.
 //!
 //! `StreamedAiffFile` parses the `COMM` chunk (and locates `SSND`) at construction
-//! but reads sound data on demand, mirroring [`crate::wav::StreamedWavFile`]. See
+#![cfg_attr(
+    feature = "wav",
+    doc = r#" but reads sound data on demand, mirroring [`crate::wav::StreamedWavFile`]. See"#
+)]
+#![cfg_attr(
+    not(feature = "wav"),
+    doc = r#" but reads sound data on demand, mirroring `StreamedWavFile` (with the `wav` feature). See"#
+)]
 //! [`crate::aiff::aiff_file`] for the format details (chunk layout, compression
 //! codes, the AIFF 8-bit signed convention).
 
