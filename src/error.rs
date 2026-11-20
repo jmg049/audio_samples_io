@@ -1,3 +1,12 @@
+//! The error type of the crate.
+//!
+//! Every fallible function returns [`AudioIOResult`], whose error, [`AudioIOError`],
+//! separates operating-system I/O failures, malformed or corrupted files (with the
+//! byte offset in [`ErrorPosition`]), formats or encodings that are not supported,
+//! formats whose cargo feature is not enabled, and errors from `audio_samples`
+//! itself. The WAV and FLAC modules add their own detailed errors, wrapped in
+//! `AudioIOError`.
+
 use core::fmt::{Display, Formatter, Result as FmtResult};
 use std::io;
 
