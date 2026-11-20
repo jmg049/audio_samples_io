@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- `read_frames_into` (WAV, FLAC and AIFF, seekable and forward-only) and `read_into` accept a one-channel buffer made with `zeros_multi`, so the documented streaming pattern `zeros_multi(channels, block, sample_rate)` works for mono files; they returned an error. The buffer keeps its layout.
+- `read_frames_into` and `read_into` return an error, and leave the buffer and the stream position unchanged, when the buffer's channel count or sample rate differs from the file's. A mono buffer used to receive a stereo file's samples as one long channel, a buffer with another channel count could be filled with mis-assigned samples, and the buffer kept its own sample rate. AIFF `read_into` no longer replaces the buffer's layout.
 - FLAC: `write_flac` scaled I24 samples to 32 bits before encoding, so files decoded to wrong values or failed to decode.
 - FLAC: float input truncated to 24 bits and now rounds, so decoded audio encodes back to the same integers. `u8` uses the crate's `u8` to 24-bit conversion.
 - WAV: `create_streamed::<u8>` wrote 16-bit samples; it writes 8-bit samples.

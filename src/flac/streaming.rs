@@ -12,7 +12,6 @@ use std::{
 };
 
 use audio_samples::{AudioSamples, ConvertFrom, ConvertTo, I24, traits::StandardSample};
-use non_empty_slice::NonEmptyVec;
 
 use crate::{
     ReadSeek,
@@ -487,7 +486,13 @@ impl<R: std::io::Read> StreamedFlacFile<R> {
     /// This is the primary zero-allocation-after-warmup read method (only the
     /// per-call `out`/`flat` staging vectors allocate). Available for any
     /// `Read` source — the [`AudioStreamRead`] trait impl below (`R: Read +
-    /// Seek`) just delegates to this.
+    /// Seek`) just delegates to this. The buffer must have the file's channel count
+    /// and sample rate, and keeps its layout (see [`AudioStreamRead::read_frames_into`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the buffer's channel count or sample rate differs from the
+    /// file's (nothing is decoded), or if decoding fails.
     pub fn read_frames_into<T>(
         &mut self,
         buffer: &mut AudioSamples<'_, T>,
@@ -496,12 +501,13 @@ impl<R: std::io::Read> StreamedFlacFile<R> {
     where
         T: StandardSample + ConvertTo<T> + ConvertFrom<T> + 'static,
     {
+        let num_channels = self.stream_info.channels as usize;
+        crate::traits::check_read_buffer(buffer, num_channels, self.stream_info.sample_rate)?;
         let frames_to_read = frame_count.get().min(self.remaining_frames());
         if frames_to_read == 0 {
             return Ok(0);
         }
 
-        let num_channels = self.stream_info.channels as usize;
         // One Vec<T> per channel, capacity = frames_to_read.
         let mut out: Vec<Vec<T>> = (0..num_channels).map(|_| Vec::with_capacity(frames_to_read)).collect();
 
@@ -562,10 +568,7 @@ impl<R: std::io::Read> StreamedFlacFile<R> {
             flat.extend(ch_data);
         }
 
-        let non_empty = NonEmptyVec::try_from(flat).map_err(|_| {
-            AudioIOError::corrupted_data_simple("Empty decoded output", "No samples after FLAC frame decode")
-        })?;
-        buffer.replace_with_vec(&non_empty)?;
+        crate::traits::fill_planar(buffer, flat, num_channels)?;
 
         Ok(actual_frames)
     }

@@ -747,6 +747,7 @@ impl<'a> AudioFileRead<'a> for WavFile<'a> {
     where
         T: StandardSample + 'static,
     {
+        crate::traits::check_read_buffer(audio, usize::from(self.num_channels()), self.sample_rate())?;
         let data_chunk = self.data();
 
         if self.fmt_chunk().format_code().is_adpcm() {
@@ -840,16 +841,7 @@ where
         ));
     }
 
-    // For mono audio, data is already in correct format
-    if audio.is_mono() {
-        audio.replace_with_vec(&converted).map_err(|e| e.into())
-    } else {
-        // Multi-channel: deinterleave the converted data before replacing
-        // Use optimized deinterleave from audio_samples
-        let planar_data = audio_samples::simd_conversions::deinterleave_multi_vec(&converted, num_channels)
-            .map_err(|e| AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string()))?;
-        audio.replace_with_vec(&planar_data).map_err(|e| e.into())
-    }
+    crate::traits::fill_interleaved(audio, converted, num_channels.get() as usize)
 }
 
 fn read_typed_internal<'a, S, T>(
@@ -914,13 +906,7 @@ where
         ));
     }
 
-    if audio.is_mono() {
-        audio.replace_with_vec(&decoded).map_err(|e| e.into())
-    } else {
-        let planar_data = audio_samples::simd_conversions::deinterleave_multi_vec(&decoded, num_channels)
-            .map_err(|e| AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string()))?;
-        audio.replace_with_vec(&planar_data).map_err(|e| e.into())
-    }
+    crate::traits::fill_interleaved(audio, decoded, num_channels.get() as usize)
 }
 
 /// Shared mu-law/a-law expansion: one companded byte → one `T` sample, whole frames only.
@@ -987,13 +973,7 @@ where
         ));
     }
 
-    if audio.is_mono() {
-        audio.replace_with_vec(&decoded).map_err(|e| e.into())
-    } else {
-        let planar_data = audio_samples::simd_conversions::deinterleave_multi_vec(&decoded, num_channels)
-            .map_err(|e| AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string()))?;
-        audio.replace_with_vec(&planar_data).map_err(|e| e.into())
-    }
+    crate::traits::fill_interleaved(audio, decoded, num_channels.get() as usize)
 }
 
 /// Shared ADPCM expansion: decode blocks to 16-bit linear PCM, then convert to `T`.

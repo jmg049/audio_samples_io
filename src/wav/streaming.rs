@@ -687,7 +687,9 @@ impl<R: std::io::Read> StreamedWavFile<R> {
     /// Read frames into a pre-allocated `AudioSamples` buffer.
     ///
     /// This is the primary zero-allocation read method. After initial buffer
-    /// allocation, repeated calls reuse the same memory.
+    /// allocation, repeated calls reuse the same memory. The buffer must have the
+    /// file's channel count and sample rate, and keeps its layout (see
+    /// [`AudioStreamRead::read_frames_into`]).
     ///
     /// # Arguments
     ///
@@ -700,7 +702,8 @@ impl<R: std::io::Read> StreamedWavFile<R> {
     ///
     /// # Errors
     ///
-    /// Returns an error if reading fails or data is corrupted.
+    /// Returns an error if the buffer's channel count or sample rate differs from the
+    /// file's (nothing is read), or if reading fails or the data is corrupted.
     pub fn read_frames_into<T>(
         &mut self,
         buffer: &mut AudioSamples<'_, T>,
@@ -709,6 +712,7 @@ impl<R: std::io::Read> StreamedWavFile<R> {
     where
         T: StandardSample + 'static,
     {
+        crate::traits::check_read_buffer(buffer, self.channels as usize, self.sample_rate.get())?;
         let frames_available = self.remaining_frames();
         let frames_to_read = frame_count.get().min(frames_available);
 
@@ -740,17 +744,7 @@ impl<R: std::io::Read> StreamedWavFile<R> {
         self.convert_bytes_to_samples::<T>(&self.byte_buffer[..actual_bytes], &mut converted_buf);
         // safety: We have already verified that converted_buf.len() == total samples to read
         let converted = unsafe { NonEmptyVec::new_unchecked(converted_buf) };
-        // Deinterleave and replace buffer contents
-        // safety: channels is guaranteed > 0 from parsing, and converted length matches frames read
-        let num_channels = unsafe { NonZeroU32::new_unchecked(self.channels as u32) };
-
-        if buffer.is_mono() {
-            buffer.replace_with_vec(&converted)?;
-        } else {
-            let planar = audio_samples::simd_conversions::deinterleave_multi_vec(&converted, num_channels)
-                .map_err(|e| AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string()))?;
-            buffer.replace_with_vec(&planar)?;
-        }
+        crate::traits::fill_interleaved(buffer, converted, self.channels as usize)?;
 
         self.current_frame += frames_read;
         Ok(frames_read)

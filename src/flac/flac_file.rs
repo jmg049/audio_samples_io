@@ -607,6 +607,7 @@ impl<'a> AudioFileRead<'a> for FlacFile<'a> {
     where
         T: StandardSample + 'static,
     {
+        crate::traits::check_read_buffer(audio, usize::from(self.num_channels()), self.stream_info.sample_rate)?;
         // Decode all frames
         let decoded = self.decode_all_frames().map_err(AudioIOError::FlacError)?;
 
@@ -638,9 +639,7 @@ impl<'a> AudioFileRead<'a> for FlacFile<'a> {
 
         // Use DecodedAudio's conversion to get planar samples
         let planar_data = decoded.read_samples_planar::<T>()?;
-        let non_empty = non_empty_slice::NonEmptyVec::try_from(planar_data)
-            .map_err(|_| AudioIOError::corrupted_data_simple("Empty planar data", "No samples to replace with"))?;
-        audio.replace_with_vec(&non_empty).map_err(Into::into)
+        crate::traits::fill_planar(audio, planar_data, num_channels)
     }
 }
 

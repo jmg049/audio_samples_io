@@ -124,10 +124,25 @@ pub trait AudioFile {
 /// forcing the user to specify a type parameter when opening a file even if they don't intend to read samples
 /// immediately.
 pub trait AudioFileRead<'a> {
+    /// Decodes the whole file as samples of type `T`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the data cannot be decoded.
     fn read<T>(&'a self) -> AudioIOResult<AudioSamples<'a, T>>
     where
         T: StandardSample + 'static;
 
+    /// Decodes the whole file into `audio`, replacing its samples.
+    ///
+    /// `audio` must have the file's channel count, sample rate and length. It keeps its
+    /// layout: a mono buffer stays mono and a multi-channel one stays multi-channel,
+    /// including a one-channel buffer made with `zeros_multi`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and leaves `audio` unchanged, if its channel count, sample rate or
+    /// length differs from the file's, or if the data cannot be decoded.
     fn read_into<T>(&'a self, audio: &mut AudioSamples<'a, T>) -> AudioIOResult<()>
     where
         T: StandardSample + 'static;
@@ -238,6 +253,10 @@ pub trait AudioStreamRead: AudioStreamReader + AudioFileMetadata {
     /// This is the primary zero-allocation read method. After initial buffer
     /// allocation, repeated calls reuse the same memory.
     ///
+    /// The buffer must have the stream's channel count and sample rate. It keeps its
+    /// layout: a mono buffer stays mono and a multi-channel one stays multi-channel,
+    /// so `zeros_multi(channels, block, sample_rate)` works for mono files too.
+    ///
     /// # Arguments
     ///
     /// * `buffer` - Pre-allocated `AudioSamples` to fill with frame data
@@ -249,7 +268,9 @@ pub trait AudioStreamRead: AudioStreamReader + AudioFileMetadata {
     ///
     /// # Errors
     ///
-    /// Returns an error if reading fails or data is corrupted.
+    /// Returns an error if the buffer's channel count or sample rate differs from the
+    /// stream's (the buffer and the stream position are then unchanged), or if reading
+    /// fails or the data is corrupted.
     fn read_frames_into<T>(
         &mut self,
         buffer: &mut AudioSamples<'_, T>,
@@ -376,4 +397,74 @@ pub trait AudioStreamWrite: AudioStreamWriter {
     fn write_frames<T>(&mut self, samples: &AudioSamples<'_, T>) -> AudioIOResult<usize>
     where
         T: StandardSample + ConvertTo<T> + ConvertFrom<T> + 'static;
+}
+
+/// Checks that `buffer` matches a file's channel count and sample rate before it is filled.
+///
+/// The buffer passed to [`AudioFileRead::read_into`] or
+/// [`AudioStreamRead::read_frames_into`] must have the file's channel count and sample
+/// rate; anything else is a parameter error and the buffer is left unchanged.
+pub(crate) fn check_read_buffer<T>(buffer: &AudioSamples<'_, T>, channels: usize, sample_rate: u32) -> AudioIOResult<()>
+where
+    T: StandardSample,
+{
+    let parameter = |msg: String| {
+        AudioIOError::AudioSamples(audio_samples::AudioSampleError::Parameter(
+            audio_samples::ParameterError::invalid_value("buffer", msg),
+        ))
+    };
+    if buffer.num_channels().get() as usize != channels {
+        return Err(parameter(format!(
+            "the buffer has {} channels and the file {channels}",
+            buffer.num_channels()
+        )));
+    }
+    if buffer.sample_rate().get() != sample_rate {
+        return Err(parameter(format!(
+            "the buffer's sample rate is {} Hz and the file's {sample_rate} Hz",
+            buffer.sample_rate()
+        )));
+    }
+    Ok(())
+}
+
+/// Replaces the contents of a read buffer with `planar` samples (all of channel 0, then
+/// channel 1, and so on) of `channels` channels.
+///
+/// The buffer keeps its layout: a mono buffer stays mono, and a multi-channel buffer stays
+/// multi-channel, including one with a single channel (from `zeros_multi` with one channel).
+/// The caller has checked the channel count with [`check_read_buffer`].
+pub(crate) fn fill_planar<T>(buffer: &mut AudioSamples<'_, T>, planar: Vec<T>, channels: usize) -> AudioIOResult<()>
+where
+    T: StandardSample,
+{
+    if buffer.is_mono() {
+        buffer.replace_with_mono(ndarray::Array1::from_vec(planar))?;
+    } else {
+        let frames = planar.len() / channels;
+        let data = ndarray::Array2::from_shape_vec((channels, frames), planar)
+            .map_err(|e| AudioIOError::corrupted_data_simple("Array shape error", e.to_string()))?;
+        buffer.replace_with_multi(data)?;
+    }
+    Ok(())
+}
+
+/// [`fill_planar`] for interleaved samples (frame by frame), which are deinterleaved first
+/// when there is more than one channel.
+pub(crate) fn fill_interleaved<T>(
+    buffer: &mut AudioSamples<'_, T>,
+    interleaved: non_empty_slice::NonEmptyVec<T>,
+    channels: usize,
+) -> AudioIOResult<()>
+where
+    T: StandardSample,
+{
+    if channels == 1 {
+        return fill_planar(buffer, interleaved.into_vec(), 1);
+    }
+    let num_channels = std::num::NonZeroU32::new(channels as u32)
+        .ok_or_else(|| AudioIOError::corrupted_data_simple("Deinterleave failed", "zero channels"))?;
+    let planar = audio_samples::simd_conversions::deinterleave_multi_vec(&interleaved, num_channels)
+        .map_err(|e| AudioIOError::corrupted_data_simple("Deinterleave failed", e.to_string()))?;
+    fill_planar(buffer, planar.into_vec(), channels)
 }

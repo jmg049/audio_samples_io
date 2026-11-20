@@ -437,6 +437,7 @@ impl<'a> AudioFileRead<'a> for AiffFile<'a> {
     where
         T: StandardSample + 'static,
     {
+        crate::traits::check_read_buffer(audio, usize::from(self.num_channels()), self.sample_rate.get())?;
         let decoded = self.read::<T>()?;
         if decoded.total_samples() != audio.total_samples() {
             return Err(AudioIOError::corrupted_data_simple(
@@ -448,8 +449,16 @@ impl<'a> AudioFileRead<'a> for AiffFile<'a> {
                 ),
             ));
         }
-        *audio = decoded;
-        Ok(())
+        if audio.is_mono() == decoded.is_mono() {
+            *audio = decoded;
+            return Ok(());
+        }
+        // A one-channel buffer made with `zeros_multi` keeps its layout.
+        let samples = decoded
+            .as_slice()
+            .ok_or_else(|| AudioIOError::corrupted_data_simple("Layout mismatch", "expected one channel"))?
+            .to_vec();
+        crate::traits::fill_planar(audio, samples, 1)
     }
 }
 

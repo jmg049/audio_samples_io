@@ -20,7 +20,6 @@ use std::{
 };
 
 use audio_samples::{AudioSamples, traits::StandardSample};
-use non_empty_slice::NonEmptyVec;
 
 use crate::{
     ReadSeek,
@@ -486,7 +485,14 @@ impl<R: std::io::Read> StreamedAiffFile<R> {
 
     /// Read frames into a pre-allocated `AudioSamples` buffer.
     ///
-    /// Returns the actual number of frames read (may be less at end of stream).
+    /// Returns the actual number of frames read (may be less at end of stream). The
+    /// buffer must have the file's channel count and sample rate, and keeps its layout
+    /// (see [`AudioStreamRead::read_frames_into`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the buffer's channel count or sample rate differs from the
+    /// file's (nothing is read), or if reading fails.
     pub fn read_frames_into<T>(
         &mut self,
         buffer: &mut AudioSamples<'_, T>,
@@ -495,6 +501,7 @@ impl<R: std::io::Read> StreamedAiffFile<R> {
     where
         T: StandardSample + 'static,
     {
+        crate::traits::check_read_buffer(buffer, self.channels as usize, self.sample_rate.get())?;
         let frames_available = self.remaining_frames();
         let frames_to_read = frame_count.get().min(frames_available);
 
@@ -532,9 +539,7 @@ impl<R: std::io::Read> StreamedAiffFile<R> {
             }
         }
 
-        // SAFETY: planar.len() == channels * frames_read, and both are > 0.
-        let converted = unsafe { NonEmptyVec::new_unchecked(planar) };
-        buffer.replace_with_vec(&converted)?;
+        crate::traits::fill_planar(buffer, planar, channels)?;
 
         self.current_frame += frames_read;
         Ok(frames_read)
