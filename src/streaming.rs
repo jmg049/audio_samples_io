@@ -1,14 +1,17 @@
-//! Format-agnostic streaming writer.
+//! One streaming writer type for WAV and FLAC.
 //!
-//! [`AudioStreamWrite::write_frames`] is generic over the sample type `T`, which makes the
-//! trait **not object-safe** — so `Box<dyn AudioStreamWrite>` is impossible (the same reason
-//! the streaming *reader* trait object [`open_streamed_dyn`](crate::open_streamed_dyn) can
-//! only expose the non-generic surface).
+//! [`StreamedAudioWriter`] writes a file frame block by frame block, in WAV or FLAC, so
+//! code that streams audio out does not depend on the format. [`create_streamed`]
+//! chooses the format from the file extension and
+//! [`create_streamed_with`](crate::create_streamed_with) takes it explicitly. Each call to
+//! [`write_frames`](AudioStreamWrite::write_frames) encodes one block, and
+//! [`finalize`](AudioStreamWriter::finalize) completes the header.
 //!
-//! To provide a single type that works across formats while keeping the generic
-//! `write_frames`, this module wraps each format's concrete writer in an enum and forwards
-//! the trait methods. Dispatch is a cheap `match` (static dispatch, no vtable), so there is
-//! no per-call cost beyond the branch.
+//! The type is an enum over the concrete writers rather than a trait object, because
+//! `write_frames` is generic over the sample type, which makes [`AudioStreamWrite`] not
+//! object-safe.
+//!
+//! [`create_streamed`]: crate::create_streamed
 
 use audio_samples::{AudioSamples, traits::StandardSample};
 
