@@ -42,3 +42,8 @@ rustflags = [
     # Maintainability
     "-A", "clippy::too_many_arguments",
 ]
+
+# `cargo docs` builds and opens the documentation with every feature, as docs.rs
+# does. Plain `cargo doc` documents only the default features.
+[alias]
+docs = "doc --no-deps --open --all-features"
