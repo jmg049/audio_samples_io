@@ -1,4 +1,4 @@
-//! Read and write audio files as [`AudioSamples`](audio_samples::AudioSamples).
+//! Read and write audio files as [`AudioSamples`].
 //!
 //! This crate is the file layer of [`audio_samples`]: it decodes a file into an
 //! `AudioSamples<T>` at the sample type you ask for, and encodes an `AudioSamples`
