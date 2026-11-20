@@ -1,3 +1,7 @@
+//! The types shared by every format: [`FileType`] (format detection),
+//! [`BaseAudioInfo`] (what [`info`](crate::info) reports), [`ValidatedSampleType`]
+//! (the sample types a file can hold), [`OpenOptions`] and [`WriteOptions`].
+
 use core::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use core::str::FromStr;
 use std::borrow::{Borrow, Cow};
@@ -563,8 +567,11 @@ impl<'a> Debug for AudioDataSource<'a> {
     }
 }
 
+/// Options for opening a file with [`AudioFile::open_with_options`](crate::traits::AudioFile::open_with_options).
 #[derive(Debug, Clone, Copy)]
 pub struct OpenOptions {
+    /// Map files of up to 512 MiB into memory instead of reading them. The default is
+    /// `true`; larger files are always read.
     pub use_memory_map: bool,
 }
 

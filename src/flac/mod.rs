@@ -1,25 +1,21 @@
-//! FLAC (Free Lossless Audio Codec) implementation.
+//! FLAC files: a FLAC decoder and encoder in Rust.
 //!
-//! This module provides a complete pure-Rust FLAC decoder and encoder,
-//! implementing the full FLAC specification including:
+//! [`FlacFile`] reads a whole file, [`StreamedFlacFile`] reads one incrementally, and
+//! [`StreamedFlacWriter`] writes one incrementally. [`write_flac`] and
+//! [`write_flac_without_md5`] encode a whole signal; [`CompressionLevel`] trades
+//! encoding time for size, with levels 0 to 8.
 //!
-//! - All metadata block types (STREAMINFO, SEEKTABLE, VORBIS_COMMENT, etc.)
-//! - LPC prediction (orders 1-32) and fixed predictors (orders 0-4)
-//! - Rice entropy coding with partition optimization
-//! - CRC-8/CRC-16 validation
-//! - All channel configurations (mono, stereo, surround up to 8 channels)
-//! - Stereo decorrelation modes (independent, left-side, right-side, mid-side)
+//! The decoder reads 1 to 32 bits per sample, up to 8 channels, every channel
+//! assignment (independent, left-side, right-side, mid-side), the constant, verbatim,
+//! fixed and LPC subframes (LPC orders up to 32) and both Rice partition types, and
+//! checks the CRC-8 and CRC-16 of every frame. It parses the STREAMINFO, SEEKTABLE,
+//! VORBIS_COMMENT and PICTURE blocks and skips the others. The encoder writes 16-bit
+//! samples for `i16` audio and 24-bit samples for every other type, with fixed or LPC
+//! prediction (LPC orders up to 12 at level 8), and a STREAMINFO block that carries
+//! the MD5 signature of the audio unless it is written without one.
 //!
-//! # Architecture
-//!
-//! The module is organized into layers matching the FLAC specification:
-//!
-//! - `metadata`: Metadata block parsing and serialization
-//! - `frame`: Frame-level encoding/decoding with CRC validation
-//! - `subframe`: Subframe types (CONSTANT, VERBATIM, FIXED, LPC)
-//! - `lpc`: Linear predictive coding with Levinson-Durbin
-//! - `rice`: Rice/Rice2 entropy coding for residuals
-//! - `crc`: CRC-8 and CRC-16 computation
+//! The submodules `metadata`, `frame`, `subframe`, `lpc`, `rice` and `crc` follow the
+//! layers of the format.
 //!
 //! # Example
 //!

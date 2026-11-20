@@ -1,32 +1,155 @@
-//! Audio file reading, writing and streaming for [`audio_samples`].
+//! Read and write audio files as [`AudioSamples`](audio_samples::AudioSamples).
 //!
-//! Reads return an [`AudioSamples<T>`](audio_samples::AudioSamples) at the sample type
-//! you ask for, and writes take one. WAV (including RF64/BW64), FLAC and AIFF/AIFF-C
-//! are supported, each behind a Cargo feature. Read paths detect the container from
-//! the file's magic bytes and fall back to the extension.
+//! This crate is the file layer of [`audio_samples`]: it decodes a file into an
+//! `AudioSamples<T>` at the sample type you ask for, and encodes an `AudioSamples`
+//! back into a file. The audio type, processing and analysis are in
+//! [`audio_samples`]; audio devices and chunked pipelines are in
+//! [`audio_samples_streaming`](https://docs.rs/audio_samples_streaming).
 //!
-//! ```no_run
-//! use std::time::Duration;
+//! | Format | Reads | Writes |
+//! |---|---|---|
+//! | WAV | RIFF, RF64 and BW64; 8- to 32-bit PCM, 32- and 64-bit float, A-law, μ-law, IMA and Microsoft ADPCM | RIFF up to 4 GiB; PCM and float in the sample type of the audio |
+//! | FLAC | 1 to 32 bits per sample, up to 8 channels | 16-bit for `i16` audio and 24-bit otherwise; compression levels 0 to 8 |
+//! | AIFF, AIFF-C | Big- and little-endian PCM, 32- and 64-bit float | PCM and float |
 //!
-//! use audio_samples::{AudioSamples, sample_rate, sine_wave};
+//! Reading finds the format from the file's first bytes and falls back to the
+//! extension; writing chooses it from the extension. Conversion between the
+//! stored and the requested sample type uses the scaling rules of
+//! [`audio_samples::conversions`].
 //!
-//! # fn main() -> audio_samples_io::AudioIOResult<()> {
-//! let tone: AudioSamples<f32> =
-//!     sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(44100), 1.0);
-//! audio_samples_io::write("tone.wav", &tone)?;
-//! let back: AudioSamples<f32> = audio_samples_io::read("tone.wav")?;
-//! assert_eq!(back.sample_rate(), tone.sample_rate());
-//! # Ok(())
-//! # }
+//! ```rust,no_run
+//! use audio_samples::operations::types::ResamplingQuality;
+//! use audio_samples::{AudioSamples, resample, sample_rate};
+//! use audio_samples_io::WriteOptions;
+//!
+//! // Any supported file, read as f32 whatever its stored format.
+//! let music: AudioSamples<'static, f32> = audio_samples_io::read("input.flac")?;
+//!
+//! // Process with audio_samples: here, resample to 16 kHz.
+//! let speech_rate = resample(&music, sample_rate!(16_000), ResamplingQuality::High)?;
+//!
+//! // Write a 16-bit WAV file; the samples are converted block by block.
+//! audio_samples_io::write_as::<i16, _, _>("output.wav", &speech_rate, WriteOptions::default())?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
-//! ## Features
+//! The example reads `input.flac` from the working directory, so it is compiled
+//! but not run as a test. The streaming example below runs in memory.
 //!
-//! The default features are `wav`. Without any format feature the crate still builds
-//! [`error`], [`traits`], [`types`], [`info()`], [`read()`], [`write()`] and the other
-//! format-agnostic functions, which return an error for a format that is not
-//! compiled in. Each feature adds the items listed next to it; a name is a link when
-//! this documentation was built with its feature, and plain text otherwise.
+//! ## Which function
+//!
+//! | Task | Functions |
+//! |---|---|
+//! | Read or write a whole file | [`read()`], [`write()`], [`write_as`] (another sample type), [`write_with_options`] |
+//! | Inspect a file without decoding it | [`info()`], [`peek_native_type`] |
+#![cfg_attr(
+    feature = "resampling",
+    doc = r#" | Resample while reading | [`read_and_resample`] |"#
+)]
+#![cfg_attr(
+    not(feature = "resampling"),
+    doc = r#" | Resample while reading | `read_and_resample` |"#
+)]
+//! | Write to memory or any `Write` | [`write_with`], [`write_with_writer_options`] |
+#![cfg_attr(
+    feature = "wav",
+    doc = r#" | Stream a WAV file or reader | [`open_streamed`], [`open_streamed_reader`] |"#
+)]
+#![cfg_attr(
+    not(feature = "wav"),
+    doc = r#" | Stream a WAV file or reader | `open_streamed`, `open_streamed_reader` |"#
+)]
+#![cfg_attr(
+    feature = "flac",
+    doc = r#" | Stream a FLAC file or reader | [`open_streamed_flac`], [`open_streamed_flac_reader`] |"#
+)]
+#![cfg_attr(
+    not(feature = "flac"),
+    doc = r#" | Stream a FLAC file or reader | `open_streamed_flac`, `open_streamed_flac_reader` |"#
+)]
+#![cfg_attr(
+    any(feature = "wav", feature = "flac"),
+    doc = r#" | Stream any supported file | [`open_streamed_dyn`] |"#
+)]
+#![cfg_attr(
+    not(any(feature = "wav", feature = "flac")),
+    doc = r#" | Stream any supported file | `open_streamed_dyn` |"#
+)]
+#![cfg_attr(
+    any(feature = "wav", feature = "flac"),
+    doc = r#" | Write a stream to WAV or FLAC | [`create_streamed`], [`create_streamed_with`] |"#
+)]
+#![cfg_attr(
+    not(any(feature = "wav", feature = "flac")),
+    doc = r#" | Write a stream to WAV or FLAC | `create_streamed`, `create_streamed_with` |"#
+)]
+#![cfg_attr(
+    feature = "wav",
+    doc = r#" | Write a WAV stream to a pipe or socket | [`create_streamed_sink`] |"#
+)]
+#![cfg_attr(
+    not(feature = "wav"),
+    doc = r#" | Write a WAV stream to a pipe or socket | `create_streamed_sink` |"#
+)]
+#![cfg_attr(
+    feature = "wav",
+    doc = r#" | Keep WAV tags and cue points | [`write_with_metadata`] |"#
+)]
+#![cfg_attr(
+    not(feature = "wav"),
+    doc = r#" | Keep WAV tags and cue points | `write_with_metadata` |"#
+)]
+//!
+//! ## Streaming
+//!
+//! A streamed reader parses the header when it is opened and decodes frames only
+//! when asked, into a buffer you allocate once, so memory use does not depend on
+//! the file's length. A streamed writer takes blocks of frames and fills in the
+//! sizes in the header when it is finalised. The readers implement
+//! [`AudioStreamReader`] (position, seeking, format) and the writers
+//! [`AudioStreamWriter`](traits::AudioStreamWriter) and [`AudioStreamWrite`](traits::AudioStreamWrite);
+#![cfg_attr(
+    any(feature = "wav", feature = "flac"),
+    doc = r#" [`StreamedAudioWriter`] writes WAV or FLAC through one type."#
+)]
+#![cfg_attr(
+    not(any(feature = "wav", feature = "flac")),
+    doc = r#" `StreamedAudioWriter` writes WAV or FLAC through one type."#
+)]
+//!
+//! ```rust
+//! # #[cfg(feature = "wav")] {
+//! use std::io::Cursor;
+//! use std::time::Duration;
+//!
+//! use audio_samples::{AudioSamples, nzu, sample_rate, sine_wave};
+//! use audio_samples_io::{FileType, open_streamed_reader, write_with};
+//!
+//! // One second of a 440 Hz tone, written as WAV into memory.
+//! let tone = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(44100), 0.5);
+//! let mut bytes = Vec::new();
+//! write_with(&mut bytes, &tone, FileType::WAV)?;
+//!
+//! // Read it back 4096 frames at a time into one reusable buffer.
+//! let mut stream = open_streamed_reader(Cursor::new(bytes))?;
+//! let mut block = AudioSamples::<f32>::zeros_mono(nzu!(4096), sample_rate!(44100));
+//! let mut frames = 0;
+//! while stream.remaining_frames() > 0 {
+//!     frames += stream.read_frames_into(&mut block, nzu!(4096))?;
+//! }
+//! assert_eq!(frames, 44_100);
+//! # }
+//! # Ok::<(), audio_samples_io::AudioIOError>(())
+//! ```
+//!
+//! ## Feature flags
+//!
+//! The default feature is `wav`. Without any format feature the crate still builds
+//! [`error`], [`traits`], [`types`], [`info()`], [`read()`], [`write()`] and the
+//! other format-agnostic functions, which return an error for a format that is not
+//! compiled in. On docs.rs every item names the feature it needs; in the table
+//! below, a name is a link when this documentation was built with its feature, and
+//! plain text otherwise.
 //!
 //! | Feature | Adds |
 //! |---|---|
@@ -64,10 +187,16 @@
     not(feature = "resampling"),
     doc = r#" | `resampling` | `read_and_resample`, `resample`, `ResamplingQuality` |"#
 )]
-#![cfg_attr(feature = "numpy", doc = r#" | `numpy` | [`python`]; [`read_pyarray`] |"#)]
-#![cfg_attr(not(feature = "numpy"), doc = r#" | `numpy` | `python`; `read_pyarray` |"#)]
+#![cfg_attr(
+    feature = "numpy",
+    doc = r#" | `numpy` | [`python`]; [`read_pyarray`]; enables `wav` |"#
+)]
+#![cfg_attr(
+    not(feature = "numpy"),
+    doc = r#" | `numpy` | `python`; `read_pyarray`; enables `wav` |"#
+)]
 //! | `full` | `wav`, `flac`, `aiff`, `flac-parallel` and `colored` |
-//! | `flac-parallel` | FLAC frames encoded on rayon's global thread pool |
+//! | `flac-parallel` | Encodes FLAC frames on rayon's global thread pool |
 //! | `colored` | Coloured `Display` output for [`BaseAudioInfo`] |
 //! | `simd` | The `simd` feature of `audio_samples` |
 //! | `benchmark_reporting` | The `benchmark_reporter` binary |
@@ -156,11 +285,13 @@ pub(crate) const MAX_MMAP_SIZE: u64 = 512 * 1024 * 1024; // 512MB for memory map
 #[cfg(any(feature = "wav", feature = "flac"))]
 const STREAMED_WRITE_BUFFER_BYTES: usize = 16 * 1024;
 
-/// Convenience trait for types that implement both Read and Seek
+/// A source that implements both [`Read`] and [`Seek`], implemented for every such type.
 pub trait ReadSeek: Read + Seek {}
 
 impl<RS> ReadSeek for RS where RS: Read + Seek {}
 
+/// A destination that implements both [`Write`] and [`Seek`], implemented for every such
+/// type. Streamed writers need it to fill in the header sizes when they finish.
 pub trait WriteSeek: Write + Seek {}
 
 impl<WS> WriteSeek for WS where WS: Write + Seek {}
@@ -228,10 +359,15 @@ pub fn peek_native_type<P: AsRef<Path>>(fp: P) -> AudioIOResult<ValidatedSampleT
     }
 }
 
-/// Get basic audio information from a file
+/// Reads the format information of an audio file (sample rate, channels, sample type,
+/// length) without decoding the samples.
 ///
-/// Automatically detects the file format and extracts metadata.
-/// Currently supports WAV and FLAC formats (with appropriate features enabled).
+/// The format is found from the file's first bytes, falling back to the extension.
+/// WAV, FLAC and AIFF are supported, each with its feature enabled.
+///
+/// # Errors
+///
+/// An I/O error, a file that does not parse, or a format whose feature is not enabled.
 pub fn info<P: AsRef<Path>>(fp: P) -> AudioIOResult<BaseAudioInfo> {
     let path = fp.as_ref();
 
@@ -284,11 +420,25 @@ pub fn info<P: AsRef<Path>>(fp: P) -> AudioIOResult<BaseAudioInfo> {
     }
 }
 
-/// Read audio samples from a file
+/// Reads a whole audio file as samples of type `T`.
 ///
-/// Returns owned AudioSamples containing all audio data from the file.
-/// Automatically detects file format and handles sample type conversion.
-/// Currently supports WAV and FLAC formats (with appropriate features enabled).
+/// The format is found from the file's first bytes, falling back to the extension.
+/// WAV, FLAC and AIFF are supported, each with its feature enabled. Samples stored in
+/// another format are converted with the scaling rules of
+/// [`audio_samples::conversions`], so full scale stays full scale.
+///
+/// ```no_run
+/// use audio_samples::AudioSamples;
+///
+/// let audio: AudioSamples<'static, f32> = audio_samples_io::read("input.wav")?;
+/// println!("{} Hz, {} channels", audio.sample_rate(), audio.num_channels());
+/// # Ok::<(), audio_samples_io::AudioIOError>(())
+/// ```
+///
+/// # Errors
+///
+/// An I/O error, a file that does not parse, an encoding that is not supported, or a
+/// format whose feature is not enabled.
 pub fn read<P, T>(fp: P) -> AudioIOResult<AudioSamples<'static, T>>
 where
     P: AsRef<Path>,
@@ -348,6 +498,14 @@ where
     }
 }
 
+/// Reads a whole audio file as samples of type `T` and resamples it to `target_sr`.
+///
+/// The same as [`read()`] followed by [`resample`]. `quality` defaults to
+/// [`ResamplingQuality::Fast`].
+///
+/// # Errors
+///
+/// The errors of [`read()`], and resampling errors as [`AudioIOError::AudioSamples`].
 #[cfg(feature = "resampling")]
 pub fn read_and_resample<P, T>(
     fp: P,
@@ -924,11 +1082,16 @@ where
     wav::WavSink::new(writer, channels, sample_rate, sample_type, total_frames)
 }
 
-/// Open an audio file for reading/writing operations
+/// Opens an audio file as a [`AudioFile`] trait object, for format-independent access
+/// to the file types.
 ///
-/// Returns a trait object that can be used for low-level file operations.
-/// For simple use cases, prefer the `read()` and `info()` convenience functions.
-/// Currently supports WAV and FLAC formats (with appropriate features enabled).
+/// [`read()`] and [`info()`] cover most uses. The format is found from the file's first
+/// bytes, falling back to the extension; WAV, FLAC and AIFF are supported, each with its
+/// feature enabled.
+///
+/// # Errors
+///
+/// An I/O error, a file that does not parse, or a format whose feature is not enabled.
 pub fn open<P>(fp: P) -> AudioIOResult<Box<dyn AudioFile>>
 where
     P: AsRef<Path>,
@@ -980,6 +1143,27 @@ where
     }
 }
 
+/// Writes audio to a file, in the format named by the file's extension (`.wav`,
+/// `.flac`, `.aif`/`.aiff`).
+///
+/// WAV and AIFF store the samples in the audio's own sample type; FLAC stores 16-bit
+/// samples for `i16` audio and 24-bit samples otherwise. To store another sample type,
+/// use [`write_as`]. An existing file is replaced.
+///
+/// ```no_run
+/// use std::time::Duration;
+///
+/// use audio_samples::{sample_rate, sine_wave};
+///
+/// let tone = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(44100), 0.5);
+/// audio_samples_io::write("tone.flac", &tone)?;
+/// # Ok::<(), audio_samples_io::AudioIOError>(())
+/// ```
+///
+/// # Errors
+///
+/// An I/O error, an extension that names no supported format, or a format whose
+/// feature is not enabled.
 pub fn write<P, T>(fp: P, audio: &AudioSamples<T>) -> AudioIOResult<()>
 where
     P: AsRef<Path>,

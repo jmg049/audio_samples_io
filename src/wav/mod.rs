@@ -1,3 +1,17 @@
+//! WAV files: RIFF, RF64 and BW64.
+//!
+//! [`WavFile`] reads a whole file, [`StreamedWavFile`] reads one incrementally, and
+//! [`StreamedWavWriter`] and [`WavSink`] write one incrementally, to a seekable
+//! destination or to a pipe. The chunk modules parse and build the chunks a file can
+//! carry: `fmt` and `fact`, `ds64` (the 64-bit sizes of RF64 and BW64), `LIST`/`INFO`
+//! tags, cue points, sampler loops (`smpl`) and the broadcast extension (`bext`).
+//!
+//! Reading accepts 8-bit unsigned, 16-, 24- and 32-bit PCM, 32- and 64-bit float,
+//! A-law and μ-law, and IMA and Microsoft ADPCM; the compressed encodings decode to
+//! 16-bit PCM ([`companding`], [`adpcm`]). Writing produces PCM or float in the sample
+//! type of the audio, in a RIFF file of at most 4 GiB, with `WAVE_FORMAT_EXTENSIBLE`
+//! where the format requires it ([`needs_extensible`]).
+
 pub mod adpcm;
 pub mod bext;
 pub mod chunks;

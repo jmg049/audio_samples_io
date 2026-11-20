@@ -1,3 +1,23 @@
+//! The traits behind the file types and streams.
+//!
+//! The free functions at the crate root cover most uses; these traits are for code
+//! that works with the file types directly or with more than one format.
+//!
+//! - Whole files: [`AudioFile`] opens a file, [`AudioFileMetadata`] describes it
+//!   without decoding the samples, and [`AudioFileRead`] decodes it into
+//!   `AudioSamples` at the sample type you choose.
+//! - Streamed reading: [`AudioStreamReader`] gives the position, format and seeking,
+//!   and can be used as a trait object; [`AudioStreamRead`] adds
+//!   [`read_frames_into`](AudioStreamRead::read_frames_into), which decodes the next
+//!   frames into a buffer you reuse.
+//! - Streamed writing: [`AudioStreamWriter`] (flushing, finalising, counts) and
+//!   [`AudioStreamWrite`], whose [`write_frames`](AudioStreamWrite::write_frames)
+//!   encodes a block of `AudioSamples`.
+//!
+//! The reading and writing traits are generic over the sample type, so they are not
+//! object-safe. The object-safe halves ([`AudioStreamReader`], [`AudioStreamWriter`])
+//! work behind `Box<dyn ...>`.
+
 use core::fmt::{Debug, Display};
 use std::{num::NonZeroUsize, path::Path, time::Duration};
 

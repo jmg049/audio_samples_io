@@ -1,7 +1,8 @@
-//! Python NumPy integration for optimized audio file reading.
-//! This module provides optimized read functions that create NumPy arrays
-//! directly from WAV data using Fortran (column-major) layout to eliminate
-//! deinterleaving overhead.
+//! Reading audio files straight into NumPy arrays, for Python bindings.
+//!
+//! [`read_pyarray`] reads a file into a NumPy array. For WAV data it fills the array in
+//! Fortran (column-major) order, so the interleaved samples are copied once, with no
+//! separate deinterleaving pass.
 
 use std::any::TypeId;
 use std::io::{BufReader, Read};

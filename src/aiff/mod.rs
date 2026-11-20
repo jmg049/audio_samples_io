@@ -1,9 +1,9 @@
-//! AIFF / AIFF-C format support (read + write + streaming).
+//! AIFF and AIFF-C files.
 //!
-//! See [`aiff_file`] for the format details. [`streaming`] provides an
-//! incremental reader for large files, real-time playback, or non-file
-//! `Read + Seek` sources; a streaming writer is not yet implemented — use
-//! [`crate::read`]/[`crate::write`] or the [`AiffFile`] type directly for that.
+//! [`AiffFile`] reads a whole file and [`write_aiff`] writes one; [`aiff_file`]
+//! describes the format and the encodings read. [`StreamedAiffFile`] reads a file, or
+//! any `Read + Seek` source, incrementally. There is no streaming AIFF writer: write
+//! whole files with [`write`](crate::write) or [`write_aiff`], or stream to WAV or FLAC.
 
 pub mod aiff_file;
 pub mod extended;
