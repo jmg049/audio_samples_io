@@ -53,6 +53,12 @@ hound = "3.5.0"
 symphonia = { version = "0.6", default-features = false, features = ["flac"] }
 tempfile = "3"
 
+# Build against a sibling checkout of audio_samples rather than its crates.io
+# release. Cargo drops [patch] when publishing, so a release needs the matching
+# audio_samples release first.
+[patch.crates-io]
+audio_samples = { path = "../audio_samples" }
+
 [features]
 default = ["wav"]
 full = ["wav", "flac", "aiff", "flac-parallel", "colored"]
