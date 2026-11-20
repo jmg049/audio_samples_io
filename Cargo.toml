@@ -25,6 +25,10 @@ exclude = [
     "!/resources/test.flac",
 ]
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dependencies]
 audio_samples = "2.0.0"
 colored = { version = "3.0.0", optional = true }
