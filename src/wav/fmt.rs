@@ -205,23 +205,40 @@ impl<'a> FmtChunk<'a> {
     /// # Returns
     ///
     /// Some((FormatCode, SampleType)) if extensible, None if base FMT
+    ///
+    /// # Errors
+    ///
+    /// Err(WavError::UnsupportedSampleType) if the chunk is extensible and no sample type has
+    /// its bits per sample.
     pub const fn subformat(&'a self) -> Result<Option<(FormatCode, SampleType)>, WavError> {
-        match self {
-            FmtChunk::Base(_) | FmtChunk::Extended(_) => Ok(None),
-            FmtChunk::Extensible(bytes) => {
-                // WAVEFORMATEXTENSIBLE layout (40 bytes total):
-                //   [0..16]  base WAVEFORMATEX fields
-                //   [16..18] cbSize (= 22)
-                //   [18..20] wValidBitsPerSample
-                //   [20..24] dwChannelMask
-                //   [24..40] SubFormat GUID — bytes 24..26 hold the actual format code
-                let format_code = FormatCode::const_from(u16::from_le_bytes([bytes[24], bytes[25]]));
-                let bits_per_sample = self.bits_per_sample();
-                let sample_type = SampleType::from_bits(bits_per_sample);
-
-                Ok(Some((format_code, sample_type)))
-            },
+        let Some(format_code) = self.subformat_code() else {
+            return Ok(None);
+        };
+        match SampleType::from_bits(self.bits_per_sample()) {
+            Some(sample_type) => Ok(Some((format_code, sample_type))),
+            None => Err(WavError::UnsupportedSampleType),
         }
+    }
+
+    /// The format code in the SubFormat GUID of an extensible chunk, or None for a base FMT.
+    const fn subformat_code(&self) -> Option<FormatCode> {
+        match self {
+            FmtChunk::Base(_) | FmtChunk::Extended(_) => None,
+            // WAVEFORMATEXTENSIBLE layout (40 bytes total):
+            //   [0..16]  base WAVEFORMATEX fields
+            //   [16..18] cbSize (= 22)
+            //   [18..20] wValidBitsPerSample
+            //   [20..24] dwChannelMask
+            //   [24..40] SubFormat GUID — bytes 24..26 hold the actual format code
+            FmtChunk::Extensible(bytes) => Some(FormatCode::const_from(u16::from_le_bytes([bytes[24], bytes[25]]))),
+        }
+    }
+
+    /// The integer sample type with `bits_per_sample` bits.
+    fn pcm_sample_type(bits_per_sample: u16) -> Result<ValidatedSampleType, WavError> {
+        SampleType::from_bits(bits_per_sample)
+            .and_then(|t| ValidatedSampleType::try_from(t).ok())
+            .ok_or(WavError::UnsupportedSampleType)
     }
 
     /// Get the actual sample type of the audio data, considering extensible format if present
@@ -237,7 +254,7 @@ impl<'a> FmtChunk<'a> {
         let bits_per_sample = self.bits_per_sample();
 
         // Extensible carries an explicit subformat we should honor.
-        if let Some((format_code, _)) = self.subformat()? {
+        if let Some(format_code) = self.subformat_code() {
             return match format_code {
                 FormatCode::IeeeFloat => match bits_per_sample {
                     32 => Ok(ValidatedSampleType::F32),
@@ -248,8 +265,7 @@ impl<'a> FmtChunk<'a> {
                 FormatCode::ALaw | FormatCode::MuLaw | FormatCode::MsAdpcm | FormatCode::ImaAdpcm => {
                     Ok(ValidatedSampleType::I16)
                 },
-                _ => ValidatedSampleType::try_from(SampleType::from_bits(bits_per_sample))
-                    .map_err(|_| WavError::UnsupportedSampleType),
+                _ => Self::pcm_sample_type(bits_per_sample),
             };
         }
 
@@ -264,8 +280,7 @@ impl<'a> FmtChunk<'a> {
             FormatCode::ALaw | FormatCode::MuLaw | FormatCode::MsAdpcm | FormatCode::ImaAdpcm => {
                 Ok(ValidatedSampleType::I16)
             },
-            _ => ValidatedSampleType::try_from(SampleType::from_bits(bits_per_sample))
-                .map_err(|_| WavError::UnsupportedSampleType),
+            _ => Self::pcm_sample_type(bits_per_sample),
         }
     }
 
@@ -274,9 +289,9 @@ impl<'a> FmtChunk<'a> {
     /// Companded samples are stored as 8-bit codes and must be expanded to 16-bit linear PCM
     /// on read; callers should branch on this before treating the data as raw PCM.
     pub fn companding(&'a self) -> Option<crate::wav::Companding> {
-        let format_code = match self.subformat() {
-            Ok(Some((sub_format, _))) => sub_format,
-            _ => self.format_code(),
+        let format_code = match self.subformat_code() {
+            Some(sub_format) => sub_format,
+            None => self.format_code(),
         };
         crate::wav::Companding::from_format(format_code)
     }
@@ -500,6 +515,19 @@ mod tests {
         bytes[30..32].copy_from_slice(&0x0010u16.to_le_bytes()); // Data3
         bytes[32..40].copy_from_slice(&[0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71]); // Data4
         bytes
+    }
+
+    #[test]
+    fn unsupported_bit_depths_are_errors() {
+        let bytes = make_base_fmt_bytes(1, 1, 44_100, 88_200, 2, 12);
+        let fmt = FmtChunk::from_bytes(&bytes).expect("Failed to create FmtChunk");
+        assert!(matches!(fmt.actual_sample_type(), Err(WavError::UnsupportedSampleType)));
+
+        let bytes = make_extensible_fmt_bytes(0x0001, 1, 48_000, 12);
+        let fmt = FmtChunk::from_bytes(&bytes).expect("Failed to create extensible FmtChunk");
+        assert!(matches!(fmt.subformat(), Err(WavError::UnsupportedSampleType)));
+        assert!(matches!(fmt.actual_sample_type(), Err(WavError::UnsupportedSampleType)));
+        assert_eq!(fmt.companding(), None);
     }
 
     #[test]
