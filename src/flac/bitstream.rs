@@ -91,7 +91,7 @@ impl<'a> BitReader<'a> {
     /// Refill the buffer from `data`, loading bytes until buf_bits > 56 or data exhausted.
     ///
     /// Fast path: when ≥ 8 bytes remain, loads all required bytes as a single u64 read
-    /// (replacing what would otherwise be a 1–7 iteration byte-by-byte loop).
+    /// rather than byte by byte.
     #[inline(always)]
     fn refill(&mut self) {
         if self.byte_pos + 8 <= self.data.len() {
@@ -398,8 +398,8 @@ impl<'a> BitReader<'a> {
 
         // Refill when fewer than 9 valid bits remain (one byte threshold).
         // For k>0 this ensures at least k+1 bits are available, keeping the fast
-        // path reachable for typical quotients while reducing refills from every
-        // sample (T=56) to once every ~(57/bits_per_symbol) samples.
+        // path reachable for typical quotients while refilling only once every
+        // ~(57/bits_per_symbol) samples.
         if self.buf_bits <= 8 {
             self.refill();
             if self.buf_bits == 0 {
@@ -530,7 +530,7 @@ impl<'a> BitReader<'a> {
 /// Uses a 64-bit left-aligned accumulator: new bits are placed MSB-first.
 /// Flushing is lazy — 4 bytes are emitted only when `accum_bits >= 32`. This
 /// means `write_bits` on the hot rice-encoding path triggers a flush only once
-/// per ~3–4 samples instead of once per sample, reducing flush overhead ~4×.
+/// per ~3–4 samples.
 ///
 /// Invariant: `accum_bits ∈ [0, 31]` between public calls.
 ///
@@ -567,8 +567,8 @@ impl BitWriter {
 
     /// Total bits written, including any still pending in the accumulator.
     ///
-    /// Computed as `data.len() * 8 + accum_bits` — equivalent to the old
-    /// incremental counter but removes one store from every `write_bits` call.
+    /// Computed as `data.len() * 8 + accum_bits` on demand, so `write_bits` keeps
+    /// no separate counter.
     #[inline]
     pub const fn bits_written(&self) -> usize {
         self.data.len() * 8 + self.accum_bits as usize
@@ -709,8 +709,7 @@ impl BitWriter {
     /// Write up to 32 bits, MSB first.
     ///
     /// Core hot path. Single shift-OR into the 64-bit accumulator; flushes 4 bytes
-    /// lazily when `accum_bits >= 32` — roughly once per 3–4 rice-coded samples
-    /// instead of once per sample, reducing flush overhead ~4×.
+    /// lazily when `accum_bits >= 32` — roughly once per 3–4 rice-coded samples.
     ///
     /// Invariant: `accum_bits ≤ 31` before this call and after. With count ≤ 32,
     /// the shift `64 - accum_bits - count ≥ 1` — no underflow.
@@ -821,8 +820,8 @@ impl BitWriter {
     /// Write `bits` significant bits of packed MSB-first data from `data`.
     ///
     /// When the writer is currently byte-aligned (no pending bits in accumulator),
-    /// the full-byte portion is copied directly via `copy_nonoverlapping` — this is
-    /// ~4× faster than per-byte `write_bits` calls for large payloads such as
+    /// the full-byte portion is copied directly via `copy_nonoverlapping`, which is
+    /// much faster than per-byte `write_bits` calls for large payloads such as
     /// encoded subframe data.
     ///
     /// When not byte-aligned, falls back to per-byte `write_bits` calls (which

@@ -20,7 +20,7 @@ use crate::error::{AudioIOError, AudioIOResult};
 pub struct DecodedAudio {
     /// Samples per channel (planar format)
     channels: Vec<Vec<i32>>,
-    /// Original bits per sample from FLAC stream
+    /// Bits per sample of the FLAC stream
     bits_per_sample: u8,
     /// Sample rate in Hz
     sample_rate: u32,
@@ -184,7 +184,7 @@ impl DecodedAudio {
     /// Convert a channel's i32 samples to target type T.
     ///
     /// FLAC stores samples at their native bit depth, sign-extended in i32.
-    /// We convert based on the original bit depth to maintain proper scaling.
+    /// Conversion follows the stream's bit depth, so the scaling is correct.
     fn convert_channel_samples<T>(&self, samples: &[i32]) -> AudioIOResult<Vec<T>>
     where
         T: StandardSample + 'static,

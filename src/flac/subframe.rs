@@ -262,9 +262,8 @@ fn decode_lpc(
 /// already been shifted back in. The buffer is extended (not replaced) so
 /// callers can pre-allocate it once and reuse it across frames.
 ///
-/// This eliminates the intermediate `Subframe { samples: Vec<i32> }` allocation,
-/// the separate residual Vec, and the restore-output Vec — all replaced by writes
-/// into the single pre-allocated `out` buffer.
+/// Warm-up samples, residuals and the restored signal are all written into `out`, so
+/// decoding allocates nothing once `out` has grown to the block size.
 pub(crate) fn decode_subframe_into(
     reader: &mut BitReader,
     block_size: usize,
@@ -301,15 +300,12 @@ pub(crate) fn decode_subframe_into(
                 _ => return Err(FlacError::InvalidSubframeType(method_code)),
             };
             let partition_order = reader.read_bits(4)? as u8;
-            // Decode residuals into the tail of `out` (after the warmup we just pushed)
-            // by temporarily taking a sub-view.  We do this by decoding into a side
-            // buffer and then extending, OR by treating the out tail as the residual buf.
-            // The cleanest zero-alloc path: use out directly with careful unsafe writes.
+            // Decode residuals into the tail of `out`, after the warm-up samples just pushed,
+            // writing into reserved capacity and extending `out`'s length as each partition is
+            // decoded. The predictor is then restored in place.
             let res_count = block_size - order;
             let res_start = out.len();
             out.reserve(res_count);
-            // Temporarily treat out[res_start..] as uninitialized storage for residuals
-            // then do the in-place restore. We extend out's len as we decode.
             let num_partitions = 1usize << partition_order;
             let param_bits = method.param_bits();
             let escape_code = method.escape_code();

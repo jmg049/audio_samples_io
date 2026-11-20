@@ -273,11 +273,9 @@ impl<'a> FlacFile<'a> {
 
     /// Decode all frames, converting directly to type T frame-by-frame.
     ///
-    /// The key difference from `decode_all_frames` + `read_samples`:
-    /// - Each frame is decoded into small per-channel scratch buffers (stays L1/L2-hot)
-    /// - Predictor restoration runs on cache-warm scratch instead of L3-cold output
-    /// - Scratch is immediately converted → T and appended to per-channel output
-    /// - Eliminates the two-pass (decode-all-i32, then convert-all-to-T) approach
+    /// Each frame is decoded into small per-channel scratch buffers, which stay in the L1 or L2
+    /// cache while the predictor is restored, and is then converted to `T` and appended to the
+    /// per-channel output. Decoding and conversion take one pass over the samples.
     fn decode_all_frames_typed<T>(&self) -> Result<Vec<T>, FlacError>
     where
         T: StandardSample + 'static,
@@ -1044,7 +1042,7 @@ mod tests {
     }
 
     #[test]
-    fn test_read_wave_flac_as_i16() {
+    fn test_read_test_flac_as_i16() {
         let flac_path = Path::new("resources/test.flac");
         let flac_file =
             FlacFile::open_with_options(flac_path, OpenOptions::default()).expect("Failed to open test FLAC file");
@@ -1059,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    fn test_read_wave_flac_as_i32() {
+    fn test_read_test_flac_as_i32() {
         let flac_path = Path::new("resources/test.flac");
         let flac_file =
             FlacFile::open_with_options(flac_path, OpenOptions::default()).expect("Failed to open test FLAC file");
@@ -1070,7 +1068,7 @@ mod tests {
     }
 
     #[test]
-    fn test_read_wave_flac_as_f32() {
+    fn test_read_test_flac_as_f32() {
         let flac_path = Path::new("resources/test.flac");
         let flac_file =
             FlacFile::open_with_options(flac_path, OpenOptions::default()).expect("Failed to open test FLAC file");
@@ -1081,7 +1079,7 @@ mod tests {
     }
 
     #[test]
-    fn test_read_wave_flac_as_f64() {
+    fn test_read_test_flac_as_f64() {
         let flac_path = Path::new("resources/test.flac");
         let flac_file =
             FlacFile::open_with_options(flac_path, OpenOptions::default()).expect("Failed to open test FLAC file");
@@ -1092,7 +1090,7 @@ mod tests {
     }
 
     #[test]
-    fn test_read_wave_flac_as_i24() {
+    fn test_read_test_flac_as_i24() {
         let flac_path = Path::new("resources/test.flac");
         let flac_file =
             FlacFile::open_with_options(flac_path, OpenOptions::default()).expect("Failed to open test FLAC file");
@@ -1104,7 +1102,7 @@ mod tests {
 
     /// Verify all types return the same sample count and metadata.
     #[test]
-    fn test_read_wave_flac_consistent_metadata() {
+    fn test_read_test_flac_consistent_metadata() {
         let flac_path = Path::new("resources/test.flac");
 
         let flac_i16 = FlacFile::open_with_options(flac_path, OpenOptions::default()).unwrap();
@@ -1124,7 +1122,7 @@ mod tests {
 
     /// f64 and i16 conversions of the same source should be close in content.
     #[test]
-    fn test_read_wave_flac_cross_type_content_similarity() {
+    fn test_read_test_flac_cross_type_content_similarity() {
         let flac_path = Path::new("resources/test.flac");
 
         let flac_i16 = FlacFile::open_with_options(flac_path, OpenOptions::default()).unwrap();
@@ -1172,10 +1170,8 @@ mod tests {
     // =========================================================================
     // B. Round-trip tests
     //
-    // These tests verify structural integrity (sample count, rate, channels).
-    // Content-fidelity is tested separately with `#[ignore]` annotations because
-    // the current FIXED predictor decoder has known precision issues with
-    // non-trivial audio (sine waves) — silence and constant signals are lossless.
+    // Most of these check structure (sample count, rate, channels); the content
+    // fidelity tests compare the decoded samples with the input.
     // =========================================================================
 
     fn roundtrip_check_structure(level: CompressionLevel, tag: &str) {
@@ -1292,10 +1288,7 @@ mod tests {
     }
 
     /// Content fidelity test for i16 sine roundtrip.
-    /// Currently #[ignore] because the FIXED predictor decoder produces ~8 LSB
-    /// errors on non-trivial audio. Remove the ignore once the decoder is fixed.
     #[test]
-    #[ignore = "known: FIXED predictor decoder has precision issues with sine waves"]
     fn test_roundtrip_i16_content_fidelity() {
         let sr = sample_rate!(44100);
         let sine_i16 = sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.25), sr, 0.5).to_format::<i16>();
@@ -1363,8 +1356,7 @@ mod tests {
         assert_eq!(back.samples_per_channel(), stereo.samples_per_channel(), "sample count");
         fs::remove_file(&out_path).ok();
 
-        // Find minimal failing case: test with different durations
-        // 100ms = 4410 samples → 1 full frame (4096) + 1 partial (314) → PASSES
+        // Lengths around the block size:
         // 4096 samples → 1 full frame exactly
         // 4097 samples → 1 full + 1 tiny
         // 8192 samples → 2 full frames
@@ -1395,12 +1387,8 @@ mod tests {
                     .unwrap_or_else(|e| panic!("write {n_samples} samples: {e}"));
             }
             let flac = FlacFile::open_with_options(&path, OpenOptions::default()).unwrap();
-            let result = flac.read::<i16>();
-            eprintln!(
-                "n_samples={n_samples}: read result = {:?}",
-                result.as_ref().map(|_| "ok").map_err(|e| e.to_string())
-            );
-            result.unwrap_or_else(|e| panic!("read {n_samples} samples: {e}"));
+            flac.read::<i16>()
+                .unwrap_or_else(|e| panic!("read {n_samples} samples: {e}"));
             fs::remove_file(&path).ok();
         }
 
@@ -1420,18 +1408,18 @@ mod tests {
         flat.extend_from_slice(&ch0);
         flat.extend_from_slice(&ch1);
         let arr = ndarray::Array2::from_shape_vec((2, n), flat).unwrap();
-        let bench_stereo: audio_samples::AudioSamples<'static, i16> =
+        let stereo_250ms: audio_samples::AudioSamples<'static, i16> =
             audio_samples::AudioSamples::new_multi_channel(arr, sr).unwrap();
 
-        let out_path2 = std::env::temp_dir().join("flac_rt_stereo_bench.flac");
+        let out_path2 = std::env::temp_dir().join("flac_rt_stereo_250ms.flac");
         {
             let file = File::create(&out_path2).expect("create");
-            write_flac(BufWriter::new(file), &bench_stereo, CompressionLevel::DEFAULT).expect("write bench");
+            write_flac(BufWriter::new(file), &stereo_250ms, CompressionLevel::DEFAULT).expect("write 250 ms stereo");
         }
         let flac2 = FlacFile::open_with_options(&out_path2, OpenOptions::default()).unwrap();
-        let back2 = flac2.read::<i16>().expect("read stereo DEFAULT bench scenario");
+        let back2 = flac2.read::<i16>().expect("read 250 ms stereo at DEFAULT");
         assert_eq!(back2.num_channels().get(), 2);
-        assert_eq!(back2.samples_per_channel(), bench_stereo.samples_per_channel());
+        assert_eq!(back2.samples_per_channel(), stereo_250ms.samples_per_channel());
         fs::remove_file(&out_path2).ok();
     }
 
@@ -1453,25 +1441,15 @@ mod tests {
         assert_eq!(info.channels, 2, "should have 2 channels");
         assert_eq!(info.sample_rate.get(), sr.get(), "sample rate");
 
-        // Attempt to decode — may encounter decoder bugs for multi-channel audio
-        match flac.read::<i16>() {
-            Ok(back) => {
-                assert_eq!(back.num_channels().get(), 2);
-                assert_eq!(back.samples_per_channel(), stereo.samples_per_channel());
-            },
-            Err(e) => {
-                // Known decoder issue with multi-channel FIXED predictor frames
-                eprintln!("stereo decode known issue: {e}");
-            },
-        }
+        let back = flac.read::<i16>().expect("read stereo FASTEST");
+        assert_eq!(back.num_channels().get(), 2);
+        assert_eq!(back.samples_per_channel(), stereo.samples_per_channel());
 
         fs::remove_file(&out_path).ok();
     }
 
-    /// Content fidelity test for stereo — #[ignore] due to known InvalidSubframeType
-    /// decoder bug when decoding multi-channel FIXED predictor frames.
+    /// Content fidelity test for stereo: the two decoded channels keep their distinct content.
     #[test]
-    #[ignore = "known: stereo decode fails with InvalidSubframeType(3) in FIXED predictor"]
     fn test_roundtrip_stereo_content() {
         let sr = sample_rate!(44100);
         let stereo = make_stereo_audio(sr);
@@ -1684,8 +1662,6 @@ mod tests {
             let flac = FlacFile::open_with_options(&out_path, OpenOptions::default())
                 .unwrap_or_else(|e| panic!("level {:?}: open failed: {e}", level));
             // All levels must produce readable files with correct structure.
-            // Exact content is only verified for FASTEST (level 0) since higher
-            // levels engage the LPC decoder which currently has known issues.
             let back = flac
                 .read::<i16>()
                 .unwrap_or_else(|e| panic!("level {:?}: read failed: {e}", level));
@@ -1702,8 +1678,6 @@ mod tests {
                 "level {:?} channel count mismatch",
                 level
             );
-
-            // All levels: verify structure only (content fidelity has known issues)
 
             fs::remove_file(&out_path).ok();
         }
@@ -1740,11 +1714,10 @@ mod tests {
     }
 
     // =========================================================================
-    // G. Oracle verification via symphonia
+    // G. Reference decoding with symphonia
     //
-    // symphonia is an independent pure-Rust multimedia decoder used as a
-    // ground-truth oracle to verify that our encoder produces FLAC files
-    // readable by third-party decoders.
+    // symphonia, a dev-dependency, is an independent pure-Rust decoder. These
+    // tests check that files from this encoder decode with it.
     // =========================================================================
 
     fn symphonia_decode_flac(path: &std::path::Path) -> (u32, u32, usize) {
@@ -1760,13 +1733,10 @@ mod tests {
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
         let hint = Hint::new();
-        // symphonia 0.6: `probe()` returns the `FormatReader` directly (no `ProbeResult`),
-        // and takes the options by value.
         let mut format = symphonia::default::get_probe()
             .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
             .expect("symphonia probe");
 
-        // symphonia 0.6: `default_track` takes a `TrackType`; codec params are a typed enum.
         let track = format
             .default_track(TrackType::Audio)
             .expect("default audio track")
@@ -1778,12 +1748,11 @@ mod tests {
         let sr = audio_params.sample_rate.expect("sample rate");
         let ch = audio_params.channels.as_ref().expect("channels").count() as u32;
 
-        // symphonia 0.6: media-typed decoder constructor (`make` is gone).
         let mut decoder = symphonia::default::get_codecs()
             .make_audio_decoder(&audio_params, &AudioDecoderOptions::default())
             .expect("make decoder");
 
-        // symphonia 0.6: `next_packet()` yields `Option<Packet>` (None = clean EOF).
+        // `next_packet` yields `None` at the end of the stream.
         let mut total_samples_decoded = 0usize;
         while let Ok(Some(packet)) = format.next_packet() {
             let decoded: GenericAudioBufferRef = decoder.decode(&packet).expect("decode packet");
@@ -1793,9 +1762,9 @@ mod tests {
         (sr, ch, total_samples_decoded)
     }
 
-    /// Write with our encoder, decode with symphonia, verify metadata + sample count.
+    /// Write with this crate's encoder, decode with symphonia, verify metadata + sample count.
     #[test]
-    fn test_oracle_symphonia_mono_sine() {
+    fn test_symphonia_decodes_mono_sine() {
         let sr = sample_rate!(44100);
         let sine = sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.1), sr, 0.5).to_format::<i16>();
         let expected_samples = sine.samples_per_channel().get();
@@ -1814,9 +1783,9 @@ mod tests {
         fs::remove_file(&out_path).ok();
     }
 
-    /// Oracle check for stereo content using symphonia.
+    /// Stereo file from this crate's encoder, decoded with symphonia.
     #[test]
-    fn test_oracle_symphonia_stereo_sine() {
+    fn test_symphonia_decodes_stereo_sine() {
         let sr = sample_rate!(44100);
         let stereo = make_stereo_audio(sr);
         let expected_samples_per_ch = stereo.samples_per_channel().get();
@@ -1841,7 +1810,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_lib_info_wave_flac() {
+    fn test_lib_info_test_flac() {
         let info = crate::info("resources/test.flac").expect("lib::info");
         assert_eq!(info.file_type, FileType::FLAC);
         assert!(info.channels > 0);
@@ -1850,13 +1819,13 @@ mod tests {
     }
 
     #[test]
-    fn test_lib_read_i16_wave_flac() {
+    fn test_lib_read_i16_test_flac() {
         let samples = crate::read::<_, i16>("resources/test.flac").expect("lib::read i16");
         assert!(samples.total_samples().get() > 0);
     }
 
     #[test]
-    fn test_lib_read_f32_wave_flac() {
+    fn test_lib_read_f32_test_flac() {
         let samples = crate::read::<_, f32>("resources/test.flac").expect("lib::read f32");
         assert!(samples.total_samples().get() > 0);
     }
@@ -1871,8 +1840,7 @@ mod tests {
 
     #[test]
     fn test_lib_write_read_roundtrip() {
-        // Use write_flac with FASTEST to get lossless i16 content verification.
-        // crate::write() uses CompressionLevel::DEFAULT which engages LPC.
+        // write_flac at FASTEST; crate::write() uses CompressionLevel::DEFAULT.
         let sr = sample_rate!(44100);
         let sine = sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.1), sr, 0.5).to_format::<i16>();
 
@@ -1887,13 +1855,11 @@ mod tests {
         assert_eq!(back.num_channels(), sine.num_channels());
         assert_eq!(back.samples_per_channel(), sine.samples_per_channel());
 
-        // Structure only — content fidelity has known decoder issues for non-trivial audio
-
         fs::remove_file(&out_path).ok();
     }
 
     #[test]
-    fn test_lib_open_wave_flac() {
+    fn test_lib_open_test_flac() {
         let file = crate::open("resources/test.flac").expect("lib::open");
         assert!(!file.is_empty(), "opened file should have non-zero length");
     }
@@ -1928,7 +1894,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Original baseline tests (kept for non-regression)
+    // J. Basic open, read and write
     // =========================================================================
 
     #[test]
@@ -1945,7 +1911,7 @@ mod tests {
     }
 
     #[test]
-    fn test_flac_roundtrip_i16_baseline() {
+    fn test_flac_roundtrip_i16_fastest() {
         let sr = sample_rate!(44100);
         let sine_f32 = sine_wave::<f32>(440.0, StdDuration::from_secs_f64(0.1), sr, 0.5);
         let sine_i16 = sine_f32.to_format::<i16>();

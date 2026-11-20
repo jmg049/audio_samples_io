@@ -3,7 +3,7 @@
 //!
 //! Each test pins behaviour for a quirk that strict readers tend to reject — streaming size
 //! placeholders, ragged data chunks, companded/ADPCM encodings — and round-trips for the
-//! newer write APIs.
+//! metadata, header-builder and sink write APIs.
 #![cfg(feature = "wav")]
 
 use audio_samples_io::traits::{AudioFile, AudioFileRead};
@@ -92,7 +92,7 @@ fn i16_data(samples: &[i16]) -> Vec<u8> {
 
 #[test]
 fn streaming_max_size_fields_are_clamped() {
-    // ffmpeg/live-capture writes 0xFFFFFFFF when the final length is unknown.
+    // Streaming producers write 0xFFFFFFFF when the final length is unknown.
     let fmt = fmt_chunk(0x0001, 1, 44_100, 16);
     let data = i16_data(&[2, -3, 5, -7]);
     let bytes = assemble(&fmt, &data, Some(0xFFFF_FFFF), Some(0xFFFF_FFFF), &[]);

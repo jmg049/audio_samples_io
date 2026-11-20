@@ -175,9 +175,6 @@ pub fn decode_frame(
 
     // Read frame/sample number (UTF-8 coded)
     let frame_or_sample_number = reader.read_utf8_coded()?;
-    // Add UTF-8 bytes to CRC (we need the raw bytes)
-    // For now, we'll recalculate from the current position
-    // This is a simplification; proper implementation would track bytes
 
     // Parse block size (may need extra bytes)
     let block_size = match block_size_code {
@@ -254,8 +251,8 @@ pub fn decode_frame(
 
 /// Decode a FLAC frame, writing samples directly into pre-allocated channel buffers.
 ///
-/// Eliminates the intermediate `Frame` / `Subframe` structs and all per-subframe
-/// `Vec<i32>` allocations. For independent channels, samples are decoded straight
+/// Builds no `Frame` / `Subframe` structs and allocates no per-subframe
+/// `Vec<i32>`. For independent channels, samples are decoded straight
 /// into `out_channels[ch]`. For stereo decorrelation modes (left-side, right-side,
 /// mid-side), two scratch buffers are used and the decorrelation is applied while
 /// appending to `out_channels`.
@@ -496,7 +493,7 @@ pub(crate) fn decode_frame_into_scratch(
             }
         },
         ChannelAssignment::LeftSide => {
-            // scratch[0] = left, scratch[1] = side → decorate in-place to right
+            // scratch[0] = left, scratch[1] = side → decorrelate in-place to right
             decode_subframe_into(&mut reader, block_size, bits_per_sample, &mut scratch[0])?;
             decode_subframe_into(&mut reader, block_size, bits_per_sample + 1, &mut scratch[1])?;
             let (left, rest) = scratch.split_at_mut(1);
@@ -672,7 +669,7 @@ pub(crate) fn encode_frame_header(
     // Reserved (1 bit) = 0
     writer.write_bit(false);
 
-    // Blocking strategy (1 bit) - using fixed for now
+    // Blocking strategy (1 bit): fixed-blocksize
     writer.write_bit(false);
 
     // Block size code
@@ -854,7 +851,7 @@ mod tests {
 
         let decoded = frame.into_channel_samples();
 
-        // Should recover original left/right channels
+        // Should recover the input left/right channels
         assert_eq!(decoded.len(), 2);
         assert_eq!(decoded[0], left);
         assert_eq!(decoded[1], right);

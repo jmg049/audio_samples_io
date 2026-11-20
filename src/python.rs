@@ -23,9 +23,9 @@ const PAGE_OFFSET_MATCH_MIN_BYTES: usize = 1024 * 1024;
 
 /// An uninitialised `(channels, frames)` array in interleaved (`fortran`) or planar memory, with a
 /// pointer to its data. A large array starts at the same offset within a page as the samples do in
-/// the file (`file_offset`), where the sample type's alignment allows. The kernel's copy is faster
-/// then: writing such an array to a new WAV file takes 0.92 ms instead of 1.20 for 10 MiB on ext4, and
-/// 0.57 instead of 0.82 on xfs, because a source just below the file's offset within a page is slow.
+/// the file (`file_offset`), where the sample type's alignment allows. Writing such an array to a
+/// new WAV file is then faster, because the kernel's copy is slow from a source whose offset within
+/// a page is just below the file's.
 fn new_output_array<T>(
     py: Python<'_>,
     channels: usize,
@@ -258,8 +258,8 @@ pub enum NativeAudioArray {
 /// Returns `None` when the fast path does not apply (non-WAV, I24, big-endian).
 /// Returns `Some(Err(...))` for I/O errors encountered after the file was opened.
 ///
-/// The happy path for the common `read(fp)` call (no type conversion) should always hit
-/// this function, saving ~3 µs per call by avoiding the redundant `peek_native_type` open.
+/// The common `read(fp)` call (no type conversion) goes through this function, which opens
+/// the file once rather than also opening it in `peek_native_type`.
 #[cfg(target_endian = "little")]
 pub fn read_pyarray_native(py: Python<'_>, path: &Path) -> Option<PyResult<NativeAudioArray>> {
     // Only WAV files are handled by the single-pass direct path.
@@ -318,8 +318,8 @@ where
     let path = fp.as_ref();
 
     // Fast path: parse header once, allocate numpy array directly, read into its buffer.
-    // Eliminates the intermediate Vec allocation and the extra mmap(MAP_ANONYMOUS) zero-fill
-    // overhead that Vec::with_capacity triggers for large allocations.
+    // This needs no intermediate Vec, and so none of the mmap(MAP_ANONYMOUS) zero-fill that
+    // Vec::with_capacity triggers for large allocations.
     #[cfg(target_endian = "little")]
     if let Some(result) = read_pyarray_direct::<T>(py, path) {
         return result;

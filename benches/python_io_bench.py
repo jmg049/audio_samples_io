@@ -416,8 +416,7 @@ def round_orders(count):
     `2 * count` for an odd one: a balanced Latin square (Williams design), in which each library takes
     each place in a round equally often and follows each other library equally often. A read straight
     after another can be slower or faster by what that read left the device doing (on an SSD, a run of
-    small reads before it cost the next read 0.07 to 0.16 ms), so no library may always follow the
-    same one. For an odd count one square cannot balance who follows whom, so its rows are followed
+    small reads can slow the read after it), so no library may always follow the same one. For an odd count one square cannot balance who follows whom, so its rows are followed
     by the same rows reversed."""
     first = []
     low, high = 0, count - 1
@@ -438,7 +437,7 @@ def cold_copies(count, least):
     with which every library and the unbuffered read take every copy equally often over the rounds.
     Reads count down through the copies, so with two libraries and four copies one library would read
     only the even copies and the other only the odd ones, and the copies' places on the disk would
-    decide the row (for 172 KiB on xfs the unbuffered read took 0.49 to 0.80 ms by copy)."""
+    decide the row (the time of an unbuffered read can depend noticeably on which copy it reads)."""
     orders = round_orders(count)
     reads = count + 1
     copies = least
@@ -471,7 +470,7 @@ def run_row(args, row, funcs):
         # faster, so cold rows give each read in a round, the unbuffered read included, a copy of its
         # own. Copies are written one after another, so each lies just past the one before it on the
         # disk, and a read that continues where the previous read ended can find its data already
-        # read ahead by the device (on an SSD, 0.34 against 0.69 ms for 172 KiB). So each read takes
+        # read ahead by the device, which can halve the time of a small read. So each read takes
         # the copy written before the previous read's, the same for every place in the round and
         # across rounds, and with at least two more copies than libraries the starting copy moves on
         # each round and every read takes every copy equally often, so that no copy's place on the

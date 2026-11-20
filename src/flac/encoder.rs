@@ -40,7 +40,7 @@ pub(crate) enum StereoSearch {
     Independent,
     /// Estimate the cost of each coding from fixed-predictor error sums and encode the cheapest.
     Estimate,
-    /// Plan all four signals and keep the cheapest pair.
+    /// Evaluate all four signals and keep the cheapest pair.
     Full,
 }
 
@@ -140,7 +140,7 @@ enum Model {
     },
 }
 
-/// Buffers and outcome of planning one signal.
+/// Buffers and outcome of choosing the model for one signal.
 struct Slot {
     /// The signal with its wasted bits removed, when it has any.
     shifted: Vec<i32>,
@@ -220,7 +220,7 @@ pub(crate) struct FrameEncoder {
     bits: BitWriter,
     mid: Vec<i32>,
     side: Vec<i32>,
-    /// One slot per channel; two more when all four stereo signals are planned.
+    /// One slot per channel; two more when all four stereo signals are evaluated.
     slots: Vec<Slot>,
     windows: Windows,
     #[cfg(target_arch = "x86_64")]
@@ -1050,7 +1050,7 @@ const fn stretch_precision(precision: u8, width: u8, order: usize) -> u8 {
     }
 }
 
-/// Quantise, compute residuals and plan Rice coding for a candidate; keep it if it wins.
+/// Quantise, compute residuals and choose the Rice coding for a candidate; keep it if it wins.
 #[inline(always)]
 fn evaluate_lpc<const AVX2: bool>(
     slot: &mut Slot,
@@ -1084,7 +1084,7 @@ fn evaluate_lpc<const AVX2: bool>(
     }
 }
 
-/// Write the model planned in `slot` for `signal`.
+/// Write the model chosen in `slot` for `signal`.
 #[inline(always)]
 fn write_subframe(writer: &mut BitWriter, slot: &Slot, signal: &[i32]) {
     let samples: &[i32] = if slot.wasted > 0 { &slot.shifted } else { signal };
@@ -1159,7 +1159,7 @@ fn write_residual(writer: &mut BitWriter, slot: &Slot, block_size: usize, predic
             writer.write_bits(escape, param_bits);
             writer.write_bits(0, 5);
         } else {
-            // The plan's estimate is close: settle the parameter with exact counts around it.
+            // The estimate is close: settle the parameter with exact counts around it.
             let run = &slot.residual[pos..pos + count];
             let mut k = u32::from(param);
             let mut bits = exact_rice_bits(run, k);

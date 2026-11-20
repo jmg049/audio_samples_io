@@ -169,13 +169,13 @@ mod avx2_lpc {
         }
     }
 
-    /// Compute 4 residuals at a time using AVX2 — eliminates horizontal reduction.
+    /// Compute 4 residuals at a time using AVX2, with no horizontal reduction.
     ///
     /// For each coefficient c[j], the 4 sample values needed by residuals k..k+3 are
     /// consecutive in memory: s[ORDER+k-1-j .. ORDER+k+2-j]. One 128-bit load covers
-    /// all four, sign-extended to i64 for VPMULDQ. Because we accumulate 4 independent
-    /// dot products in 4 SIMD lanes, there is no horizontal sum — the bottleneck that
-    /// made the 1-wide approach show no measurable speedup.
+    /// all four, sign-extended to i64 for VPMULDQ. Because 4 independent dot products
+    /// accumulate in 4 SIMD lanes, there is no horizontal sum, which would otherwise be
+    /// the bottleneck of a one-residual-at-a-time SIMD loop.
     ///
     /// After ORDER coefficient iterations the 4 accumulated i64 predictions are
     /// arithmetic-right-shifted (AVX2 workaround: logical shift + sign-fill mask),
@@ -283,7 +283,7 @@ unsafe fn restore_sample<const ORDER: usize>(buf: *const i32, cv: &[i32; ORDER],
 
 /// Restore loop using scalar multi-accumulator dot product (no SIMD hsum).
 ///
-/// Replaces the AVX2 `lpc_restore` dispatch.  See `restore_sample` for the
+/// Used for every order in place of an AVX2 loop. See `restore_sample` for the
 /// critical-path analysis.
 #[inline(always)]
 unsafe fn lpc_restore_fast<const ORDER: usize>(buf: *mut i32, res: *const i32, n: usize, c: *const i32, shift: i32) {
@@ -461,7 +461,7 @@ pub fn fixed_predictor_restore(warmup: &[i32], residuals: &[i32], order: usize) 
 ///
 /// `buf[offset..offset+order]` must contain warmup samples and
 /// `buf[offset+order..offset+block_size]` the residuals. Converts in-place,
-/// left-to-right. Eliminates the output-Vec allocation of `fixed_predictor_restore`.
+/// left-to-right. Unlike `fixed_predictor_restore`, it allocates no output Vec.
 pub(crate) fn fixed_predictor_restore_into(
     buf: &mut [i32],
     offset: usize,
@@ -620,10 +620,9 @@ unsafe fn lpc_restore_fast_into<const ORDER: usize>(buf: *mut i32, n: usize, c: 
 
 /// Find the best fixed predictor order for given samples.
 ///
-/// Replaces 5 separate O(N) passes (each with integer multiplications) with a single
-/// O(N) pass using running finite differences. Orders 1-4 correspond to successive
-/// differences, so all 5 energies accumulate simultaneously with 4 running state
-/// variables and only wrapping_sub + unsigned_abs — no multiplications.
+/// Makes a single O(N) pass using running finite differences. Orders 1-4 correspond to
+/// successive differences, so all 5 energies accumulate simultaneously with 4 running
+/// state variables and only wrapping_sub + unsigned_abs — no multiplications.
 ///
 /// The first 4 iterations are peeled to warm up the state without branch guards in
 /// the hot inner loop.
@@ -1075,7 +1074,7 @@ pub fn lpc_predictor_residual(samples: &[i32], qlp_coeffs: &[i32], qlp_shift: i8
     let mut residuals = Vec::with_capacity(n_out);
 
     // AVX2 path: 4-wide lpc_residuals4::<ORDER> processes 4 residuals per iteration,
-    // eliminating the hsum4 horizontal reduction that made the 1-wide version show no gain.
+    // with no hsum4 horizontal reduction on the critical path.
     // ORDER is a const generic so the inner j-loop is unrolled and inlined by LLVM.
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") {
@@ -1512,7 +1511,7 @@ pub fn find_best_lpc_order(
         }
         return find_best_from_orders(qlp_precision, &r, &ld, &arr[..max_order]);
     } else {
-        // Candidate orders (subset): original non-exhaustive heuristic
+        // Candidate orders (subset) for the non-exhaustive search
         match max_order {
             0 => return Ok((0, vec![], 0)),
             1 => &[1][..],
@@ -1710,7 +1709,7 @@ mod tests {
         // Restore samples
         let restored = lpc_predictor_restore(&samples[..order], &residuals, &qlp_coeffs, qlp_shift).unwrap();
 
-        // Should match original
+        // Should match the input
         assert_eq!(restored, samples);
     }
 

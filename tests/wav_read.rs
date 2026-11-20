@@ -1,8 +1,7 @@
 /// WAV read tests — two layers:
-///   1. hound → ours: hound writes known-value fixtures, we read and assert exact values.
-///   2. ours → ours: we write a fixture, read it back, assert exact values.
-///
-/// Using hound as the fixture generator cross-validates against the de-facto WAV reference.
+///   1. hound → this crate: hound, a dev-dependency, writes known-value fixtures, which are
+///      read here and checked for exact values.
+///   2. this crate → this crate: a fixture is written, read back and checked for exact values.
 #[cfg(feature = "wav")]
 mod wav_read {
     use std::path::Path;

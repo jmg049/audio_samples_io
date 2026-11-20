@@ -1,8 +1,7 @@
 /// WAV write tests — two layers:
-///   1. ours → hound: we write, hound reads back and asserts exact values.
-///   2. ours → ours: roundtrip with exact value comparison.
-///
-/// Cross-reading with hound validates that our output is spec-compliant.
+///   1. this crate → hound: files written here are read back by hound, a dev-dependency,
+///      and checked for exact values.
+///   2. this crate → this crate: roundtrip with exact value comparison.
 #[cfg(feature = "wav")]
 mod wav_write {
     use std::io::Cursor;
@@ -288,9 +287,8 @@ mod wav_write {
         use audio_samples::SampleType;
         use audio_samples_io::traits::AudioFileMetadata;
 
-        // Our crate writes f32 > 2ch as WAVEFORMATEXTENSIBLE.
-        // This test guards against the bug where the sub-format GUID was parsed
-        // at the wrong byte offset (valid-bits field instead of GUID data).
+        // f32 with more than two channels is written as WAVEFORMATEXTENSIBLE. The sample
+        // type must come from the sub-format GUID, not from the valid-bits field.
         let path = temp_path("ext_f32_type");
         let sr = sample_rate!(44100);
 

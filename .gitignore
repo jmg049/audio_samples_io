@@ -2,3 +2,4 @@
 *.lock
 benches/C/target
 benches/C/bench_flac
+__pycache__/

@@ -433,9 +433,7 @@ mod tests {
         // Verify table is correctly generated
         // First entry should be 0 (CRC of 0x00 XOR'd with CRC 0 = 0)
         assert_eq!(CRC8_TABLE[0], 0);
-        // Entry 1 should be polynomial (0x07) since MSB of 0x01 << 7 is 0
-        // Actually for i=1: initial = 0x01, after 8 shifts with poly 0x07
-        // Let's verify by manual calculation
+        // Entry 1 is 0x01 after 8 shifts with poly 0x07, worked out by hand here
         let mut crc: u8 = 0x01;
         for _ in 0..8 {
             if crc & 0x80 != 0 {

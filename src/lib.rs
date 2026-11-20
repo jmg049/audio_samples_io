@@ -88,9 +88,9 @@ impl<WS> WriteSeek for WS where WS: Write + Seek {}
 
 /// Peek at the native sample type of an audio file with minimal I/O.
 ///
-/// Uses a small buffered read (one syscall for the first 64 KB covers any WAV/FLAC header)
-/// instead of mmapping the entire file.  This is significantly cheaper than [`info`] when
-/// only the sample type is needed, such as when auto-detecting the read target type.
+/// Makes one small buffered read (the first 64 KB, which covers any WAV or FLAC header) and
+/// does not map the file. This is much cheaper than [`info`] when only the sample type is
+/// needed, such as when choosing the type to read into.
 pub fn peek_native_type<P: AsRef<Path>>(fp: P) -> AudioIOResult<ValidatedSampleType> {
     let path = fp.as_ref();
 
@@ -318,8 +318,9 @@ where
         FileType::WAV => {
             let file = File::open(path)?;
             let plan = stream_plan(&file);
-            // A standard buffered reader passes requests of its capacity and more straight through;
-            // the plan's large buffer applies where it never does that (off the disk on ext4 and xfs).
+            // A standard buffered reader passes requests of its capacity and more straight through,
+            // so the large buffer of the `StreamPlan` is used only where the plan never reads
+            // straight into the caller's memory (off the disk on ext4 and xfs).
             let capacity = if plan.direct_min == usize::MAX {
                 plan.buffer
             } else {
@@ -655,8 +656,8 @@ where
 /// destination is required. The output bit depth is derived from `T` (16-bit for `i16`,
 /// 24-bit otherwise), matching [`write`](fn@crate::write).
 ///
-/// FLAC's concrete return type can't be folded into [`create_streamed`] (which is
-/// WAV-only); this mirrors the [`open_streamed`]/[`open_streamed_flac`] split.
+/// [`create_streamed`] returns the format-agnostic [`StreamedAudioWriter`]; this function returns
+/// the concrete FLAC writer, as [`open_streamed_flac`] does for reading.
 ///
 /// # Example
 ///

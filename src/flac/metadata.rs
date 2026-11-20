@@ -722,7 +722,7 @@ pub enum MetadataBlock {
     Application { id: [u8; 4], data: Vec<u8> },
     SeekTable(SeekTable),
     VorbisComment(VorbisComment),
-    CueSheet(Vec<u8>), // Raw bytes for now
+    CueSheet(Vec<u8>), // Raw bytes, not parsed
     Picture(Picture),
     Unknown { block_type: u8, data: Vec<u8> },
 }

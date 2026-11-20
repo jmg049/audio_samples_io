@@ -189,8 +189,8 @@ pub fn decode_residual(
 /// Decode Rice-coded residuals into an existing buffer (zero-allocation path).
 ///
 /// Clears `out`, reserves capacity, then fills it in-place using the same
-/// unsafe pointer-write logic as `decode_residual`. Eliminates one heap
-/// allocation per subframe on the read path.
+/// unsafe pointer-write logic as `decode_residual`, so the read path makes no
+/// allocation per subframe once `out` has grown.
 pub fn decode_residual_into(
     reader: &mut BitReader,
     method: RiceMethod,
@@ -445,8 +445,8 @@ struct PartitionData {
 
 /// Stack-allocated result of `plan_residual_coding`.
 ///
-/// Replaces the `(u8, Vec<u8>)` return type, eliminating one heap allocation
-/// per call. Access the valid slice with `params_slice()`.
+/// Holds the parameters inline, so planning makes no heap allocation. Access the
+/// valid slice with `params_slice()`.
 /// `est_bits` is the estimated residual section bit count (includes per-partition
 /// param storage but not the method/partition-order fields).
 pub struct RicePlan {
@@ -528,7 +528,7 @@ pub fn plan_residual_coding(
     };
 
     // One pass: precompute per-leaf (finest granularity) zigzag sums and max_abs.
-    // Stack-allocated — eliminates a heap allocation per call.
+    // Stack-allocated, so no heap allocation per call.
     let mut leaf_buf = [PartitionData {
         sum_zigzag: 0,
         max_abs: 0,
@@ -688,7 +688,7 @@ pub fn encode_residual_planned(
     Ok(writer.bits_written() - start_bits)
 }
 
-/// Find the optimal partition order for encoding (kept for backward compat).
+/// Find the optimal partition order for encoding `residuals`.
 pub fn find_optimal_partition_order(
     residuals: &[i32],
     block_size: usize,
@@ -827,7 +827,7 @@ mod tests {
 #[test]
 fn test_rice_roundtrip_17bps_residuals() {
     use crate::flac::bitstream::{BitReader, BitWriter};
-    // First few residuals from the failing 17-bps Fixed(3) test
+    // Residuals of a 17-bit side channel under a Fixed(3) predictor.
     let residuals: Vec<i32> = vec![2, -3, 4, -5, 3, -1, 0, 0, 1, -2];
     let block_size = 10 + 3; // 3 warmup + 10 residuals
     let predictor_order = 3;

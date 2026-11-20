@@ -451,7 +451,7 @@ impl<'a> AudioFile for WavFile<'a> {
             chunks.push(ChunkDesc {
                 id,
                 offset,
-                logical_size: size,       // Original chunk size without padding
+                logical_size: size,       // Declared chunk size without padding
                 total_size: end - offset, // Header + data + padding for file positioning
             });
 
@@ -758,11 +758,8 @@ impl<'a> AudioFileRead<'a> for WavFile<'a> {
         }
 
         match self.sample_type {
-            ValidatedSampleType::U8 => read_into_typed_internal::<u8, T>(&data_chunk, audio), // technicaly not part
-            // of the wav spec,
-            // but it does not
-            // disallow it either,
-            // so we support it
+            // Unsigned 8-bit PCM is the WAV convention for 8-bit samples.
+            ValidatedSampleType::U8 => read_into_typed_internal::<u8, T>(&data_chunk, audio),
             ValidatedSampleType::I16 => read_into_typed_internal::<i16, T>(&data_chunk, audio),
             ValidatedSampleType::I24 => read_into_typed_internal::<I24, T>(&data_chunk, audio),
             ValidatedSampleType::I32 => read_into_typed_internal::<i32, T>(&data_chunk, audio),
@@ -801,13 +798,13 @@ where
             ));
         }
 
-        // Fix C: wrap the interleaved Vec directly as an F-order (column-major) Array2.
+        // Wrap the interleaved Vec directly as an F-order (column-major) Array2.
         // An F-order array with logical shape (channels, frames) stores data as
         // [s[0,0], s[1,0], s[0,1], s[1,1], …] — exactly WAV's interleaved layout.
         // This avoids the deinterleave allocation and scatter-write entirely.
         let arr = Array2::from_shape_vec(
             (num_channels.get() as usize, frames).f(),
-            interleaved_data.into_vec(), // Fix B: move, no copy
+            interleaved_data.into_vec(), // moved, not copied
         )
         .map_err(|e| AudioIOError::corrupted_data_simple("Array shape error", e.to_string()))?;
 
@@ -825,7 +822,8 @@ where
     let frame_bytes = bytes_per_sample * num_channels.get() as usize;
 
     // Decode only whole frames: a trailing partial frame (ragged data chunk, odd trailing byte,
-    // or a clamped streaming size) is dropped rather than rejected, matching ffmpeg/VLC behaviour.
+    // or a clamped streaming size) is dropped rather than rejected, so the complete frames remain
+    // readable.
     let usable = (data_chunk.len() / frame_bytes) * frame_bytes;
     let data_chunk = DataChunk::from_bytes(&data_chunk.as_bytes()[..usable]);
 
@@ -867,7 +865,7 @@ where
     let frame_bytes = bytes_per_sample * num_channels.get() as usize;
 
     // Decode only whole frames; drop a ragged trailing partial frame rather than rejecting the
-    // file, matching ffmpeg/VLC.
+    // file.
     let usable = (data_chunk.len() / frame_bytes) * frame_bytes;
     let data_chunk = DataChunk::from_bytes(&data_chunk.as_bytes()[..usable]);
 
@@ -1151,15 +1149,12 @@ where
     Ok(())
 }
 
-/// Read a PCM or float WAV file into memory without mapping it, on several threads when large.
-/// `None` when the file needs the general path: a compressed format, or anything unusual about
-/// it, which that path reports properly.
 /// Bytes read at once for a WAV header; more are read only for a longer header.
 #[cfg(any(unix, windows))]
 const HEADER_READ_BYTES: usize = 4096;
 
-/// A WAV header read with one positioned read where it fits in [`HEADER_READ_BYTES`]. Parsing it
-/// through a buffered reader instead took a read for every seek past a chunk.
+/// A WAV header read with one positioned read where it fits in [`HEADER_READ_BYTES`]. A buffered
+/// reader would read again for every seek past a chunk.
 #[cfg(any(unix, windows))]
 struct HeaderReader<'a> {
     file: &'a File,
@@ -1203,10 +1198,9 @@ impl Seek for HeaderReader<'_> {
 
 /// Open a WAV file for a whole-file read: its header, where its samples start, and the open file.
 ///
-/// The header comes from one read of its first 4 KiB. A buffered reader instead read again after
-/// every seek past a chunk, and each read moved the kernel's readahead: for files whose samples
-/// start at byte 88, cold reads were 0.7 to 1.4% slower on ext4 and xfs for files of 2 and 10 MiB
-/// (alike for samples at byte 44, and from 40 MiB).
+/// The header comes from one read of its first 4 KiB. A buffered reader would read again after
+/// every seek past a chunk, and each of those reads moves the kernel's readahead window, which
+/// makes cold reads slower.
 #[cfg(any(unix, windows))]
 pub(crate) fn open_wav_data(path: &Path) -> AudioIOResult<(BaseAudioInfo, u64, File)> {
     let file = File::open(path)?;
@@ -1270,6 +1264,9 @@ pub(crate) fn wav_header_of(file: &File, _len: u64) -> AudioIOResult<(BaseAudioI
     parse_wav_header_streaming(&mut reader)
 }
 
+/// Read a PCM or float WAV file into memory without mapping it, on several threads when large.
+/// `None` when the file needs the general path: a compressed format, or anything unusual about
+/// it, which that path reports properly.
 #[cfg(all(any(unix, windows), target_endian = "little"))]
 pub(crate) fn read_direct<T>(path: &Path) -> Option<AudioSamples<'static, T>>
 where

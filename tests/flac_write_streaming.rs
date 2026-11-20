@@ -2,9 +2,8 @@
 //! `StreamedFlacWriter`).
 //!
 //! These mirror the structure of `tests/wav_write.rs`: round-trip through the public API
-//! and check stream structure (sample rate, channels, sample count). FLAC content fidelity
-//! for non-trivial audio has known decoder caveats, so — like the existing FLAC roundtrip
-//! tests — these assert structure, not exact sample values.
+//! and check stream structure (sample rate, channels, sample count). Exact sample values
+//! are checked in `tests/flac_encode_lossless.rs`.
 
 #![cfg(feature = "flac")]
 

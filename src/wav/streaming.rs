@@ -1010,8 +1010,8 @@ where
     let threads = crate::fastio::threads_for_read(&permit, file, offset, out.len() * size);
     if threads <= 1 {
         let mut reader = crate::fastio::FileAt { file, offset };
-        // Off the disk on ext4 and xfs, reads of a few megabytes keep the kernel's requests large:
-        // 2 to 8% faster than 64 KiB reads. On btrfs they were 1.5% slower.
+        // Off the disk on ext4 and xfs, reads of a few megabytes keep the kernel's requests large,
+        // which is faster than 64 KiB reads. On btrfs they are slower, so it keeps small blocks.
         if std::mem::size_of::<T>() >= size
             && crate::fastio::file_system(file).is_ext4_or_xfs()
             && crate::fastio::range_is_cold(file, offset, out.len() * size)

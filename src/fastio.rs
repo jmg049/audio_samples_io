@@ -89,23 +89,18 @@ pub struct StreamPlan {
 /// The first read of a file in the page cache holds only the header: a caller that seeks or reads
 /// large blocks never touches the large buffer, which is allocated on its first refill.
 ///
-/// Measured in C over caller blocks of 1 KiB to 1 MiB and files of 0.5 to 106 MiB, against the
-/// faster of an 8 KiB buffer (wave) and reads of the caller's block (soundfile):
-/// - cached: a 256 KiB buffer took 0.83 to 0.92 times as long for blocks of 1 and 4 KiB, where
-///   for blocks of 16 KiB and more the copy through any buffer cost 1.2 to 1.8 times, so those go
-///   straight to the caller;
-/// - off the disk on ext4 and xfs, reads of 1 MiB took 0.93 to 0.98 times as long as reads of 8 to
-///   256 KiB, at every block size; for a 2 MiB file one read of the whole file took 0.90 to 0.96
-///   times as long as reads of the caller's block on xfs, where a 1 MiB buffer took 1.02 to 1.08
-///   times, and level with the 1 MiB buffer on ext4;
-/// - off the disk, files of 10 to 106 MiB: on ext4 reads of 4 MiB took 0.97 to 0.98 times as long
-///   as reads of 1 MiB at every block size, in three runs; on xfs reads of 1 MiB were 0.5 to 1.5%
-///   faster at 60 MiB, and at 10 MiB in two runs of three;
-/// - off the disk on btrfs, files of 512 KiB asked for whole took 0.86 to 0.90 times as long; from
-///   2 MiB a 64 KiB buffer was the fastest plan (0.987 to 0.995), and reads of 1 MiB or more 2 to 5%
-///   slower. In Python against soundfile, a 256 KiB first read lost 4 to 5% on a cold 1.76 MB file;
-/// - off the disk on ext4 and xfs, files of 86 KiB to 2 MiB streamed from Python in blocks of 4096
-///   frames: the plans measured for whole reads (see `whole_read_plan`) ranked the same way.
+/// The sizes were chosen by timing cold and cached streamed reads over a range of caller block
+/// sizes and file sizes on ext4, xfs and btrfs:
+/// - in the page cache, a buffer saves system calls for small caller blocks, but from 16 KiB the
+///   extra copy through a buffer costs more than the calls it saves, so those requests go straight
+///   to the caller;
+/// - off the disk on ext4 and xfs, larger reads cost less at every caller block size, and a small
+///   file taken in one read costs less than any buffered pattern. For large files, 4 MiB reads are
+///   slightly faster than 1 MiB reads on ext4, and 1 MiB reads are on xfs;
+/// - off the disk on btrfs, a small file asked for whole first is read faster, while for larger
+///   files a 64 KiB buffer is faster than reads of 1 MiB or more, and a large first read is slower;
+/// - small files streamed in blocks of 4096 frames rank the strategies the same way as whole reads
+///   do (see `whole_read_plan`).
 #[cfg(feature = "wav")]
 pub fn stream_plan(file: &File) -> StreamPlan {
     const KIB: usize = 1024;
@@ -126,7 +121,11 @@ pub fn stream_plan(file: &File) -> StreamPlan {
     }
     if fs.is_ext4_or_xfs() {
         // A file that a whole read takes in one read is taken the same way here.
-        let buffer = if whole.is_none() && fs == FileSystem::Ext4 { 4096 * KIB } else { 1024 * KIB };
+        let buffer = if whole.is_none() && fs == FileSystem::Ext4 {
+            4096 * KIB
+        } else {
+            1024 * KIB
+        };
         StreamPlan {
             first: if whole.is_some() { len as usize } else { buffer },
             buffer,
@@ -151,7 +150,7 @@ pub struct StreamReader<R> {
     buf: Vec<u8>,
     pos: usize,
     filled: usize,
-    /// Bytes of the next refill: the plan's first read, then the buffer.
+    /// Bytes of the next refill: the first read set by the [`StreamPlan`], then the buffer.
     next: usize,
     buffer: usize,
     direct_min: usize,
@@ -448,8 +447,9 @@ pub(crate) fn read_exact_at(mut file: &File, offset: u64, buf: &mut [u8]) -> io:
 }
 
 /// Whether a range of `file` must come from the device. Threads then only split one sequential
-/// stream into several, which reads 3 to 8% slower on a SATA SSD and worse on a hard disk, and the
-/// copy they speed up is a small part of the time. Linux tells, from 6.5; elsewhere, assume cached.
+/// stream into several, which an SSD reads more slowly than one stream and a hard disk much more
+/// slowly, and the copy they speed up is a small part of the time. Linux tells, from 6.5; elsewhere,
+/// assume cached.
 #[cfg(feature = "wav")]
 #[cfg(target_os = "linux")]
 pub(crate) fn range_is_cold(file: &File, offset: u64, len: usize) -> bool {
@@ -611,7 +611,7 @@ pub(crate) fn finish_overwrite(file: &mut File) -> io::Result<()> {
     Ok(())
 }
 
-/// Open `path` for a streamed write, whose length is unknown until it ends. The old contents
+/// Open `path` for a streamed write, whose length is unknown until it ends. The existing contents
 /// shrink to one byte instead of none: see [`open_for_overwrite`] for what zero costs, and every
 /// streamed format writes its header over that byte at once.
 #[cfg(any(feature = "wav", feature = "flac"))]
@@ -645,9 +645,8 @@ where
 {
     let size = U::BYTES as usize;
     // Two channels, whose values are their bytes in the file: a frame at a time, which the compiler
-    // turns into vector interleaving, for tiles and for conversions. A 2 MiB chunk of the file's own
-    // type packed on another thread made the save 4% slower this way than a channel at a time;
-    // converting, twice as fast.
+    // turns into vector interleaving, for tiles and for conversions. Converting this way is about
+    // twice as fast as a channel at a time.
     #[cfg(target_endian = "little")]
     if let [left, right] = runs
         && size == mem::size_of::<U>()
@@ -688,7 +687,7 @@ where
 /// header, is written in the same call as the first samples. Returns the number of sample bytes
 /// written. `file_offset` is where the samples start in the destination: each tile
 /// is placed a little above that offset within a page, which makes the kernel's copy into the
-/// page cache about 15% faster than when the source's page offset is the lower of the two.
+/// page cache faster than when the source's page offset is the lower of the two.
 #[cfg(any(feature = "wav", feature = "flac"))]
 pub(crate) fn write_interleaved_le<T, U, W>(
     writer: &mut W,
@@ -851,21 +850,21 @@ impl Drop for Scratch {
 }
 
 /// Bytes of samples from which [`write_packed_on_threads`] is used, for more than two channels, and
-/// for one or two on btrfs and other file systems. Against packing on the caller, on btrfs threads
-/// took 0.64 to 0.95 times as long from 2.6 MiB for every layout and conversion measured; on tmpfs,
-/// 0.47 times for six channels converted to float32 and 1.00 to 1.02 for six channels unconverted.
+/// for one or two on btrfs and other file systems. From about this size, packing on other threads
+/// while this one writes is faster than packing on the caller for every layout and conversion on
+/// btrfs, and for multichannel conversions on tmpfs.
 #[cfg(feature = "wav")]
 const PACKED_THREADS_MIN_BYTES: usize = 2 * 1024 * 1024;
 
 /// Bytes of samples from which [`write_packed_on_threads`] is used for one or two channels on ext4
-/// and xfs, whose writes cost little more than a copy. There, a stereo save of 3.5 MB took 1.31 to
-/// 1.37 times as long on threads, where one of 7 MB on xfs took 0.95 times.
+/// and xfs, whose writes cost little more than a copy. Below this, handing a stereo pack to other
+/// threads costs more than it saves.
 #[cfg(feature = "wav")]
 const PACKED_THREADS_STEREO_DISK_MIN_BYTES: usize = 6 * 1024 * 1024;
 
-/// Most bytes packed and written at a time by [`write_packed_on_threads`]. On btrfs one write of
-/// 2 MiB cost 0.96 times as much per byte as a single write of the whole file, and of 64 KiB 1.26
-/// times. Smaller saves use an eighth of their size, from [`PACKED_CHUNK_MIN_BYTES`], so that the
+/// Most bytes packed and written at a time by [`write_packed_on_threads`]. Writes of this size cost
+/// about as much per byte as one write of the whole file, where much smaller writes cost noticeably
+/// more. Smaller saves use an eighth of their size, from [`PACKED_CHUNK_MIN_BYTES`], so that the
 /// ring stays small next to the file.
 #[cfg(feature = "wav")]
 const PACKED_CHUNK_BYTES: usize = 2 * 1024 * 1024;
@@ -913,8 +912,8 @@ where
         return Ok(false);
     }
     if channels <= 2 {
-        // A stereo pack is cheap next to the write except on btrfs: on tmpfs threads took 1.14 to
-        // 1.55 times as long below the mapping's size, whatever the type.
+        // A stereo pack is cheap next to the write except on btrfs: on tmpfs threads are slower
+        // below the mapping's size, whatever the type.
         let least = match file_system(file) {
             FileSystem::Ext4 | FileSystem::Xfs => PACKED_THREADS_STEREO_DISK_MIN_BYTES,
             // Larger saves there go through a mapping.
@@ -1159,21 +1158,20 @@ where
     }
 }
 
-/// Bytes of samples from which [`write_samples_mapped`] is used on tmpfs: at 7 MiB it was level
-/// with one write.
+/// Bytes of samples from which [`write_samples_mapped`] is used on tmpfs: below it, the mapping is
+/// no faster than one write.
 #[cfg(feature = "wav")]
 #[cfg(target_os = "linux")]
 const MAPPED_MIN_BYTES: usize = 8 * 1024 * 1024;
 
-/// Bytes of samples from which [`write_samples_mapped`] is used on ext4: at 4 MiB it took 1.06 times
-/// as long as one write, at 7 MiB 0.79 times, and a 6.7 MiB save 0.80 times as long as one write did.
+/// Bytes of samples from which [`write_samples_mapped`] is used on ext4: below it, the mapping is
+/// no faster than one write, and above it the mapping is clearly faster.
 #[cfg(feature = "wav")]
 #[cfg(target_os = "linux")]
 const MAPPED_EXT4_MIN_BYTES: usize = 6 * 1024 * 1024;
 
-/// Bytes of samples from which [`write_samples_mapped`] is used on xfs, where a 6.7 MiB save took
-/// 1.09 times and a 10 MiB save 0.95 times as long as one write did, and saves of 20 MiB and more
-/// 0.74 to 0.83 times.
+/// Bytes of samples from which [`write_samples_mapped`] is used on xfs, where the mapping is slower
+/// than one write for smaller saves and clearly faster for larger ones.
 #[cfg(feature = "wav")]
 #[cfg(target_os = "linux")]
 const MAPPED_XFS_MIN_BYTES: usize = 16 * 1024 * 1024;
@@ -1241,23 +1239,19 @@ pub(crate) const fn file_system(_file: &File) -> FileSystem {
 /// 4 KiB read starts it at 16 KiB and it grows (64 KiB, 240 KiB) before reaching the device's
 /// largest request, one round trip each, where a read of 2 MiB or more starts at the largest
 /// request, as a whole read does; 2 MiB bounds what is copied when the samples are not aligned for
-/// their type. Elsewhere a larger file starts with 4 KiB, since a first read of 1 MiB made cold reads
-/// of 3.5 to 10 MB files on btrfs 0.6 to 3% slower. The third value says whether the file is off
-/// the disk.
+/// their type. Elsewhere a larger file starts with 4 KiB, since on btrfs a large first read makes
+/// cold reads of mid-sized files slower. The third value says whether the file is off the disk.
 ///
-/// Measured over six to ten files per size, against a header read followed by a read of the samples:
-/// - ext4 and xfs up to 1 MiB: asking first and reading whole took 0.86 to 0.94 times as long; at 1
-///   and 1.1 MiB of samples, 0.965 to 0.98 times as long as one whole read, and level from 1.25 MiB,
-///   so files up to 1.2 MiB are asked for whole;
-/// - ext4 and xfs from 1.5 to 5 MiB: one read of the whole file took 0.95 to 0.998 times as long as
-///   4 KiB followed by the rest, and 0.96 to 0.998 times as long as the reads soundfile makes;
-/// - btrfs at 512 KiB: asking first and reading whole took 0.92 times as long, but from 1 MiB both
-///   were level or slower, up to 1.09 times at 4 MiB; files up to 768 KiB are asked for whole;
-/// - ext4 and xfs from 86 KiB to 2 MiB, from Python, each plan taking turns with the other libraries
-///   and reading its own copy: a first read of 16 KiB took 1.004 to 1.55 times as long, one of
-///   128 KiB 1.015 to 1.23 times from 345 KiB and level below it, a whole read without asking first
-///   1.02 to 1.06 times up to 172 KiB and level above it, and asking first from 1.2 MiB 1.015 to
-///   1.02 times; none was faster beyond the up to 4% by which two entries of the same plan differed.
+/// The thresholds were chosen by timing cold reads of files of many sizes on ext4, xfs and btrfs,
+/// against a header read followed by a read of the samples:
+/// - on ext4 and xfs, asking for a small file whole and then reading it whole is faster; the gain
+///   shrinks with size and is gone by about 1.25 MiB, so files up to 1.2 MiB are asked for whole;
+/// - on ext4 and xfs, one read of the whole file is faster than a header read followed by the rest
+///   for files of a few MiB;
+/// - on btrfs, asking first pays for files of about 512 KiB and costs time from about 1 MiB, so
+///   files up to 768 KiB are asked for whole;
+/// - the same choices timed through the Python bindings rank the same way: smaller first reads, and
+///   asking first for larger files, are slower or level, never faster.
 #[cfg(all(feature = "wav", feature = "numpy"))]
 pub(crate) fn whole_read_plan(file: &File, len: u64) -> (usize, bool, bool) {
     const HEADER: u64 = 4096;
@@ -1317,12 +1311,13 @@ enum MappedFill {
 /// nothing is written that counts, the position is unchanged, and the ordinary write is left to
 /// report what is wrong.
 ///
-/// On tmpfs a write runs on one thread at a time and takes 20 to 60% longer; each thread populates
-/// its pages before touching them, so a full filesystem is an error here and not a signal. On ext4
-/// and xfs the file's blocks are allocated first, so the threads only copy into the page cache: a
-/// write of 10 to 100 MiB takes 1.3 to 1.8 times as long, and reaching the disk takes about as long. The
-/// file must hold no more than its header there, since a page of old data would be read in before
-/// being overwritten. Only another process truncating the file during the write can raise a signal.
+/// On tmpfs an ordinary write runs on one thread at a time, so filling a mapping from several
+/// threads is faster; each thread populates its pages before touching them, so a full filesystem is
+/// an error here and not a signal. On ext4 and xfs the file's blocks are allocated first, so the
+/// threads only copy into the page cache, which for large files is faster than one write call;
+/// writeback to the disk then costs what it would after any write. The file must hold no more than
+/// its header there, since a page of existing data would be read in before being overwritten. Only
+/// another process truncating the file during the write can raise a signal.
 #[cfg(feature = "wav")]
 #[cfg(target_os = "linux")]
 pub(crate) fn write_samples_mapped<T, U>(

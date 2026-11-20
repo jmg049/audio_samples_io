@@ -157,7 +157,7 @@ fn large_flac_decodes_the_same_on_several_threads() {
 }
 
 /// Large saves on tmpfs go through a mapping: bytes and position must match an ordinary save, for
-/// interleaved and planar memory, a new file and a longer old one.
+/// interleaved and planar memory, a new file and a longer existing one.
 #[cfg(target_os = "linux")]
 #[test]
 fn tmpfs_mapped_save_matches_plain_save() {
@@ -256,7 +256,7 @@ fn streamed_reader_from_a_filled_buffer() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// The planned stream reader returns the source's bytes in order whether requests go through its
+/// A `StreamReader` returns the source's bytes in order whether requests go through its
 /// buffer or straight past it, and seeks relative to what the caller has read.
 #[test]
 fn stream_reader_reads_and_seeks_like_its_source() {
@@ -284,8 +284,8 @@ fn stream_reader_reads_and_seeks_like_its_source() {
     assert!(rest == data[150_000..]);
 }
 
-/// A plan with a short first read gives the header's bytes from that read and the rest through refills
-/// of the whole buffer, in order, as the source holds them.
+/// A `StreamPlan` with a short first read gives the header's bytes from that read and the rest
+/// through refills of the whole buffer, in order, as the source holds them.
 #[test]
 fn stream_reader_with_a_short_first_read() {
     use std::io::{BufRead, Cursor, Read, Seek, SeekFrom};
@@ -314,8 +314,8 @@ fn stream_reader_with_a_short_first_read() {
     assert!(rest == data[123_457..]);
 }
 
-/// A first read longer than the buffer takes all of it at once, as a plan for a small file asks; the
-/// refills after it are of the buffer.
+/// A first read longer than the buffer takes all of it at once, as the `StreamPlan` of a small
+/// file asks; the refills after it are of the buffer.
 #[test]
 fn stream_reader_with_a_first_read_longer_than_the_buffer() {
     use std::io::{BufRead, Cursor, Read};

@@ -24,11 +24,11 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - `DEFAULT_WRITE_BUF_CAPACITY` is 256 bytes, enough for a header. Samples go straight to the destination, or through a 64 KiB stack buffer when their memory is not the file's layout.
 - FLAC: files carry the MD5 signature of the audio. `write_flac_without_md5` leaves it out.
-- FLAC: levels use the conventional block sizes, LPC orders and partition ranges, and `qlp_precision` follows the block size, so levels 2 and 3 produce different frames. The encoder uses windowed LPC analysis, and output is within 0.2% of the reference encoder on real music at each level.
+- FLAC: levels use the conventional block sizes, LPC orders and partition ranges, and `qlp_precision` follows the block size, so levels 2 and 3 produce different frames. The encoder uses windowed LPC analysis, and output sizes are close to the reference encoder's at each level.
 - FLAC: with `flac-parallel`, `write_flac` encodes whole frames in parallel instead of subframes.
-- Writes to a path no longer truncate an existing file first; they overwrite it and cut it to length, which keeps its pages and avoids the flush btrfs does when a file truncated to zero is closed. Streamed writes shrink the old file to one byte for the same reason.
-- WAV saves of 8 MiB or more on tmpfs fill the file through a mapping from up to 8 threads, 18 to 40% faster than one `write`. Pages are populated first, so a full filesystem returns the usual error.
-- Whole-file FLAC reads use positioned reads through small windows instead of a mapping, about 5% faster with 70% fewer pages beyond the output.
+- Writes to a path no longer truncate an existing file first; they overwrite it and cut it to length, which keeps its pages and avoids the flush btrfs does when a file truncated to zero is closed. Streamed writes shrink the existing file to one byte for the same reason.
+- WAV saves of 8 MiB or more on tmpfs fill the file through a mapping from up to 8 threads, which is faster than one `write`. Pages are populated first, so a full filesystem returns the usual error.
+- Whole-file FLAC reads use positioned reads through small windows instead of a mapping, which is faster and keeps far fewer pages resident beyond the output.
 - Reads of 1.5 MiB or more that are in the page cache use up to 8 short-lived threads, since threads slow a read from the device, and FLAC files of 512 KiB or more decode on up to 8. Whole-file FLAC writes work out the MD5 on one extra thread. They follow the process's CPU affinity; `AUDIO_SAMPLES_IO_THREADS` sets the limit, and `1` keeps all work on the calling thread. Only one such transfer runs at a time.
 - Rust `read()` of WAV reads into memory directly for every sample type instead of mapping the file.
 - Integer to float conversion uses AVX2 where available, with the same values as `ConvertFrom`. 24-bit samples pack and unpack with SSSE3.
