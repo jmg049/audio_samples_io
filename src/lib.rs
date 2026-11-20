@@ -1,3 +1,80 @@
+//! Audio file reading, writing and streaming for [`audio_samples`].
+//!
+//! Reads return an [`AudioSamples<T>`](audio_samples::AudioSamples) at the sample type
+//! you ask for, and writes take one. WAV (including RF64/BW64), FLAC and AIFF/AIFF-C
+//! are supported, each behind a Cargo feature. Read paths detect the container from
+//! the file's magic bytes and fall back to the extension.
+//!
+//! ```no_run
+//! use std::time::Duration;
+//!
+//! use audio_samples::{AudioSamples, sample_rate, sine_wave};
+//!
+//! # fn main() -> audio_samples_io::AudioIOResult<()> {
+//! let tone: AudioSamples<f32> =
+//!     sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(44100), 1.0);
+//! audio_samples_io::write("tone.wav", &tone)?;
+//! let back: AudioSamples<f32> = audio_samples_io::read("tone.wav")?;
+//! assert_eq!(back.sample_rate(), tone.sample_rate());
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Features
+//!
+//! The default features are `wav`. Without any format feature the crate still builds
+//! [`error`], [`traits`], [`types`], [`info()`], [`read()`], [`write()`] and the other
+//! format-agnostic functions, which return an error for a format that is not
+//! compiled in. Each feature adds the items listed next to it; a name is a link when
+//! this documentation was built with its feature, and plain text otherwise.
+//!
+//! | Feature | Adds |
+//! |---|---|
+#![cfg_attr(
+    feature = "wav",
+    doc = r#" | `wav` | [`wav`]; [`open_streamed`], [`create_streamed_writer`] and the other WAV functions |"#
+)]
+#![cfg_attr(
+    not(feature = "wav"),
+    doc = r#" | `wav` | `wav`; `open_streamed`, `create_streamed_writer` and the other WAV functions |"#
+)]
+#![cfg_attr(
+    feature = "flac",
+    doc = r#" | `flac` | [`flac`]; [`open_streamed_flac`], [`create_streamed_flac`] and the other FLAC functions |"#
+)]
+#![cfg_attr(
+    not(feature = "flac"),
+    doc = r#" | `flac` | `flac`; `open_streamed_flac`, `create_streamed_flac` and the other FLAC functions |"#
+)]
+#![cfg_attr(feature = "aiff", doc = r#" | `aiff` | [`aiff`] |"#)]
+#![cfg_attr(not(feature = "aiff"), doc = r#" | `aiff` | `aiff` |"#)]
+#![cfg_attr(
+    any(feature = "wav", feature = "flac"),
+    doc = r#" | `wav` or `flac` | [`streaming`]; [`open_streamed_dyn`], [`create_streamed`] |"#
+)]
+#![cfg_attr(
+    not(any(feature = "wav", feature = "flac")),
+    doc = r#" | `wav` or `flac` | `streaming`; `open_streamed_dyn`, `create_streamed` |"#
+)]
+#![cfg_attr(
+    feature = "resampling",
+    doc = r#" | `resampling` | [`read_and_resample`], [`resample`], [`ResamplingQuality`] |"#
+)]
+#![cfg_attr(
+    not(feature = "resampling"),
+    doc = r#" | `resampling` | `read_and_resample`, `resample`, `ResamplingQuality` |"#
+)]
+#![cfg_attr(feature = "numpy", doc = r#" | `numpy` | [`python`]; [`read_pyarray`] |"#)]
+#![cfg_attr(not(feature = "numpy"), doc = r#" | `numpy` | `python`; `read_pyarray` |"#)]
+//! | `full` | `wav`, `flac`, `aiff`, `flac-parallel` and `colored` |
+//! | `flac-parallel` | FLAC frames encoded on rayon's global thread pool |
+//! | `colored` | Coloured `Display` output for [`BaseAudioInfo`] |
+//! | `simd` | The `simd` feature of `audio_samples` |
+//! | `benchmark_reporting` | The `benchmark_reporter` binary |
+//!
+//! In a checkout of the repository, `cargo docs` builds and opens the documentation
+//! with every feature (an alias defined in `.cargo/config.toml`).
+
 pub mod error;
 pub mod traits;
 pub mod types;
