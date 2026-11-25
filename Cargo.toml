@@ -1,6 +1,6 @@
 [package]
 name = "audio_samples_io"
-version = "0.3.3"
+version = "0.4.0"
 edition = "2024"
 authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
 license = "MIT"
@@ -30,7 +30,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-audio_samples = "2.0.1"
+audio_samples = "3.0.0"
 colored = { version = "3.0.0", optional = true }
 memmap2 = "0.9.11"
 thiserror = "2.0.18"
@@ -51,7 +51,7 @@ rayon = { version = "1", optional = true }
 libc = "0.2"
 
 [dev-dependencies]
-audio_samples = { version = "2.0.1", features = ["editing", "resampling"] }
+audio_samples = { version = "3.0.0", features = ["editing", "resampling"] }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 hound = "3.5.0"
 symphonia = { version = "0.6", default-features = false, features = ["flac"] }

@@ -2,7 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## 0.4.0
+
+Requires audio_samples 3.0. `read_frames_into` and `read_into` reject a buffer
+whose channel count or sample rate differs from the file's (see *Fixed*).
 
 ### Fixed
 - `read_frames_into` (WAV, FLAC and AIFF, seekable and forward-only) and `read_into` accept a one-channel buffer made with `zeros_multi`, so the documented streaming pattern `zeros_multi(channels, block, sample_rate)` works for mono files; they returned an error. The buffer keeps its layout.
