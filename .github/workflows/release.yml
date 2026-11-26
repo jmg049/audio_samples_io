@@ -65,19 +65,9 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-    defaults:
-      run:
-        working-directory: audio_samples_io
     steps:
-      # Cargo.toml patches audio_samples to a sibling checkout.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          path: audio_samples_io
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: jmg049/audio_samples
-          path: audio_samples
           persist-credentials: false
       - name: Install Rust
         run: |
@@ -91,19 +81,9 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-    defaults:
-      run:
-        working-directory: audio_samples_io
     steps:
-      # Cargo.toml patches audio_samples to a sibling checkout.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          path: audio_samples_io
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: jmg049/audio_samples
-          path: audio_samples
           persist-credentials: false
       - name: Install Rust
         run: |
@@ -123,19 +103,9 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    defaults:
-      run:
-        working-directory: audio_samples_io
     steps:
-      # Cargo.toml patches audio_samples to a sibling checkout.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          path: audio_samples_io
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: jmg049/audio_samples
-          path: audio_samples
           persist-credentials: false
       - name: Install Rust
         run: |
