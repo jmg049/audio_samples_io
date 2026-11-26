@@ -1,3 +1,6 @@
+# Major versions of the crates whose types cross into audio_samples or
+# audio_samples_python are not proposed: they have to move in all the
+# repositories at once.
 version: 2
 updates:
   - package-ecosystem: "cargo"
@@ -9,15 +12,15 @@ updates:
     groups:
       cargo-minor-and-patch:
         update-types: ["minor", "patch"]
-  - package-ecosystem: "pip"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    cooldown:
-      default-days: 7
-    groups:
-      pip-minor-and-patch:
-        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "non-empty-slice"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "non-empty-iter"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "pyo3"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "numpy"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
