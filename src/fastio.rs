@@ -732,6 +732,10 @@ where
     const ABOVE: usize = 64;
     #[repr(align(4096))]
     struct Tile([mem::MaybeUninit<u8>; TILE_BYTES + PAGE + ABOVE]);
+    #[allow(
+        clippy::large_stack_arrays,
+        reason = "a 68 KiB page-aligned tile keeps the write path free of heap allocation"
+    )]
     let mut stack = Tile([mem::MaybeUninit::uninit(); TILE_BYTES + PAGE + ABOVE]);
     // A frame larger than the stack buffer is only possible with over a thousand channels.
     let mut heap: Vec<u8> = Vec::new();
